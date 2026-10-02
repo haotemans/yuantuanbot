@@ -56,9 +56,11 @@
 群聊上下文                            工作上下文
     └──────────────────┬──────────────────┘
                        |
+            Prefilter（本地规则预筛）
+                       |
                 Decision 小脑
                        |
-                     LLM
+                LLM（API接入）
                        |
                 Rust Runtime Kernel
 ```
@@ -501,6 +503,10 @@ gcc失败三次
 - 用户文件
 - 项目资料
 
+说明：
+
+第一版为可插拔组件，默认关闭。开启时 embedding 与向量检索以扩展方式接入（见十五章部署形态），不改变其余系统的零外部依赖特性。
+
 流程：
 
 ```text
@@ -582,7 +588,7 @@ Memory更新
 统一：
 
 ```text
-Event Bus
+Event Bus（进程内 channel）
 ```
 
 ---
@@ -628,6 +634,10 @@ Event Bus
 
 不是生成语言。
 
+模型通过 API 接入（见十五章），与聊天生成共用同一个 LLM Provider 层，绑定便宜快速的模型角色。Decision 本质是分类器，不是对话者。
+
+输入消息先经 Runtime 本地 Prefilter 预筛（@检测、回复检测、发言节流、静默规则），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。
+
 职责：
 
 - 是否回复
@@ -648,6 +658,8 @@ Event Bus
   "tool": "coding"
 }
 ```
+
+输出经 Schema 校验：校验失败带错误信息重试一次；再失败兜底为"不行动"并记录事件。可靠性由 Runtime 工程手段保障，不依赖模型自觉。
 
 ---
 
@@ -699,18 +711,65 @@ Rust。
 - 并发
 - 长时间运行
 - 权限控制
+- 资源占用小（2C2G 服务器可常驻）
+
+## 模型接入（LLM Provider）
+
+所有模型能力通过 API 接入，本地不做任何推理。
+
+Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时消费两个模型角色：
+
+| 角色 | 用途 | 模型要求 | 输出 |
+| --- | --- | --- | --- |
+| bot_chat | Bot 人格回复 | 中高档模型 | 自然语言 |
+| decision | Decision 小脑 | 便宜快速模型 | 固定 JSON Schema |
+
+原则：
+
+- 角色与具体模型解耦，在配置中绑定（providers.toml）
+- 换模型只改配置，不改代码
+- LLM API 是系统唯一的重型外部依赖
+
+## 部署形态（2C2G 小鸡友好）
+
+目标：
+
+单进程、单二进制、零外部服务依赖；2核2G 服务器以 300MB 以内内存常驻运行。
+
+选型：
+
+- SQLite（WAL 模式）内嵌数据库，无独立数据库服务
+- 向量检索使用 sqlite-vec 扩展（随 Knowledge Base 一同可插拔，默认关闭）
+- Event Bus 为进程内 channel（tokio broadcast / mpsc），不依赖 Redis / MQ
+- WebUI 静态资源嵌入同一二进制
+- 日志 / trace 文件轮转并设上限
+
+不内置：
+
+- 本地 LLM / 本地 embedding
+- 无头浏览器（网页抓取走 HTTP + 正文解析）
+- 重型代码沙箱（代码执行类工具默认关闭，后续评估远程沙箱 API）
+
+交付：
+
+- musl 静态编译单二进制
+- install.sh + systemd unit
+- config 热重载（改配置不重启）
+
+升级到大服务器只是解锁更重能力，不是架构迁移。
 
 ## 数据库
 
 初期：
 
-SQLite
+- SQLite（WAL）
+- sqlite-vec（向量检索，可选）
 
-后期：
+后期（可选解锁）：
 
 - PostgreSQL
 - Redis
-- Vector DB
+- 独立 Vector DB
 - Object Storage
 
 ## WebUI
@@ -755,8 +814,9 @@ SQLite
 - Relationship Graph
 - Task生命周期
 - Tool Registry
-- LLM Provider
+- LLM Provider（角色路由）
 - Decision输入输出Schema
+- Prefilter规则集
 - Trace / Archive
 - QQ / Telegram适配层
 - WebUI API
@@ -766,3 +826,10 @@ SQLite
 本文作为云团 V0.1 架构基线。
 
 后续实现围绕此架构演进。
+
+---
+
+# 修订记录
+
+- 2026-10-02 V0.1：架构基线建立。
+- 2026-10-02：补充模型接入设计（LLM + Decision 双角色走 Provider API，其余零外部依赖）、Decision 前置本地 Prefilter、2C2G 部署形态原则。
