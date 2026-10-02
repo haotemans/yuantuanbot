@@ -1,6 +1,8 @@
 //! 配置 API：GET 结构化 JSON（敏感键递归掩码；provider key 走环境变量、原文永不出环境）、
-//! POST 整体写回（写前校验 TOML 能解析回原结构）→ 组件级热应用：
-//! LLM Provider 整体重建换槽、prefilter 阈值生效；其余组件 TODO（adapter/webui 端口等重启生效）。
+//! POST 整体写回（写前校验 TOML 能解析回原结构）→ 逐节热应用：
+//! providers→LLM Provider 整体重建换槽；prefilter 阈值+成本闸 / reply 回复形态 / context 预算 /
+//! meme 偷表情包开关 → 各共享槽换值；consolidation → 取消旧定时器按新配置重建；
+//! napcat/webui/data/log 为槽外组件 → requires_restart 名单。响应 {ok, applied, requires_restart}。
 //! 热应用完成后发 ConfigReloaded 事件（/ws 实时推送用）。
 
 use crate::AppState;
@@ -80,26 +82,103 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "config/providers 至少给一个" }))));
     }
     let mut applied: Vec<String> = Vec::new();
+    let mut requires_restart: Vec<String> = Vec::new();
 
-    // config.toml 写回：序列化后必须能解析回原结构（prefilter 阈值取自它）
+    // config.toml 写回：序列化后必须能解析回原结构；随后逐节热应用（仅对文件中实际存在的节）
     if let Some(cfg) = &body.config {
         let toml_text = to_toml_text(cfg)?;
-        // 回读校验：结构须完整含 [prefilter]（缺失则补采用默认），解析失败即拒
         let back: toml::Value = toml::from_str(&toml_text)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("config TOML 回读解析失败: {e}") }))))?;
         std::fs::write(&state.extras.config_path, &toml_text)
             .map_err(|e| err(&format!("写 config.toml 失败: {e}")))?;
-        let pf = back.get("prefilter");
-        let mut slot = state.extras.prefilter_slot.write().unwrap();
-        if let Some(pf) = pf {
-            if let Some(w) = pf.get("window_secs").and_then(|v| v.as_integer()) {
-                slot.window_secs = w;
-            }
-            if let Some(c) = pf.get("self_msg_cap").and_then(|v| v.as_integer()) {
-                slot.self_msg_cap = c;
+
+        // [prefilter] → 阈值 + 成本闸换槽（管线每消息读槽）
+        if let Some(pf) = back.get("prefilter") {
+            let d = yuantuan_core::prefilter::Config::default();
+            let mut slot = state.extras.prefilter_slot.write().unwrap();
+            slot.window_secs = pf.get("window_secs").and_then(|v| v.as_integer()).unwrap_or(d.window_secs);
+            slot.self_msg_cap = pf.get("self_msg_cap").and_then(|v| v.as_integer()).unwrap_or(d.self_msg_cap);
+            slot.decision_cost_per_min = pf.get("decision_cost_per_min").and_then(|v| v.as_integer()).unwrap_or(d.decision_cost_per_min);
+            applied.push("prefilter 节流阈值+成本闸热应用".into());
+        }
+
+        // [reply] → 回复形态参数换槽（引擎每泡读槽）
+        if let Some(rp) = back.get("reply") {
+            let d = yuantuan_core::reply_engine::ReplyCfg::default();
+            let mut slot = state.extras.reply_slot.write().unwrap();
+            slot.first_delay_min_ms = as_u64(rp, "first_delay_min_ms").unwrap_or(d.first_delay_min_ms);
+            slot.first_delay_max_ms = as_u64(rp, "first_delay_max_ms").unwrap_or(d.first_delay_max_ms);
+            slot.base_delay_ms = as_u64(rp, "base_delay_ms").unwrap_or(d.base_delay_ms);
+            slot.per_char_ms = as_u64(rp, "per_char_ms").unwrap_or(d.per_char_ms);
+            slot.jitter_ratio = rp.get("jitter_ratio").and_then(|v| v.as_float()).unwrap_or(d.jitter_ratio);
+            slot.min_delay_ms = as_u64(rp, "min_delay_ms").unwrap_or(d.min_delay_ms);
+            slot.max_delay_ms = as_u64(rp, "max_delay_ms").unwrap_or(d.max_delay_ms);
+            slot.total_budget_ms = as_u64(rp, "total_budget_ms").unwrap_or(d.total_budget_ms);
+            slot.bubble_cap = as_u64(rp, "bubble_cap").map(|n| n as usize).unwrap_or(d.bubble_cap);
+            slot.bubble_char_cap = as_u64(rp, "bubble_char_cap").map(|n| n as usize).unwrap_or(d.bubble_char_cap);
+            applied.push("reply 回复形态参数热应用".into());
+        }
+
+        // [context] → 上下文预算换槽（组 Bot Context 每消息读槽）
+        if let Some(cx) = back.get("context") {
+            let d = yuantuan_core::context_builder::ContextCfg::default();
+            let mut slot = state.extras.ctx_slot.write().unwrap();
+            slot.budget_chars = as_u64(cx, "budget_chars").map(|n| n as usize).unwrap_or(d.budget_chars);
+            slot.k_init = as_u64(cx, "k").map(|n| n as usize).unwrap_or(d.k_init);
+            slot.roster_mem_per = as_u64(cx, "roster_mem_per").map(|n| n as usize).unwrap_or(d.roster_mem_per);
+            applied.push("context 上下文预算热应用".into());
+        }
+
+        // [meme] → 偷表情包开关换槽（监听每事件读槽）
+        if let Some(mm) = back.get("meme") {
+            if let Some(on) = mm.get("steal_enabled").and_then(|v| v.as_bool()) {
+                *state.extras.steal_slot.write().unwrap() = on;
+                applied.push("meme 偷表情包开关热应用".into());
             }
         }
-        applied.push("prefilter 阈值热应用".into());
+
+        // [consolidation] → 取消旧定时器，按新配置重建（句柄注册表在 Extras）
+        if let Some(cs) = back.get("consolidation") {
+            let enabled = cs.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let daily_time = cs
+                .get("daily_time")
+                .and_then(|v| v.as_str())
+                .unwrap_or("03:00")
+                .to_string();
+            let run_on_startup = cs.get("run_on_startup").and_then(|v| v.as_bool()).unwrap_or(false);
+            if let Some(old) = state.extras.consolidation.lock().unwrap().take() {
+                old.abort();
+            }
+            if enabled {
+                let h = yuantuan_core::consolidation::spawn_scheduler(
+                    yuantuan_core::consolidation::ConsolidationDeps {
+                        db_path: state.db_path.clone(),
+                        llm: state.extras.llm_slot.read().unwrap().clone(),
+                        bus: state.extras.bus.clone(),
+                        self_qq: state.extras.self_qq.clone(),
+                        cfg: yuantuan_core::consolidation::ConsolidationCfg { enabled, daily_time, run_on_startup },
+                    },
+                );
+                *state.extras.consolidation.lock().unwrap() = Some(h);
+                applied.push("consolidation 归纳定时器重建热应用".into());
+            } else {
+                applied.push("consolidation 归纳已停用（定时器已取消，热应用）".into());
+            }
+        }
+
+        // 监听/连接/落盘类：槽外组件，重启生效（实话实说名单）
+        if back.get("napcat").is_some() {
+            requires_restart.push("napcat 连接（重启生效）".into());
+        }
+        if back.get("webui").is_some() {
+            requires_restart.push("webui 监听地址（重启生效）".into());
+        }
+        if back.get("data").is_some() {
+            requires_restart.push("data 目录（重启生效）".into());
+        }
+        if back.get("log").is_some() {
+            requires_restart.push("log 级别（重启生效）".into());
+        }
     }
 
     // providers.toml 写回：重建 LlmGateway 换槽；文件内容须解析+校验（roles 引用存在性）
@@ -116,10 +195,13 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         applied.push("LLM Provider 重建热应用".into());
     }
 
-    // TODO(热配单)：adapter 重连、webui 端口、consolidation 时刻等其余组件仍重启生效
     state.extras.bus.publish(yuantuan_core::event::Event::ConfigReloaded);
-    tracing::info!(applied = ?applied, "配置写回并热应用");
-    Ok(Json(json!({ "ok": true, "applied": applied, "note": "adapter/端口/归纳时刻等其余项重启生效（TODO）" })))
+    tracing::info!(applied = ?applied, requires_restart = ?requires_restart, "配置写回并热应用");
+    Ok(Json(json!({ "ok": true, "applied": applied, "requires_restart": requires_restart })))
+}
+
+fn as_u64(tbl: &toml::Value, key: &str) -> Option<u64> {
+    tbl.get(key).and_then(|v| v.as_integer()).and_then(|n| u64::try_from(n).ok())
 }
 
 /// JSON → TOML 文本；写前须保证能反向解析

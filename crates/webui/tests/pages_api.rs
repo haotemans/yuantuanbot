@@ -4,12 +4,9 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use yuantuan_core::db;
-use yuantuan_core::event::EventBus;
-use yuantuan_core::state::MoodState;
 use yuantuan_webui::{serve, Extras};
 
 fn temp_dir(prefix: &str) -> PathBuf {
@@ -94,15 +91,7 @@ async fn start() -> Rig {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let extras = Extras {
-        bus: EventBus::new(64),
-        llm_slot: Arc::new(RwLock::new(None)),
-        prefilter_slot: Arc::new(RwLock::new(yuantuan_core::prefilter::Config::default())),
-        adapter_connected: Arc::new(|| false),
-        mood: MoodState::default(),
-        config_path: cfg_path,
-        providers_path: prov_path,
-    };
+    let extras = Extras::for_test(cfg_path, prov_path);
     let db2 = db_path.clone();
     tokio::spawn(async move { let _ = serve(db2, "127.0.0.1", port, extras).await; });
     let http = reqwest::Client::new();

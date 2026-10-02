@@ -15,14 +15,44 @@ pub struct Extras {
     pub bus: yuantuan_core::event::EventBus,
     /// LLM 共享槽（config 写回后整体换槽 → 组件级热应用）
     pub llm_slot: Arc<RwLock<Option<Arc<LlmGateway>>>>,
-    /// Prefilter 阈值共享槽
+    /// Prefilter 阈值共享槽（含 Decision 成本闸）
     pub prefilter_slot: Arc<RwLock<yuantuan_core::prefilter::Config>>,
+    /// 回复形态参数共享槽
+    pub reply_slot: yuantuan_core::reply_engine::SharedReplyCfg,
+    /// 上下文预算共享槽
+    pub ctx_slot: yuantuan_core::context_builder::SharedContextCfg,
+    /// 偷表情包开关共享槽
+    pub steal_slot: yuantuan_core::meme::SharedSteal,
+    /// 夜间归纳调度器句柄（[consolidation] 写回后取消旧定时器按新配置重建）
+    pub consolidation: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// self QQ 号共享原子（重建归纳调度器需要注入）
+    pub self_qq: Arc<std::sync::atomic::AtomicU64>,
     /// adapter 连接状态探针（断连 >30s 视为离线，由装配侧换算好）
     pub adapter_connected: Arc<dyn Fn() -> bool + Send + Sync>,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
     pub config_path: PathBuf,
     pub providers_path: PathBuf,
+}
+
+impl Extras {
+    /// 测试装配：全部槽取默认值，归纳句柄空，self_qq 为 0
+    pub fn for_test(config_path: PathBuf, providers_path: PathBuf) -> Self {
+        Self {
+            bus: yuantuan_core::event::EventBus::new(64),
+            llm_slot: Arc::new(RwLock::new(None)),
+            prefilter_slot: Arc::new(RwLock::new(yuantuan_core::prefilter::Config::default())),
+            reply_slot: Arc::new(RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
+            ctx_slot: Arc::new(RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+            steal_slot: Arc::new(RwLock::new(true)),
+            consolidation: Arc::new(Mutex::new(None)),
+            self_qq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            adapter_connected: Arc::new(|| false),
+            mood: yuantuan_core::state::MoodState::default(),
+            config_path,
+            providers_path,
+        }
+    }
 }
 
 #[derive(Clone)]

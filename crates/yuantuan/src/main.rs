@@ -81,8 +81,27 @@ async fn main() -> Result<()> {
     };
 
     // g. 回复形态引擎（per-chat 发送队列；adapter 未接入时发送函数恒报错、reply 记事件跳过）
-    //    mood 单实例：Decision 写回、引擎 ::meme 映射共读
+    //    mood 单实例：Decision 写回、引擎 ::meme 映射共读；参数走热应用槽
     let mood = yuantuan_core::state::MoodState::default();
+    let reply_slot: yuantuan_core::reply_engine::SharedReplyCfg =
+        std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg {
+            first_delay_min_ms: cfg.reply.first_delay_min_ms,
+            first_delay_max_ms: cfg.reply.first_delay_max_ms,
+            base_delay_ms: cfg.reply.base_delay_ms,
+            per_char_ms: cfg.reply.per_char_ms,
+            jitter_ratio: cfg.reply.jitter_ratio,
+            min_delay_ms: cfg.reply.min_delay_ms,
+            max_delay_ms: cfg.reply.max_delay_ms,
+            total_budget_ms: cfg.reply.total_budget_ms,
+            bubble_cap: cfg.reply.bubble_cap,
+            bubble_char_cap: cfg.reply.bubble_char_cap,
+        }));
+    let ctx_slot: yuantuan_core::context_builder::SharedContextCfg =
+        std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg {
+            budget_chars: cfg.context.budget_chars,
+            k_init: cfg.context.k,
+            roster_mem_per: cfg.context.roster_mem_per,
+        }));
     let send = adapter
         .as_ref()
         .map(|h| yuantuan_adapter_qq::send_fn(h.clone()))
@@ -104,18 +123,19 @@ async fn main() -> Result<()> {
         bus.clone(),
         send,
         self_ids.clone(),
-        yuantuan_core::reply_engine::ReplyCfg::default(),
+        reply_slot.clone(),
         mood.clone(),
     )
     .spawn();
 
     // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply/send_meme）
-    //    llm/prefilter 走共享槽：WebUI config 写回即热应用
+    //    llm/prefilter/reply/context 走共享槽：WebUI config 写回即热应用
     let llm_slot: yuantuan_core::bot::SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(llm.clone()));
     let prefilter_slot: yuantuan_core::bot::SharedPrefilter = std::sync::Arc::new(std::sync::RwLock::new(
         yuantuan_core::prefilter::Config {
             window_secs: cfg.prefilter.window_secs,
             self_msg_cap: cfg.prefilter.self_msg_cap,
+            decision_cost_per_min: cfg.prefilter.decision_cost_per_min,
         },
     ));
     let self_qq = adapter
@@ -131,24 +151,32 @@ async fn main() -> Result<()> {
         mood: mood.clone(),
         prefilter: prefilter_slot.clone(),
         reply: Some(reply_engine),
+        reply_cfg: reply_slot.clone(),
+        ctx_cfg: ctx_slot.clone(),
         memes_dir: memes_dir.clone(),
     });
 
-    // h2. 偷表情包监听（[meme].steal_enabled）
-    if cfg.meme.steal_enabled {
-        let _steal = yuantuan_core::meme::spawn_steal_listener(&bus, db_path.clone(), memes_dir.clone());
-    } else {
-        info!("[meme].steal_enabled=false，偷表情包关闭");
-    }
+    // h2. 偷表情包监听（开关走热应用槽，进程内常驻）
+    let steal_slot: yuantuan_core::meme::SharedSteal =
+        std::sync::Arc::new(std::sync::RwLock::new(cfg.meme.steal_enabled));
+    let _steal = yuantuan_core::meme::spawn_steal_listener(
+        &bus,
+        db_path.clone(),
+        memes_dir.clone(),
+        steal_slot.clone(),
+    );
 
-    // i. 夜间归纳调度器（单实例锁；enabled=false 则跳过）
+    // i. 夜间归纳调度器（句柄注册：WebUI 改 [consolidation] 后取消旧定时器按新配置重建）
+    let consolidation_handle: std::sync::Arc<
+        std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(None));
     if cfg.consolidation.enabled {
-        let _consolidation = yuantuan_core::consolidation::spawn_scheduler(
+        let h = yuantuan_core::consolidation::spawn_scheduler(
             yuantuan_core::consolidation::ConsolidationDeps {
                 db_path: db_path.clone(),
                 llm: llm.clone(),
                 bus: bus.clone(),
-                self_qq,
+                self_qq: self_qq.clone(),
                 cfg: yuantuan_core::consolidation::ConsolidationCfg {
                     enabled: cfg.consolidation.enabled,
                     daily_time: cfg.consolidation.daily_time.clone(),
@@ -156,6 +184,7 @@ async fn main() -> Result<()> {
                 },
             },
         );
+        *consolidation_handle.lock().unwrap() = Some(h);
     } else {
         info!("[consolidation].enabled=false，跳过夜间归纳调度器");
     }
@@ -170,6 +199,11 @@ async fn main() -> Result<()> {
         bus: bus.clone(),
         llm_slot,
         prefilter_slot,
+        reply_slot,
+        ctx_slot,
+        steal_slot,
+        consolidation: consolidation_handle,
+        self_qq: self_qq.clone(),
         mood: mood.clone(),
         adapter_connected: adapter
             .as_ref()

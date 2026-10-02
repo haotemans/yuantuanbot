@@ -1,12 +1,9 @@
 //! /api/auth/status：首启状态三态——未设密码 true → 设后 false → 删除后又 true。
 
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use yuantuan_core::db;
-use yuantuan_core::event::EventBus;
-use yuantuan_core::state::MoodState;
 use yuantuan_webui::{serve, Extras};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -25,15 +22,7 @@ async fn auth_status_reflects_setup_state() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let extras = Extras {
-        bus: EventBus::new(16),
-        llm_slot: Arc::new(RwLock::new(None)),
-        prefilter_slot: Arc::new(RwLock::new(yuantuan_core::prefilter::Config::default())),
-        adapter_connected: Arc::new(|| false),
-        mood: MoodState::default(),
-        config_path: dir.join("config.toml"),
-        providers_path: dir.join("providers.toml"),
-    };
+    let extras = Extras::for_test(dir.join("config.toml"), dir.join("providers.toml"));
     let db2 = db_path.clone();
     tokio::spawn(async move { let _ = serve(db2, "127.0.0.1", port, extras).await; });
     let http = reqwest::Client::new();

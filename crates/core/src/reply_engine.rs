@@ -60,8 +60,15 @@ pub struct Bubble {
     pub meme: Option<String>,
 }
 
-/// 解析 bot_chat 定格式输出为气泡序列。
+/// 解析 bot_chat 定格式输出为气泡序列（出厂参数：单泡 500 字上限、3 泡封顶）
 pub fn bubbleize(raw: &str) -> Vec<Bubble> {
+    bubbleize_with(raw, 500, 3)
+}
+
+/// 带参数的 bubbleize：char_cap=单泡字数上限（超出按标点机械切），bubble_cap=泡数封顶
+pub fn bubbleize_with(raw: &str, char_cap: usize, bubble_cap: usize) -> Vec<Bubble> {
+    let char_cap = char_cap.max(20);
+    let bubble_cap = bubble_cap.max(1);
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -103,19 +110,19 @@ pub fn bubbleize(raw: &str) -> Vec<Bubble> {
             meme: None,
         }];
     }
-    // 单泡超 500 字 → 按标点机械切
+    // 单泡超 char_cap 字 → 按标点机械切
     let mut cut: Vec<Bubble> = Vec::new();
     for b in bubbles {
-        if b.text.chars().count() > 500 {
-            cut.extend(mechanical_split(&b));
+        if b.text.chars().count() > char_cap {
+            cut.extend(mechanical_split(&b, char_cap));
         } else {
             cut.push(b);
         }
     }
-    // 3 泡封顶（封顶不是配额）：保留前 3 泡，第 4 泡起并入最后一泡
-    if cut.len() > 3 {
-        let tail: Vec<Bubble> = cut.split_off(3);
-        let last = &mut cut[2];
+    // bubble_cap 泡封顶（封顶不是配额）：保留前 bubble_cap 泡，其余并入最后一泡
+    if cut.len() > bubble_cap {
+        let tail: Vec<Bubble> = cut.split_off(bubble_cap);
+        let last = &mut cut[bubble_cap - 1];
         let merged_text = tail
             .iter()
             .map(|b| b.text.as_str())
@@ -136,15 +143,14 @@ pub fn bubbleize(raw: &str) -> Vec<Bubble> {
     cut
 }
 
-fn mechanical_split(b: &Bubble) -> Vec<Bubble> {
-    const MAX: usize = 500;
+fn mechanical_split(b: &Bubble, max: usize) -> Vec<Bubble> {
     let chars: Vec<char> = b.text.chars().collect();
     let mut out: Vec<Bubble> = Vec::new();
     let mut start = 0usize;
     let mut first = true;
-    while chars.len() - start > MAX {
+    while chars.len() - start > max {
         // 在窗口内从后往前找标点断点；找不到就硬切
-        let window_end = start + MAX;
+        let window_end = start + max;
         let cut_at = (start + 1..=window_end)
             .rev()
             .find(|&i| {
@@ -199,7 +205,8 @@ pub struct ReplyJob {
     pub kind: JobKind,
 }
 
-#[derive(Debug, Clone)]
+/// 回复形态参数（热应用槽：ReplyEngine/管线每次读取当前值，WebUI 写回即换槽）
+#[derive(Debug, Clone, Copy)]
 pub struct ReplyCfg {
     pub first_delay_min_ms: u64,
     pub first_delay_max_ms: u64,
@@ -209,6 +216,10 @@ pub struct ReplyCfg {
     pub min_delay_ms: u64,
     pub max_delay_ms: u64,
     pub total_budget_ms: u64,
+    /// 泡数封顶（超出并入最后一泡）
+    pub bubble_cap: usize,
+    /// 单泡字数上限（超出按标点机械切）
+    pub bubble_char_cap: usize,
 }
 
 impl Default for ReplyCfg {
@@ -222,6 +233,8 @@ impl Default for ReplyCfg {
             min_delay_ms: 800,
             max_delay_ms: 4000,
             total_budget_ms: 8000,
+            bubble_cap: 3,
+            bubble_char_cap: 500,
         }
     }
 }
@@ -252,12 +265,15 @@ impl EngineHandle {
     }
 }
 
+/// 回复形态参数共享槽（热应用：WebUI 配置写回后换槽，引擎每泡读取当前值）
+pub type SharedReplyCfg = Arc<std::sync::RwLock<ReplyCfg>>;
+
 pub struct ReplyEngine {
     db_path: PathBuf,
     bus: EventBus,
     send: SendFn,
     self_ids: SelfMsgIds,
-    cfg: ReplyCfg,
+    cfg: SharedReplyCfg,
     mood: MoodState,
 }
 
@@ -267,7 +283,7 @@ impl ReplyEngine {
         bus: EventBus,
         send: SendFn,
         self_ids: SelfMsgIds,
-        cfg: ReplyCfg,
+        cfg: SharedReplyCfg,
         mood: MoodState,
     ) -> Self {
         Self { db_path, bus, send, self_ids, cfg, mood }
@@ -371,7 +387,7 @@ fn resolve_meme_category(cat: Option<&str>, mood: MoodValue) -> String {
 }
 
 async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubble]) {
-    let cfg = &eng.cfg;
+    let cfg = *eng.cfg.read().unwrap(); // 热应用：每泡取当前参数
     let started = Instant::now();
     let base_version = latest_incoming(&eng.db_path, &job.chat_id);
     let total = bubbles.len();
@@ -513,7 +529,8 @@ fn now_secs() -> i64 {
 
 // ---------- bot_chat 调用与入队 ----------
 
-/// Decision=reply 之后：组装 Bot Context → 调 bot_chat → Bubbleizer → 入队
+/// Decision=reply 之后：组装 Bot Context → 调 bot_chat → Bubbleizer → 入队。
+/// ctx_cfg/reply_cfg 由调用方从热应用槽读取传入（每消息取当前值）。
 pub async fn prepare_and_enqueue(
     engine: &EngineHandle,
     db_path: &Path,
@@ -521,15 +538,17 @@ pub async fn prepare_and_enqueue(
     mood: &MoodState,
     msg: &MessageReceivedPayload,
     out: &DecisionOutput,
+    ctx_cfg: &context_builder::ContextCfg,
+    reply_cfg: &ReplyCfg,
 ) -> Result<()> {
-    let ctx = context_builder::build_bot_context(db_path, mood.get(), msg);
+    let ctx = context_builder::build_bot_context(db_path, mood.get(), msg, ctx_cfg);
     let started = Instant::now();
     let raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
         .await
         .context("bot_chat 调用失败")?;
     debug!(k_used = ctx.k_used, elapsed_ms = started.elapsed().as_millis() as u64, "bot_chat 生成完成");
-    let bubbles = bubbleize(&raw);
+    let bubbles = bubbleize_with(&raw, reply_cfg.bubble_char_cap, reply_cfg.bubble_cap);
     if bubbles.is_empty() {
         return Err(anyhow!("bot_chat 输出为空"));
     }

@@ -217,6 +217,8 @@ async fn decision_pipeline_end_to_end() {
         mood: MoodState::default(),
         prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: None,
+        reply_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("pipeline-memes"),
     });
 

@@ -10,10 +10,32 @@ use crate::state::MoodValue;
 use rusqlite::params;
 use std::path::Path;
 
-/// 输入预算（字符代理值；40k tokens 代理，可配置化在热配施工单）
-const BUDGET_CHARS: usize = 40_000;
-const K_INIT: usize = 20;
+/// 输入预算相关常量（可配置项的出厂值；运行值走 ContextCfg 槽热应用）
 const K_MIN: usize = 5;
+
+/// 上下文预算槽（热应用：WebUI 配置写回后换槽，build_bot_context 每次取当前值）
+#[derive(Debug, Clone, Copy)]
+pub struct ContextCfg {
+    /// 输入预算（字符代理值，40k tokens 代理）
+    pub budget_chars: usize,
+    /// 会话窗口初始 K（条）
+    pub k_init: usize,
+    /// 名册每人携带记忆条数
+    pub roster_mem_per: usize,
+}
+
+impl Default for ContextCfg {
+    fn default() -> Self {
+        Self {
+            budget_chars: 40_000,
+            k_init: 20,
+            roster_mem_per: 3,
+        }
+    }
+}
+
+/// 上下文预算共享槽（热应用：WebUI 配置写回后换槽，每次组上下文读取当前值）
+pub type SharedContextCfg = std::sync::Arc<std::sync::RwLock<ContextCfg>>;
 
 const DEFAULT_PERSONA: &str =
     "你是「云团」，一个长期活跃在 QQ 群里的普通群友，性格温和有点小幽默。\
@@ -35,7 +57,7 @@ pub struct BotContext {
 }
 
 /// 组装 Bot Context。anchor 为触发消息（@我/回复我/私聊的那条），单独标注。
-pub fn build_bot_context(db_path: &Path, mood: MoodValue, anchor: &MessageReceivedPayload) -> BotContext {
+pub fn build_bot_context(db_path: &Path, mood: MoodValue, anchor: &MessageReceivedPayload, cfg: &ContextCfg) -> BotContext {
     let conn = crate::db::connect(db_path).ok();
     let persona = conn.as_ref().and_then(|c: &rusqlite::Connection| {
         c.query_row(
@@ -55,11 +77,12 @@ pub fn build_bot_context(db_path: &Path, mood: MoodValue, anchor: &MessageReceiv
         BEHAVIOR_RULES
     );
 
-    let mut k = K_INIT;
-    let mut mem_per: usize = 3;
+    let k_init = cfg.k_init.max(K_MIN);
+    let mut k = k_init;
+    let mut mem_per: usize = cfg.roster_mem_per;
     let mut user = render_user(conn.as_ref(), anchor, k, mem_per);
     // 预算裁决：先缩 K，再裁记忆；名册条数与锚点不动
-    while system.chars().count() + user.chars().count() > BUDGET_CHARS {
+    while system.chars().count() + user.chars().count() > cfg.budget_chars {
         if k > K_MIN {
             k = (k - 5).max(K_MIN);
         } else if mem_per > 0 {
@@ -69,7 +92,7 @@ pub fn build_bot_context(db_path: &Path, mood: MoodValue, anchor: &MessageReceiv
         }
         user = render_user(conn.as_ref(), anchor, k, mem_per);
     }
-    if k < K_INIT || mem_per < 3 {
+    if k < cfg.k_init || mem_per < cfg.roster_mem_per {
         tracing::info!(k_used = k, mem_per, "Bot Context 超出预算，已按层压缩");
     }
     BotContext { system, user, k_used: k }

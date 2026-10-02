@@ -33,6 +33,10 @@ pub struct PipelineDeps {
     pub prefilter: SharedPrefilter,
     /// 回复引擎；None 时 reply/send_meme 只记事件跳过（如 adapter 未接入）
     pub reply: Option<EngineHandle>,
+    /// 回复形态参数热应用槽（bubbleize 泡顶/单泡上限在入队时读取）
+    pub reply_cfg: crate::reply_engine::SharedReplyCfg,
+    /// 上下文预算热应用槽（组 Bot Context 每消息读取）
+    pub ctx_cfg: crate::context_builder::SharedContextCfg,
     /// data/memes 根目录（meme 抽图）
     pub memes_dir: PathBuf,
 }
@@ -88,6 +92,8 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                     return;
                 }
             };
+            // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
+            gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
             let outcome = decision::decide(&deps.db_path, &gw, &deps.bus, &deps.mood, m).await;
             if outcome.output.action == DecisionAction::SendMeme {
                 // send_meme：抽图→发送队列（直接发图，与普通回复同队列保序）；库空记事件不吵
@@ -131,8 +137,10 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
             let bot_chat_ready = gw.role(Role::BotChat).is_some();
             match (&deps.reply, bot_chat_ready) {
                 (Some(engine), true) => {
+                    let ctx_cfg = *deps.ctx_cfg.read().unwrap();
+                    let reply_cfg = *deps.reply_cfg.read().unwrap();
                     if let Err(e) = reply_engine::prepare_and_enqueue(
-                        engine, &deps.db_path, &gw, &deps.mood, m, &outcome.output,
+                        engine, &deps.db_path, &gw, &deps.mood, m, &outcome.output, &ctx_cfg, &reply_cfg,
                     )
                     .await
                     {

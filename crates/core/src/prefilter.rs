@@ -14,6 +14,8 @@ pub struct Config {
     pub window_secs: i64,
     /// 窗口内 self 消息数硬顶（个）
     pub self_msg_cap: i64,
+    /// Decision 成本闸（次/分），管线读槽后推给 LLM gateway
+    pub decision_cost_per_min: i64,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
         Self {
             window_secs: 60,
             self_msg_cap: 12,
+            decision_cost_per_min: 30,
         }
     }
 }

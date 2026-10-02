@@ -5,6 +5,7 @@ mod auth;
 mod config_api;
 mod dashboard;
 mod events_api;
+mod llm_test;
 mod memes;
 mod memories;
 mod overview;
@@ -40,6 +41,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/summaries", get(memories::summaries))
         .route("/api/relations", get(relations::relations))
         .route("/api/config", get(config_api::get_config).post(config_api::post_config))
+        .route("/api/llm/test", post(llm_test::test))
         .route("/api/personality/versions", get(personality::list).post(personality::create))
         .route("/api/personality/versions/{no}", get(personality::get_one))
         .route("/api/personality/rollback/{no}", post(personality::rollback))

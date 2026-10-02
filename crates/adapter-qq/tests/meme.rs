@@ -186,7 +186,7 @@ async fn decision_send_meme_sends_image() {
         bus.clone(),
         send_fn(adapter.clone()),
         self_ids.clone(),
-        ReplyCfg::default(),
+        Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
         MoodState::default(),
     )
     .spawn();
@@ -199,6 +199,8 @@ async fn decision_send_meme_sends_image() {
         mood: MoodState::default(),
         prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: Some(engine),
+        reply_cfg: Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: memes.clone(),
     });
 
@@ -311,7 +313,12 @@ async fn steal_then_approve_and_reject() {
         },
         self_ids,
     );
-    let _steal = meme::spawn_steal_listener(&bus, db_path.clone(), memes.clone());
+    let _steal = meme::spawn_steal_listener(
+        &bus,
+        db_path.clone(),
+        memes.clone(),
+        Arc::new(std::sync::RwLock::new(true)),
+    );
 
     // 等 pending 行落库
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -344,15 +351,10 @@ async fn steal_then_approve_and_reject() {
     let wport = wl.local_addr().unwrap().port();
     drop(wl);
     let db2 = db_path.clone();
-    let extras = yuantuan_webui::Extras {
-        bus: EventBus::new(16),
-        llm_slot: Arc::new(std::sync::RwLock::new(None)),
-        prefilter_slot: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
-        adapter_connected: Arc::new(|| false),
-        mood: MoodState::default(),
-        config_path: temp_dir("meme-noconfig").join("config.toml"),
-        providers_path: temp_dir("meme-noconfig").join("providers.toml"),
-    };
+    let extras = yuantuan_webui::Extras::for_test(
+        temp_dir("meme-noconfig").join("config.toml"),
+        temp_dir("meme-noconfig").join("providers.toml"),
+    );
     tokio::spawn(async move { let _ = yuantuan_webui::serve(db2, "127.0.0.1", wport, extras).await; });
     tokio::time::sleep(Duration::from_millis(300)).await;
     let http = reqwest::Client::new();

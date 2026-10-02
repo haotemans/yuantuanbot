@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,18 @@ impl fmt::Display for Role {
             Role::BotChat => "bot_chat",
             Role::AgentExec => "agent_exec",
         })
+    }
+}
+
+impl Role {
+    /// "decision" | "bot_chat" | "agent_exec" → Role（WebUI /api/llm/test 入参解析）
+    pub fn parse(s: &str) -> Option<Role> {
+        match s {
+            "decision" => Some(Role::Decision),
+            "bot_chat" => Some(Role::BotChat),
+            "agent_exec" => Some(Role::AgentExec),
+            _ => None,
+        }
     }
 }
 
@@ -71,19 +84,28 @@ pub struct ResolvedRole {
     api_key: Option<String>,
 }
 
-/// 全局成本闸：滑动窗口计数，超限排队延迟不丢弃
+/// 全局成本闸：滑动窗口计数，超限排队延迟不丢弃；per_min 运行时可调（节流热应用）
 #[derive(Debug, Clone)]
 pub struct CostGate {
     inner: Arc<Mutex<VecDeque<Instant>>>,
-    per_min: usize,
+    per_min: Arc<AtomicUsize>,
 }
 
 impl CostGate {
     pub fn new(per_min: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::new())),
-            per_min,
+            per_min: Arc::new(AtomicUsize::new(per_min.max(1))),
         }
+    }
+
+    pub fn per_min(&self) -> usize {
+        self.per_min.load(Ordering::Relaxed)
+    }
+
+    /// 热应用：调整每分钟许可数（下限 1）
+    pub fn set_per_min(&self, n: usize) {
+        self.per_min.store(n.max(1), Ordering::Relaxed);
     }
 
     pub async fn acquire(&self) {
@@ -94,7 +116,7 @@ impl CostGate {
                 while q.front().map(|t| *t < cutoff).unwrap_or(false) {
                     q.pop_front();
                 }
-                if q.len() < self.per_min {
+                if q.len() < self.per_min() {
                     q.push_back(Instant::now());
                     return;
                 }
@@ -102,7 +124,7 @@ impl CostGate {
                     .saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(500))
             };
-            tracing::info!("Decision 成本闸：30 次/分已满，排队延迟");
+            tracing::info!(per_min = self.per_min(), "Decision 成本闸已满，排队延迟");
             tokio::time::sleep(wait.max(Duration::from_millis(20))).await;
         }
     }
@@ -171,6 +193,45 @@ impl LlmGateway {
 
     pub fn role(&self, role: Role) -> Option<&ResolvedRole> {
         self.roles.get(&role)
+    }
+
+    /// 热应用：调整 Decision 成本闸（次/分）
+    pub fn set_cost_per_min(&self, n: usize) {
+        self.gate.set_per_min(n);
+    }
+
+    /// 连通性测试（WebUI /api/llm/test）：发一次最短 chat，不过成本闸；
+    /// 返回 (model, latency_ms)。请求/响应体不入日志（防泄 key 路径上的中间日志）。
+    pub async fn test_chat(&self, role: Role) -> Result<(String, u64)> {
+        let r = self
+            .roles
+            .get(&role)
+            .ok_or_else(|| anyhow!("角色 {role} 未配置或不可用"))?
+            .clone();
+        let body = json!({
+            "model": r.model,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 8,
+        });
+        let mut req = self
+            .http
+            .post(format!("{}/chat/completions", r.base_url))
+            .json(&body);
+        if let Some(k) = &r.api_key {
+            req = req.bearer_auth(k);
+        }
+        let started = Instant::now();
+        let resp = req.send().await.context("连接 provider 失败")?;
+        let status = resp.status();
+        let text = resp.text().await.context("读取 provider 响应失败")?;
+        if !status.is_success() {
+            bail!("provider HTTP {status}: {}", &text[..text.len().min(200)]);
+        }
+        let v: Value = serde_json::from_str(&text).context("provider 响应非 JSON")?;
+        v.pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| anyhow!("provider 响应缺 choices[0].message.content"))?;
+        Ok((r.model.clone(), started.elapsed().as_millis() as u64))
     }
 
     /// chat/completions 调用：先过成本闸；json_mode 时带 response_format=json_object

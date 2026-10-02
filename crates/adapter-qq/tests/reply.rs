@@ -250,12 +250,13 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         },
         self_ids.clone(),
     );
+    let reply_slot = Arc::new(std::sync::RwLock::new(engine_cfg));
     let engine = ReplyEngine::new(
         db_path.clone(),
         bus.clone(),
         send_fn(adapter.clone()),
         self_ids.clone(),
-        engine_cfg,
+        reply_slot.clone(),
         MoodState::default(),
     )
     .spawn();
@@ -268,6 +269,8 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         mood: MoodState::default(),
         prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: Some(engine),
+        reply_cfg: reply_slot,
+        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("reply-memes"),
     });
     Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }

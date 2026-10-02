@@ -206,8 +206,11 @@ pub fn file_url(path: &Path) -> String {
 
 // ---------- 偷表情包 ----------
 
-/// steal_enabled=true 时由装配侧启动；订阅群图片消息，URL 下载 → _inbox → pending
-pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf) -> JoinHandle<()> {
+/// 偷表情包开关共享槽（热应用：WebUI 配置写回后换槽，监听每事件读取当前值）
+pub type SharedSteal = std::sync::Arc<std::sync::RwLock<bool>>;
+
+/// 装配侧无条件启动；enabled 槽为 false 时跳过处理（订阅群图片消息，URL 下载 → _inbox → pending）
+pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf, enabled: SharedSteal) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         let http = match reqwest::Client::builder()
@@ -220,10 +223,13 @@ pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf
                 return;
             }
         };
-        info!("偷表情包监听已启动（待审区 data/memes/_inbox/）");
+        info!("偷表情包监听已启动（待审区 data/memes/_inbox/；开关走热应用槽）");
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
+                    if !*enabled.read().unwrap() {
+                        continue;
+                    }
                     if m.chat_type != "group" || !m.has_image || m.image_urls.is_empty() {
                         continue;
                     }

@@ -12,6 +12,8 @@ pub struct Config {
     pub webui: WebuiConfig,
     pub prefilter: PrefilterSection,
     pub consolidation: ConsolidationSection,
+    pub reply: ReplySection,
+    pub context: ContextSection,
     pub meme: MemeSection,
     pub log: LogConfig,
 }
@@ -54,6 +56,8 @@ impl Default for Config {
             webui: WebuiConfig::default(),
             prefilter: PrefilterSection::default(),
             consolidation: ConsolidationSection::default(),
+            reply: ReplySection::default(),
+            context: ContextSection::default(),
             meme: MemeSection::default(),
             log: LogConfig::default(),
         }
@@ -83,6 +87,73 @@ pub struct PrefilterSection {
     pub window_secs: i64,
     /// 窗口内 self 消息数硬顶（个）
     pub self_msg_cap: i64,
+    /// Decision 成本闸（次/分）
+    pub decision_cost_per_min: i64,
+}
+
+/// [reply] 回复形态参数（架构十四章；映射 yuantuan_core::reply_engine::ReplyCfg）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ReplySection {
+    /// 首泡延时区间（毫秒）
+    pub first_delay_min_ms: u64,
+    pub first_delay_max_ms: u64,
+    /// 打字基线延时（毫秒）
+    pub base_delay_ms: u64,
+    /// 延时系数：每字毫秒
+    pub per_char_ms: u64,
+    /// 抖动比例 0~1
+    pub jitter_ratio: f64,
+    /// 单泡延时下限（毫秒）
+    pub min_delay_ms: u64,
+    /// 单泡延时上限/泡顶（毫秒）
+    pub max_delay_ms: u64,
+    /// 延时总预算（毫秒；超出后剩余泡不再延时）
+    pub total_budget_ms: u64,
+    /// 泡数封顶（超出并入最后一泡）
+    pub bubble_cap: usize,
+    /// 单泡字数上限（超出按标点机械切）
+    pub bubble_char_cap: usize,
+}
+
+/// [context] 上下文预算（架构十二章；映射 yuantuan_core::context_builder::ContextCfg）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ContextSection {
+    /// 输入预算（字符代理值，40k tokens 代理）
+    pub budget_chars: usize,
+    /// 会话窗口 K（条）
+    pub k: usize,
+    /// 名册每人携带记忆条数
+    pub roster_mem_per: usize,
+}
+
+impl Default for ReplySection {
+    fn default() -> Self {
+        let c = yuantuan_core::reply_engine::ReplyCfg::default();
+        Self {
+            first_delay_min_ms: c.first_delay_min_ms,
+            first_delay_max_ms: c.first_delay_max_ms,
+            base_delay_ms: c.base_delay_ms,
+            per_char_ms: c.per_char_ms,
+            jitter_ratio: c.jitter_ratio,
+            min_delay_ms: c.min_delay_ms,
+            max_delay_ms: c.max_delay_ms,
+            total_budget_ms: c.total_budget_ms,
+            bubble_cap: c.bubble_cap,
+            bubble_char_cap: c.bubble_char_cap,
+        }
+    }
+}
+
+impl Default for ContextSection {
+    fn default() -> Self {
+        Self {
+            budget_chars: 40_000,
+            k: 20,
+            roster_mem_per: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,6 +184,7 @@ impl Default for PrefilterSection {
         Self {
             window_secs: 60,
             self_msg_cap: 12,
+            decision_cost_per_min: 30,
         }
     }
 }
@@ -161,9 +233,29 @@ host = "127.0.0.1"
 port = 8085
 
 [prefilter]
-# 群聊发言节流（架构十三章节流闸；热配在后续施工单接入）
+# 群聊发言节流（架构十三章节流闸；管理面板「运行参数」可热调）
 window_secs = 60
 self_msg_cap = 12
+decision_cost_per_min = 30
+
+[reply]
+# 回复形态参数（架构十四章；面板热调即时生效）
+first_delay_min_ms = 300
+first_delay_max_ms = 800
+base_delay_ms = 600
+per_char_ms = 40
+jitter_ratio = 0.3
+min_delay_ms = 800
+max_delay_ms = 4000
+total_budget_ms = 8000
+bubble_cap = 3
+bubble_char_cap = 500
+
+[context]
+# 上下文预算（架构十二章；budget_chars 为 40k tokens 的字符代理）
+budget_chars = 40000
+k = 20
+roster_mem_per = 3
 
 [consolidation]
 # 夜间归纳（架构七章）；daily_time 为本地 HH:MM
