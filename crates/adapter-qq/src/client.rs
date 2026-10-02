@@ -15,6 +15,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 use yuantuan_core::event::EventBus;
+use yuantuan_core::prefilter::SelfMsgIds;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsWrite = futures_util::stream::SplitSink<Ws, Message>;
@@ -30,34 +31,44 @@ pub struct NapcatConfig {
     pub token: String,
 }
 
-/// 暴露给装配层的句柄：拿当前会话的发送端（断线期为 None）。
-/// 发送能力（send_group_msg / send_private_msg）为回复形态引擎预留，本单不被调用。
+/// 暴露给装配层的句柄：拿当前会话的发送端（断线期为 None），以及自身 QQ 号（登录前为 0）。
+/// 发送能力（send_group_msg / send_private_msg）为回复形态引擎预留。
 #[derive(Clone, Default)]
 pub struct AdapterHandle {
     current: Arc<AsyncMutex<Option<NapcatSender>>>,
+    self_qq: Arc<AtomicU64>,
 }
 
 impl AdapterHandle {
     pub async fn sender(&self) -> Option<NapcatSender> {
         self.current.lock().await.clone()
     }
+
+    pub fn self_qq(&self) -> u64 {
+        self.self_qq.load(Ordering::Relaxed)
+    }
+
+    /// 自身 QQ 号的共享单元（core 侧注入用，遵守 core 不依赖协议端的铁律）
+    pub fn self_qq_shared(&self) -> Arc<AtomicU64> {
+        self.self_qq.clone()
+    }
 }
 
 /// 启动 adapter 后台任务（指数退避重连，永不返回），返回句柄
-pub fn spawn(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig) -> AdapterHandle {
+pub fn spawn(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, self_ids: SelfMsgIds) -> AdapterHandle {
     let handle = AdapterHandle::default();
-    let slot = handle.clone();
+    let task_handle = handle.clone();
     tokio::spawn(async move {
-        run(bus, db_path, cfg, slot).await;
+        run(bus, db_path, cfg, task_handle, self_ids).await;
     });
     handle
 }
 
-async fn run(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, handle: AdapterHandle) {
+async fn run(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, handle: AdapterHandle, self_ids: SelfMsgIds) {
     let mut backoff = BACKOFF_INIT;
     loop {
         let started = Instant::now();
-        match session(&bus, &db_path, &cfg, &handle).await {
+        match session(&bus, &db_path, &cfg, &handle, &self_ids).await {
             Ok(()) => info!("NapCat 会话正常结束"),
             Err(e) => warn!(error = %e, "NapCat 连接断开（窗口期消息接受丢失）"),
         }
@@ -77,6 +88,7 @@ async fn session(
     db_path: &PathBuf,
     cfg: &NapcatConfig,
     handle: &AdapterHandle,
+    self_ids: &SelfMsgIds,
 ) -> Result<()> {
     let mut req = cfg
         .ws_url
@@ -115,8 +127,9 @@ async fn session(
             break uid;
         }
         // 握手期间混入的帧照常处理；此时自身号未知，at_me 判定退化为不匹配
-        let _ = handle_frame(&v, bus, db_path, 0, &pending, &mut last_active);
+        let _ = handle_frame(&v, bus, db_path, 0, &pending, &mut last_active, self_ids);
     };
+    handle.self_qq.store(self_qq, Ordering::Relaxed);
     info!(self_qq, "get_login_info 完成");
 
     let sender = NapcatSender {
@@ -126,7 +139,7 @@ async fn session(
     };
     *handle.current.lock().await = Some(sender);
 
-    // 主循环：meta_event 只更新活性时间戳；message 走段数组摄取；response 路由回执
+    // 主循环：meta_event 只更新活性时间戳；message/message_sent 走段数组摄取；response 路由回执
     loop {
         let Some(frame) = read.next().await else {
             bail!("WS 连接被对端关闭");
@@ -140,7 +153,7 @@ async fn session(
                         continue;
                     }
                 };
-                if let Err(e) = handle_frame(&v, bus, db_path, self_qq, &pending, &mut last_active) {
+                if let Err(e) = handle_frame(&v, bus, db_path, self_qq, &pending, &mut last_active, self_ids) {
                     warn!(error = %e, "帧处理失败");
                 }
             }
@@ -158,6 +171,7 @@ fn handle_frame(
     self_qq: u64,
     pending: &Pending,
     last_active: &mut Instant,
+    self_ids: &SelfMsgIds,
 ) -> Result<()> {
     // action 回执一律优先路由（echo 存在即为响应帧）
     if let Some(echo) = v.get("echo").and_then(|e| e.as_str()) {
@@ -171,7 +185,10 @@ fn handle_frame(
             *last_active = Instant::now();
             Ok(())
         }
-        Some("message") => crate::ingest::ingest_message(v, bus, db_path, self_qq),
+        // message_sent = 自己发出的消息回报：同样落库（sender_pid='self'），供 R6 节流计数与流水完整
+        Some("message") | Some("message_sent") => {
+            crate::ingest::ingest_message(v, bus, db_path, self_qq, self_ids)
+        }
         Some(other) => {
             debug!(post_type = other, "忽略非 message 事件");
             Ok(())

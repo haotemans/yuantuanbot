@@ -16,5 +16,10 @@ token = ""
 host = "127.0.0.1"
 port = 8085
 
+[prefilter]
+# 群聊发言节流（架构十三章节流闸；热配在后续施工单接入）
+window_secs = 60
+self_msg_cap = 12
+
 [log]
 level = "info"

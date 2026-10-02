@@ -10,6 +10,7 @@ pub struct Config {
     pub data: DataConfig,
     pub napcat: NapcatConfig,
     pub webui: WebuiConfig,
+    pub prefilter: PrefilterSection,
     pub log: LogConfig,
 }
 
@@ -49,6 +50,7 @@ impl Default for Config {
             data: DataConfig::default(),
             napcat: NapcatConfig::default(),
             webui: WebuiConfig::default(),
+            prefilter: PrefilterSection::default(),
             log: LogConfig::default(),
         }
     }
@@ -66,6 +68,24 @@ impl Default for NapcatConfig {
             enabled: true,
             ws_url: "ws://127.0.0.1:3001".into(),
             token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PrefilterSection {
+    /// 发言节流窗口（秒）
+    pub window_secs: i64,
+    /// 窗口内 self 消息数硬顶（个）
+    pub self_msg_cap: i64,
+}
+
+impl Default for PrefilterSection {
+    fn default() -> Self {
+        Self {
+            window_secs: 60,
+            self_msg_cap: 12,
         }
     }
 }
@@ -102,6 +122,11 @@ token = ""
 # 管理面板监听地址（仅本机；公网暴露走反代，见架构文档安全小节）
 host = "127.0.0.1"
 port = 8085
+
+[prefilter]
+# 群聊发言节流（架构十三章节流闸；热配在后续施工单接入）
+window_secs = 60
+self_msg_cap = 12
 
 [log]
 level = "info"

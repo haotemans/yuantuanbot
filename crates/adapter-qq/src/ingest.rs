@@ -1,6 +1,7 @@
-//! message 事件摄取（段数组铁律）：
+//! message / message_sent 事件摄取（段数组铁律）：
 //! text 段拼正文、at 段→mentions（命中自身号则 at_me）、reply 段→reply_to（记录原值）、
 //! image 段→has_image、face 段忽略。@全体成员不进入 mentions。
+//! 自己的消息（user_id == 自身号）sender_pid 记 'self'，并把 NapCat message_id 记入 SelfMsgIds（R4 原料）。
 //! 同时维护 persons / identities / member_profiles 档案，然后 messages 落库并发布事件。
 
 use anyhow::{bail, Context, Result};
@@ -10,8 +11,15 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 use yuantuan_core::event::{Event, EventBus, MessageReceivedPayload};
+use yuantuan_core::prefilter::SelfMsgIds;
 
-pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -> Result<()> {
+pub fn ingest_message(
+    v: &Value,
+    bus: &EventBus,
+    db_path: &Path,
+    self_qq: u64,
+    self_ids: &SelfMsgIds,
+) -> Result<()> {
     let message_type = v
         .get("message_type")
         .and_then(|t| t.as_str())
@@ -25,6 +33,8 @@ pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -
         .or_else(|| v.get("user_id"))
         .and_then(|u| u.as_u64())
         .context("message 事件缺 sender.user_id")?;
+    let napcat_msg_id = v.get("message_id").and_then(|i| i.as_i64());
+    let is_self = self_qq != 0 && user_id == self_qq;
 
     let sender = v.get("sender");
     let card = sender
@@ -37,6 +47,15 @@ pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -
         .unwrap_or("");
     // 群名片取 card，无则 nickname
     let display = if card.is_empty() { nickname } else { card };
+    // R2 原料：sender 带 bot 标记或匿名
+    let sender_bot = sender
+        .and_then(|s| s.get("anonymous"))
+        .map(|a| !a.is_null())
+        .unwrap_or(false)
+        || sender
+            .and_then(|s| s.get("bot"))
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
 
     let (chat_type, chat_id) = match message_type {
         "group" => (
@@ -92,21 +111,33 @@ pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -
     if self_qq == 0 {
         debug!("自身 QQ 号未知（get_login_info 未完成），at_me 判定退化");
     }
+    // 自己的消息回报：记录 NapCat message_id，Prefilter R4（回复/引用我的消息）据此判定
+    if is_self {
+        if let Some(id) = napcat_msg_id {
+            self_ids.record(id);
+        }
+    }
 
-    let person_id = format!("p_{user_id}");
+    // 云团 = 特殊 person_id 'self'（data-model 五章）
+    let person_id = if is_self {
+        "self".to_string()
+    } else {
+        format!("p_{user_id}")
+    };
+    let display_name = if is_self { "云团" } else { display };
     let mut conn = yuantuan_core::db::connect(db_path)?;
     let tx = conn.transaction().context("开启摄取事务失败")?;
     tx.execute(
         "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES (?1, ?2, ?3, ?3)
          ON CONFLICT(person_id) DO UPDATE SET last_seen = excluded.last_seen, display_name = excluded.display_name",
-        params![person_id, display, ts],
+        params![person_id, display_name, ts],
     )?;
     tx.execute(
         "INSERT INTO identities(person_id, platform, platform_uid) VALUES (?1, 'qq', ?2)
          ON CONFLICT(platform, platform_uid) DO NOTHING",
         params![person_id, user_id.to_string()],
     )?;
-    if chat_type == "group" {
+    if chat_type == "group" && !is_self {
         tx.execute(
             "INSERT INTO member_profiles(chat_id, person_id, card, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(chat_id, person_id) DO UPDATE SET card = excluded.card, updated_at = excluded.updated_at",
@@ -121,7 +152,7 @@ pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -
             chat_id,
             chat_type,
             person_id,
-            display,
+            display_name,
             text,
             mentions_json,
             reply_to,
@@ -141,6 +172,8 @@ pub fn ingest_message(v: &Value, bus: &EventBus, db_path: &Path, self_qq: u64) -
         text,
         at_me,
         has_image,
+        reply_to,
+        sender_bot,
         ts,
     }));
     Ok(())

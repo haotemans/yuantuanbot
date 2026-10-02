@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{spawn, NapcatConfig};
 use yuantuan_core::db;
 use yuantuan_core::event::{spawn_tracer, EventBus};
+use yuantuan_core::prefilter::SelfMsgIds;
 
 const SELF_QQ: u64 = 10001;
 
@@ -97,6 +98,7 @@ async fn ingest_group_and_private_messages() {
             ws_url: format!("ws://127.0.0.1:{port}"),
             token: String::new(),
         },
+        SelfMsgIds::default(),
     );
 
     // 轮询等待摄取完成（最多 8s）

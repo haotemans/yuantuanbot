@@ -8,6 +8,7 @@ pub mod context_builder;
 pub mod db;
 pub mod decision;
 pub mod event;
+pub mod llm;
 pub mod memory;
 pub mod prefilter;
 pub mod reply_engine;
