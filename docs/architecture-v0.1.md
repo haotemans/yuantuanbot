@@ -657,6 +657,13 @@ Memory更新
 Event Bus（进程内 channel）
 ```
 
+## 事件总线终稿（V1）
+
+- 传输：tokio broadcast 单总线；事件为强类型枚举
+- 事件清单：`MessageReceived / MessageSent / BubbleSent / ReplyInterrupted / DecisionMade / TaskCreated / TaskStepDone / TaskFinished / MemoryWritten / RelationshipEventAppended / MoodChanged / MemberJoined / MemberLeft / ConsolidationDone / ConfigReloaded / PersonalityVersionChanged`
+- 落库：全部事件同时写入 `events` 表（轮转保留 7 天）——Decision trace 页与任务可视化页的数据源（表结构见 docs/data-model.md）
+- V1 订阅者四个：Prefilter 管线（订 MessageReceived）、tracer（全订，落表）、WebUI 实时推送（全订）、夜间归纳调度器（定时器驱动，不订消息事件）
+
 ---
 
 # 十二、Context 系统（机制定稿）
@@ -696,7 +703,26 @@ Event Bus（进程内 channel）
 
 模型通过 API 接入（见十五章），与聊天生成共用同一个 LLM Provider 层，绑定便宜快速的模型角色（便宜快速指 API 计费与速度，与部署服务器规格无关）。Decision 本质是分类器，不是对话者。
 
-输入消息先经 Runtime 本地 Prefilter 预筛（@检测、回复检测、发言节流、静默规则），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。主动插话与被动回复走同一条管线，无独立心跳；是否主动开口，同样由 Decision 拿着群聊上下文裁决。
+输入消息先经 Runtime 本地 Prefilter 预筛（规则集见下），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。主动插话与被动回复走同一条管线，无独立心跳；是否主动开口，同样由 Decision 拿着群聊上下文裁决。
+
+## Prefilter 规则集（终稿）
+
+顺序短路（命中即出结果）：
+
+| # | 规则 | 判定 | 默认 |
+| --- | --- | --- | --- |
+| R1 | 发送者是自己 | 丢弃 | 常开不可关（防自嗨死循环） |
+| R2 | 发送者是其他 bot / 系统消息 | 丢弃 | 开 |
+| R3 | @我 | 必放行（跳过后续规则） | 开 |
+| R4 | 回复 / 引用我的消息 | 必放行 | 开 |
+| R5 | 私聊 | 必放行（私聊几乎必回、首泡秒发；仍留给 Decision 以获得 mood / memory_write / task 分流） | 开 |
+| R6 | 群聊普通消息 | 过节流闸，过了放行 | 开 |
+| R7 | 无文字纯表情 / 图片（未@我） | 丢弃（偷表情包入库不受影响） | 开 |
+
+节流闸（全部热配）：
+
+- 回复节流：每 chat 每 60 秒最多 4 个回复回合、12 个气泡
+- 成本闸：全局每分钟最多 30 次 Decision API 调用，超限排队延迟，不丢弃
 
 输入契约：Decision Context 终稿见 `docs/data-model.md` 第十章（消息、发送者关系分、场景统计、记忆提示、当前情绪、活动任务）。
 
@@ -933,7 +959,7 @@ MVP 闭环：
 
 - Runtime模块边界
 - Bot ↔ Decision ↔ Agent接口协议
-- Event Bus事件模型
+- Event Bus事件模型（已定稿，见十一章）
 - Context Builder（无状态滑窗、在场名册、情绪注入、Decision 输入契约组装）
 - Memory Schema（已定稿，见 docs/data-model.md）
 - Relationship Graph（@统计驱动 + 归纳提炼）
@@ -941,7 +967,7 @@ MVP 闭环：
 - Tool Registry（原生 function calling 优先）
 - LLM Provider（三角色路由）
 - Decision输入输出Schema（已定稿，见十三章 + data-model.md）
-- Prefilter规则集
+- Prefilter规则集（已定稿，见十三章）
 - 情绪系统（已定稿，见十章；亲密度调制为二期）
 - 消息流水存储（messages 表）
 - 回复形态引擎（已定稿，见十四章：拆泡契约 / 打字延时 / 异步作废 / 发送队列 / 折叠卡）
@@ -970,3 +996,4 @@ MVP 闭环：
 - 2026-10-02（拷问轮 Q21–Q25 定稿）：数据模型落地为 `docs/data-model.md`（三主体长期记忆单表、每日摘要索引、mentions 字段、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、mood 免持久化、Decision 输入契约）；WebUI 扩至八页（+Meme 库管理，人格编辑器加 diff 视图）；新增偷表情包待确认队列；`data/` 统一存储布局。
 - 2026-10-02（拷问轮 Q26–Q30 定稿）：上下文机制三件套——Bot Context 分层智能拼接（在场名册以 person_id 锚定身份、40k tokens 总预算、超长按层压缩）、全上下文无状态滑窗组装、Agent Working Memory 硬性截断（最近一步全量 + 历史摘要行）；模型角色扩为三（新增 agent_exec，独立配置允许同绑）；工具调用协议定 OpenAI 原生 function calling 优先、JSON-in-text 降级兜底；完工交接契约（result_summary + artifacts + 关键数据）；回复形态两条铁律（短句多条、难题走合并转发折叠卡）；WebUI 扩至九页（+任务执行可视化）。
 - 2026-10-02（拷问轮 Q31–Q33 定稿）：回复形态引擎完整机制——bot_chat 格式化输出契约（`‖` 分泡 + `::` 指令行，Runtime 本地解析、机械兜底）；打字延时模型（按字数 clamp + 抖动，首泡快发，总预算 ≤8s）；发送队列 per-chat 串行异步执行 + 上下文变动作废剩余泡；3 泡封顶、第 4 泡强制转折叠卡；节流按气泡计数；稳定六条。
+- 2026-10-02（拷问轮 Q34–Q37 定稿）：Prefilter 规则集终稿（R1–R7 顺序短路：自身/其他bot丢弃、@我与回复我必放行、私聊必放行几乎必回、群聊过节流闸、纯图丢弃不惊动决策）；节流放宽为每 chat 60 秒 4 回合 / 12 气泡、全局每分钟 30 次 Decision 成本闸（超限排队不丢弃，全热配）；Event Bus 终稿（16 个事件类型、全量落 events 表 7 天轮转、四类订阅者）。

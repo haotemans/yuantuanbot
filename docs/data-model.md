@@ -304,7 +304,26 @@ CREATE TABLE state_kv (
 
 ---
 
+# 十二、事件表（events）
+
+Event Bus 全量事件的落库副本（由 tracer 订阅写入），Decision trace 页与任务执行可视化页的数据源：
+
+```sql
+CREATE TABLE events (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind    TEXT NOT NULL,     -- MessageReceived | DecisionMade | TaskStepDone | ...
+  payload TEXT,              -- JSON，按事件类型定结构
+  ts      INTEGER NOT NULL
+);
+CREATE INDEX idx_events_ts ON events(ts);
+```
+
+轮转保留 7 天（定时任务清理）。
+
+---
+
 # 修订记录
 
 - 2026-10-02 V0.1：数据模型定稿（拷问轮 Q21–Q25）：三主体长期记忆单表、每日摘要索引、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、消息 mentions 字段、mood 免持久化、Decision 输入契约。
 - 2026-10-02（Q26–Q30）：Task 章新增完工交接契约（result_summary + artifacts + key_data）与工具结果硬性截断规则。
+- 2026-10-02（Q34–Q37）：新增第十二章 events 表（Event Bus 落库副本，7 天轮转），供 trace 与任务可视化页查询。
