@@ -39,19 +39,21 @@ async fn auth_status_reflects_setup_state() {
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
 
+    // 服务未就绪时连接会被拒，返回 Option 让就绪等待循环能容忍
     let get_status = || async {
-        let r: Value = http.get(format!("{base}/api/auth/status")).send().await.unwrap().json().await.unwrap();
-        r["need_setup"].as_bool().unwrap()
+        let r: Value = http.get(format!("{base}/api/auth/status")).send().await.ok()?.json().await.ok()?;
+        r["need_setup"].as_bool()
     };
 
     // 未就绪前等服务
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut first = None;
     while Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_secs(2), get_status()).await {
-            Ok(v) => { first = Some(v); break; }
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        if let Ok(Some(v)) = tokio::time::timeout(Duration::from_secs(2), get_status()).await {
+            first = Some(v);
+            break;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(first, Some(true), "无密码应 need_setup=true");
 
@@ -61,10 +63,10 @@ async fn auth_status_reflects_setup_state() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get_status().await, false);
+    assert_eq!(get_status().await, Some(false));
 
     // 删除密码 → true（忘记密码的运维路径，README 有指引）
     let conn = db::connect(&db_path).unwrap();
     conn.execute("DELETE FROM state_kv WHERE key = 'admin_pass_hash'", []).unwrap();
-    assert_eq!(get_status().await, true);
+    assert_eq!(get_status().await, Some(true));
 }
