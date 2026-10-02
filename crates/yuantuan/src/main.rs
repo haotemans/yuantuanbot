@@ -32,6 +32,18 @@ async fn main() -> Result<()> {
 
     let tables = yuantuan_core::db::list_tables(&conn)?;
     info!(count = tables.len(), "迁移完成，库内表清单");
+    let has_admin: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM state_kv WHERE key = 'admin_pass_hash'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if has_admin {
+        info!("管理员密码已配置");
+    } else {
+        info!("管理员密码未配置：首启引导中（WebUI 首次登录将设定管理员密码）");
+    }
     drop(conn);
 
     let db_path = data_root.join("yuantuan.db");

@@ -21,6 +21,24 @@ pub struct LoginReq {
     password: String,
 }
 
+/// 免 token：登录页据此显示真实首启引导状态
+pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let need_setup = state
+        .open_db()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM state_kv WHERE key = 'admin_pass_hash'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .ok()
+        })
+        .map(|has| !has)
+        .unwrap_or(false); // 库不可读时按已配置处理，不引导
+    Json(json!({ "need_setup": need_setup }))
+}
+
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginReq>,

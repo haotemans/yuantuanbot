@@ -20,6 +20,16 @@ cargo run -p yuantuan
 
 然后浏览器开 `http://127.0.0.1:8085/`：首次输入的密码即为管理员密码（首启引导）→ 「配置 / 模型」页绑定 providers（或手改 providers.toml 后在页面保存触发 LLM 热重建）→ 配好 NapCat 地址即可上线。公网暴露走反代（caddy 等），不要把 8085 直连公网。
 
+### 忘记管理员密码
+
+停进程，清掉密码哈希后重启（回到首启引导状态）：
+
+```bash
+sqlite3 data/yuantuan.db "DELETE FROM state_kv WHERE key='admin_pass_hash';"
+```
+
+没有 sqlite3 命令行时，直接 `rm -rf data` 重开也可（会丢全部运行数据，慎用）。
+
 前端重新生成：`cd webui-frontend && npm run build`（产物直写 `crates/webui/static/` 并**入库**——这是刻意的：无 node 的机器也能 `cargo build`；构建缺失时内嵌 `static/legacy-index.html` 占位兜底）。
 
 ## 工程结构

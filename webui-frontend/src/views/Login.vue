@@ -1,7 +1,8 @@
 <template>
   <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center">
     <n-card title="云团 WebUI 登录" style="width: 360px">
-      <p style="color: #888; font-size: 13px">首次使用：输入的密码即为管理员密码（首启引导）</p>
+      <p v-if="needSetup === true" style="color: #888; font-size: 13px">首次使用：输入的密码即为管理员密码（首启引导）</p>
+      <p v-else-if="needSetup === false" style="color: #888; font-size: 13px">请输入管理员密码</p>
       <n-input v-model:value="pw" type="password" show-password-on="click" placeholder="管理员密码" @keyup.enter="doLogin" />
       <n-button type="primary" block style="margin-top: 12px" :loading="loading" @click="doLogin">登录</n-button>
       <n-alert v-if="msg" type="error" style="margin-top: 10px">{{ msg }}</n-alert>
@@ -10,7 +11,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { TOKEN_KEY } from '../api'
@@ -20,6 +21,15 @@ const pw = ref('')
 const msg = ref('')
 const loading = ref(false)
 const router = useRouter()
+// null=未知（接口失败静默退化，不显示提示以免误导）
+const needSetup = ref(null)
+
+onMounted(async () => {
+  try {
+    const { data } = await axios.get('/api/auth/status')
+    needSetup.value = !!data.need_setup
+  } catch { /* 静默退化：不显示任何提示 */ }
+})
 
 async function doLogin() {
   msg.value = ''

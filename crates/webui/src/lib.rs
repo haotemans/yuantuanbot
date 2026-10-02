@@ -52,6 +52,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         ));
     let api = Router::new()
         .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/status", get(auth::status))
         .merge(protected);
 
     let app = Router::new()
