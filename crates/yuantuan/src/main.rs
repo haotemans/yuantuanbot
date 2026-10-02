@@ -33,6 +33,12 @@ async fn main() -> Result<()> {
     let tables = db::list_tables(&conn)?;
     info!(count = tables.len(), tables = ?tables, "迁移完成，库内表清单");
 
+    // e. WebUI（占位数仪表盘 + 密码登录），阻塞至进程结束
+    let db_path = std::path::Path::new(&cfg.data.dir).join("yuantuan.db");
     info!("云团骨架启动成功");
-    Ok(())
+    info!(
+        url = %format!("http://{}:{}/", cfg.webui.host, cfg.webui.port),
+        "管理员面板；首次登录提交的密码即为管理员密码（首启引导）"
+    );
+    yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port).await
 }

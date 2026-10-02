@@ -9,6 +9,7 @@ use std::path::Path;
 pub struct Config {
     pub data: DataConfig,
     pub napcat: NapcatConfig,
+    pub webui: WebuiConfig,
     pub log: LogConfig,
 }
 
@@ -29,6 +30,13 @@ pub struct NapcatConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct WebuiConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct LogConfig {
     pub level: String,
 }
@@ -38,6 +46,7 @@ impl Default for Config {
         Self {
             data: DataConfig::default(),
             napcat: NapcatConfig::default(),
+            webui: WebuiConfig::default(),
             log: LogConfig::default(),
         }
     }
@@ -58,6 +67,15 @@ impl Default for NapcatConfig {
     }
 }
 
+impl Default for WebuiConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 8085,
+        }
+    }
+}
+
 impl Default for LogConfig {
     fn default() -> Self {
         Self { level: "info".into() }
@@ -74,6 +92,11 @@ dir = "data"
 # NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
 ws_url = "ws://127.0.0.1:3001"
 token = ""
+
+[webui]
+# 管理面板监听地址（仅本机；公网暴露走反代，见架构文档安全小节）
+host = "127.0.0.1"
+port = 8085
 
 [log]
 level = "info"

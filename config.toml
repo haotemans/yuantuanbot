@@ -9,5 +9,10 @@ dir = "data"
 ws_url = "ws://127.0.0.1:3001"
 token = ""
 
+[webui]
+# 管理面板监听地址（仅本机；公网暴露走反代，见架构文档安全小节）
+host = "127.0.0.1"
+port = 8085
+
 [log]
 level = "info"

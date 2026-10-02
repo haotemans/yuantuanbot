@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>云团 WebUI · 占位页</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #222; margin: 0; }
+  main { max-width: 720px; margin: 48px auto; padding: 0 16px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 20px 24px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .muted { color: #6b7280; font-size: 13px; }
+  input[type=password] { width: 240px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; }
+  button { padding: 8px 16px; border: none; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+  button.ghost { background: #e5e7eb; color: #111; margin-left: 8px; }
+  pre { background: #f3f4f6; border-radius: 6px; padding: 12px; overflow: auto; font-size: 13px; }
+  #msg { color: #dc2626; font-size: 13px; min-height: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>云团 WebUI · 占位页</h1>
+    <p class="muted">骨架阶段页面（Vue3 + Naive UI 正式前端在后续施工单接入）。首次提交密码即为管理员密码。</p>
+    <p class="muted">healthz：<span id="health">…</span></p>
+  </div>
+  <div class="card">
+    <input id="pw" type="password" placeholder="管理员密码">
+    <button onclick="login()">登录 / 首启设定</button>
+    <button class="ghost" onclick="loadOverview()">刷新 Overview</button>
+    <p id="msg"></p>
+  </div>
+  <div class="card">
+    <p class="muted">/api/overview</p>
+    <pre id="out">（尚未查询）</pre>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function login() {
+  $("msg").textContent = "";
+  const r = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: $("pw").value }),
+  });
+  const j = await r.json();
+  if (r.ok && j.token) {
+    localStorage.setItem("yt_token", j.token);
+    loadOverview();
+  } else {
+    $("msg").textContent = (j.error || "登录失败") + "（HTTP " + r.status + "）";
+  }
+}
+
+async function loadOverview() {
+  const token = localStorage.getItem("yt_token") || "";
+  const r = await fetch("/api/overview", {
+    headers: { Authorization: "Bearer " + token },
+  });
+  $("out").textContent = JSON.stringify(await r.json(), null, 2) + "\n\nHTTP " + r.status;
+}
+
+fetch("/healthz").then(r => r.json()).then(j => {
+  $("health").textContent = JSON.stringify(j);
+});
+</script>
+</body>
+</html>
