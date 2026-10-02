@@ -1,22 +1,22 @@
 <template>
-  <div class="login-hero">
-    <div class="login-grid">
-      <section class="login-brand">
-        <div class="login-brand-name">
-          <span class="yt-brand-logo">云</span>
-          云团
-        </div>
-        <p class="login-brand-tag">
-          一个长期运行的 QQ 群聊 Agent——会搭话、有记忆、有情绪。<br />
-          这里是它的运维面板。
-        </p>
-        <div class="login-brand-points">
-          <span class="login-point">Decision trace 实时观察</span>
-          <span class="login-point">记忆与人格管理</span>
-          <span class="login-point">关系网可视化</span>
-        </div>
-      </section>
-      <n-card style="width: 100%">
+  <div class="login-split">
+    <section class="login-hero-side">
+      <div class="login-hero-name">
+        <span class="yt-brand-logo">云</span>
+        云团
+      </div>
+      <p class="login-hero-slogan">
+        一个长期运行的 QQ 群聊 Agent——会搭话、有记忆、有情绪。<br />
+        这里是它的运维面板。
+      </p>
+      <div class="login-hero-points">
+        <span class="login-hero-point"><yt-icon name="trace" :size="16" />Decision trace 实时观察</span>
+        <span class="login-hero-point"><yt-icon name="memories" :size="16" />记忆与人格版本管理</span>
+        <span class="login-hero-point"><yt-icon name="relations" :size="16" />群友关系网可视化</span>
+      </div>
+    </section>
+    <section class="login-form-side">
+      <n-card class="login-form-card">
         <div style="font-size: 18px; font-weight: 700; margin-bottom: 4px">登录</div>
         <p v-if="needSetup === true" style="color: var(--yt-text-dim); font-size: 13px; margin: 0 0 14px">
           首次使用：输入的密码即为管理员密码（首启引导）
@@ -32,7 +32,7 @@
         </n-button>
         <n-alert v-if="msg" type="error" style="margin-top: 12px">{{ msg }}</n-alert>
       </n-card>
-    </div>
+    </section>
   </div>
 </template>
 
@@ -42,6 +42,7 @@ import { useRouter } from 'vue-router'
 import axios from 'axios'
 import { TOKEN_KEY } from '../api'
 import { reconnectWs, ensureWs } from '../ws'
+import YtIcon from '../components/YtIcon.vue'
 
 const pw = ref('')
 const msg = ref('')

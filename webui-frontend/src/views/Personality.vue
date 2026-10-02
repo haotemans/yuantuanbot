@@ -26,7 +26,7 @@
             :content="`${v.note || '—'} · ${fmt(v.created_at)} · ${v.content_len} 字`">
             <n-space size="small" style="margin-top: 4px">
               <n-checkbox :checked="diffSel.includes(v.version_no)" @update:checked="(c) => toggleDiff(v.version_no, c)">参比</n-checkbox>
-              <n-button size="tiny" @click="loadOne(v.version_no)">载入编辑器</n-button>
+              <n-button size="tiny" @click="loadOne(v.version_no)">载入此版本编辑</n-button>
               <n-popconfirm @positive-click="rollback(v.version_no)">
                 <template #trigger><n-button size="tiny" type="warning">回滚到此版</n-button></template>
                 生成新版本（内容=v{{ v.version_no }}），历史线性向前，确定？

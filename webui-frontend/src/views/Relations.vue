@@ -6,23 +6,26 @@
           <span style="font-size: 12px; color: var(--yt-text-dim)">悬停查看详情 · 点击节点锁定右侧信息</span>
         </template>
         <div v-show="hasNodes" ref="el" class="graph-canvas" />
-        <n-empty v-if="!hasNodes" class="yt-empty" description="还没有关系数据，先去群里聊几句吧" />
+        <empty-state v-if="!hasNodes" title="还没有关系数据" hint="云团在群里和大家聊几句之后，第一条关系边就会出现在这里" />
       </n-card>
     </n-gi>
     <n-gi>
-      <n-card v-if="sel" size="small" :title="`${sel.id}「${sel.name}」`">
-        <div style="font-size: 13px; line-height: 1.9">
-          <div>首次见：{{ fmtTs(sel.first_seen) }}</div>
-          <div>最近见：{{ fmtTs(sel.last_seen) }}</div>
-          <n-divider style="margin: 8px 0" />
-          <div v-for="e in relatedEdges" :key="e.from + '→' + e.to">
-            {{ e.from === sel.id ? '→' : '←' }} {{ e.from === sel.id ? e.to : e.from }}：
-            trust {{ e.trust.toFixed(2) }} / familiar {{ e.familiar.toFixed(2) }}
+      <Transition name="slide-in" mode="out-in">
+        <n-card v-if="sel" :key="sel.id" size="small" :title="`${sel.name || sel.id}`">
+          <template #header-extra><span class="mono" style="font-size: 12px; color: var(--yt-text-dim)">{{ sel.id }}</span></template>
+          <div style="font-size: 13px; line-height: 1.9">
+            <div>首次见：{{ fmtTs(sel.first_seen) }}</div>
+            <div>最近见：{{ fmtTs(sel.last_seen) }}</div>
+            <n-divider style="margin: 8px 0" />
+            <div v-for="e in relatedEdges" :key="e.from + '→' + e.to">
+              {{ e.from === sel.id ? '→' : '←' }} {{ e.from === sel.id ? e.to : e.from }}：
+              trust {{ e.trust.toFixed(2) }} / familiar {{ e.familiar.toFixed(2) }}
+            </div>
+            <n-empty v-if="!relatedEdges.length" description="暂无关系边" />
           </div>
-          <n-empty v-if="!relatedEdges.length" description="暂无关系边" />
-        </div>
-      </n-card>
-      <n-empty v-else class="yt-empty" description="点击节点查看详情" />
+        </n-card>
+        <empty-state v-else title="未选中节点" hint="点击画布中的任意节点，这里滑入它的关系详情" />
+      </Transition>
     </n-gi>
   </n-grid>
 </template>
@@ -33,6 +36,7 @@ import { DataSet, Network } from 'vis-network/standalone'
 import { api } from '../api'
 import { fmtTs } from '../fmt'
 import { useUiStore } from '../store/ui'
+import EmptyState from '../components/EmptyState.vue'
 
 const el = ref(null)
 const hasNodes = ref(true)
@@ -103,13 +107,20 @@ onMounted(async () => {
     },
   })
 
+  // hover 辉光：节点放大一圈 + 主色光晕
   net.on('hoverNode', (p) => {
     const n = nodes.get(p.node)
-    if (n) nodes.update({ id: p.node, size: (n._base ?? 12) * 1.35, borderWidth: 3 })
+    if (n) nodes.update({
+      id: p.node, size: (n._base ?? 12) * 1.3, borderWidth: 3,
+      shadow: { enabled: true, color: 'rgba(79, 70, 229, 0.45)', size: 22, x: 0, y: 0 },
+    })
   })
   net.on('blurNode', (p) => {
     const n = nodes.get(p.node)
-    if (n) nodes.update({ id: p.node, size: n._base ?? 12, borderWidth: 2 })
+    if (n) nodes.update({
+      id: p.node, size: n._base ?? 12, borderWidth: 2,
+      shadow: { enabled: true, color: 'rgba(15,23,42,0.18)', size: 8, x: 0, y: 2 },
+    })
   })
   net.on('click', (p) => {
     sel.value = p.nodes.length ? d.nodes.find((n) => n.id === p.nodes[0]) : null

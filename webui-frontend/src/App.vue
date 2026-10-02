@@ -5,6 +5,12 @@
       <router-view v-if="$route.name === 'login'" />
       <n-layout v-else style="height: 100vh">
         <n-layout-header class="yt-header" style="height: 54px; display: flex; align-items: center; padding: 0 18px; gap: 14px">
+          <n-button quaternary circle size="small" @click="ui.toggleSider">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </n-button>
           <div class="yt-brand">
             <span class="yt-brand-logo">云</span>
             <span class="yt-brand-name">云团</span>
@@ -28,8 +34,10 @@
           </div>
         </n-layout-header>
         <n-layout has-sider position="absolute" style="top: 54px">
-          <n-layout-sider bordered width="184" collapse-mode="width" :native-scrollbar="false">
-            <n-menu :options="menuOptions" :value="String($route.name)" style="padding: 6px 0" @update:value="go" />
+          <n-layout-sider class="yt-sider" bordered collapse-mode="width" :width="196" :collapsed-width="62"
+                          :collapsed="ui.collapsed" :native-scrollbar="false">
+            <n-menu :options="menuOptions" :value="String($route.name)" :collapsed="ui.collapsed"
+                    :collapsed-icon-size="20" :root-indent="20" style="padding: 6px 0" @update:value="go" />
           </n-layout-sider>
           <n-layout-content :native-scrollbar="false" content-style="padding: 18px 20px;">
             <router-view v-slot="{ Component }">
@@ -47,11 +55,12 @@
 <script setup>
 import { computed, h, onMounted, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { darkTheme } from 'naive-ui'
+import { darkTheme, NTooltip } from 'naive-ui'
 import { useUiStore } from './store/ui'
 import { lightOverrides, darkOverrides } from './theme'
 import { wsConnected, ensureWs } from './ws'
 import { TOKEN_KEY, api } from './api'
+import YtIcon from './components/YtIcon.vue'
 
 const ui = useUiStore()
 const route = useRoute()
@@ -59,16 +68,33 @@ const router = useRouter()
 
 const moodTag = computed(() => ({ happy: 'success', calm: 'default', angry: 'error', down: 'warning' }[ui.mood] || 'default'))
 
-/** @type {[string, [string, string][]][]} */
+// 菜单：[分组, [路由名, 文案, 图标]]；折叠态图标外包 tooltip 补名字
+/** @type {[string, [string, string, string][]][]} */
 const groups = [
-  ['总览', [['dashboard', '仪表盘']]],
-  ['观察', [['trace', 'Decision trace'], ['tasks', '任务回放'], ['memories', '记忆浏览'], ['relations', '关系网']]],
-  ['配置', [['platform', '平台连接'], ['models', '模型'], ['personality', '人格'], ['meme', 'Meme'], ['kb', '知识库']]],
-  ['系统', [['backup', '备份 / 日志']]],
+  ['总览', [['dashboard', '仪表盘', 'dashboard']]],
+  ['观察', [
+    ['trace', 'Decision trace', 'trace'],
+    ['tasks', '任务回放', 'tasks'],
+    ['memories', '记忆浏览', 'memories'],
+    ['relations', '关系网', 'relations'],
+  ]],
+  ['配置', [
+    ['platform', '平台连接', 'platform'],
+    ['models', '模型', 'models'],
+    ['personality', '人格', 'personality'],
+    ['meme', 'Meme', 'meme'],
+    ['kb', '知识库', 'kb'],
+  ]],
+  ['系统', [['backup', '备份 / 日志', 'backup']]],
 ]
+const iconWithTip = (icon, label) => () =>
+  h(NTooltip, { trigger: 'hover', placement: 'right', disabled: !ui.collapsed }, {
+    trigger: () => h(YtIcon, { name: icon, size: 20 }),
+    default: () => label,
+  })
 const menuOptions = groups.map(([label, children]) => ({
   type: 'group', label, key: label,
-  children: children.map(([key, l]) => ({ label: () => h('span', l), key })),
+  children: children.map(([key, l, icon]) => ({ label: () => h('span', l), key, icon: iconWithTip(icon, l) })),
 }))
 
 function go(key) { router.push({ name: key }) }

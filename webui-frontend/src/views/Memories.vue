@@ -3,7 +3,7 @@
     <n-space style="margin-bottom: 8px">
       <n-select v-model:value="ownerType" :options="typeOptions" clearable placeholder="owner_type" size="small" style="width: 140px" />
       <n-input v-model:value="ownerId" placeholder="owner_id（如 p_2001 / 555666）" size="small" style="width: 220px" @keyup.enter="load" />
-      <n-button size="small" @click="load">查询</n-button>
+      <n-button size="small" type="primary" secondary @click="load">查询记忆</n-button>
     </n-space>
     <n-tabs type="line" animated>
       <n-tab-pane name="long" tab="长期记忆">

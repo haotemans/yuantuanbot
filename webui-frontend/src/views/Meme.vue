@@ -2,7 +2,7 @@
   <div>
     <n-tabs type="line" animated @update:value="load">
       <n-tab-pane name="pending" :tab="`待审队列（${pending.length}）`">
-        <n-empty v-if="!pending.length" class="yt-empty" description="没有待审的表情包" />
+        <empty-state v-if="!pending.length" title="待审队列已清空" hint="群里再偷到新图时会先进这里，等你收编" />
         <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in pending" :key="m.id">
             <n-card size="small">
@@ -22,9 +22,9 @@
       <n-tab-pane name="active" :tab="`库（${active.length}）`">
         <n-space style="margin-bottom: 8px">
           <n-select v-model:value="cat" :options="catOptions" clearable placeholder="类别筛选" size="small" style="width: 160px" />
-          <n-button size="small" @click="load">刷新</n-button>
+          <n-button size="small" @click="load">刷新图库</n-button>
         </n-space>
-        <n-empty v-if="!shownActive.length" class="yt-empty" description="该分类下还没有表情包" />
+        <empty-state v-if="!shownActive.length" title="该分类下还没有表情包" hint="去「待审队列」收编几张，或换个分类筛选" />
         <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in shownActive" :key="m.id">
             <n-card size="small">
@@ -45,6 +45,7 @@
 import { computed, h, onMounted, ref } from 'vue'
 import { NImage } from 'naive-ui'
 import { api } from '../api'
+import EmptyState from '../components/EmptyState.vue'
 
 // 图片走 Bearer 头像不可直链 → fetch blob 转 objectURL
 const MemeImg = (props) => {

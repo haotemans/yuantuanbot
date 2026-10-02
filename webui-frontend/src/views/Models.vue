@@ -19,7 +19,7 @@
         </div>
         <n-space>
           <n-input v-model:value="newName" size="small" placeholder="新 provider 名" style="width: 180px" />
-          <n-button size="small" @click="addProvider">添加</n-button>
+          <n-button size="small" @click="addProvider">添加 Provider</n-button>
         </n-space>
       </n-space>
     </n-card>
@@ -34,7 +34,7 @@
           </n-form-item>
         </n-gi>
       </n-grid>
-      <n-button type="primary" size="small" :loading="saving" @click="save">保存（providers.toml 整体写回 + LLM 热重建）</n-button>
+      <n-button type="primary" size="small" :loading="saving" @click="save">保存模型配置并热重建</n-button>
       <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px', marginLeft: '8px' }">{{ msg }}</span>
     </n-card>
   </div>

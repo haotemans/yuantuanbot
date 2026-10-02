@@ -19,8 +19,18 @@
         </n-tag>
         <n-tag round>mood · {{ d.mood }}</n-tag>
         <n-tag round>运行时长 · {{ fmtUptime(d.uptime_secs) }}</n-tag>
-        <n-button size="tiny" secondary style="margin-left: auto" @click="load">刷新</n-button>
+        <n-button size="tiny" secondary style="margin-left: auto" @click="load">刷新数据</n-button>
       </n-space>
+    </n-card>
+
+    <n-card title="今日消息趋势" size="small" style="margin-top: 14px">
+      <template #header-extra>
+        <span class="stat-hint">
+          <span style="color:#06b6d4">■</span> 收 &nbsp;<span style="color:#4f46e5">■</span> 发 · 按小时聚合最近事件样本
+        </span>
+      </template>
+      <HourBars v-if="hasHourData" :hours="hourSeries" />
+      <empty-state v-else title="今天还没有消息样本" hint="群里有人说话后，这里会按小时画出收发趋势" />
     </n-card>
 
     <n-card title="最近事件" size="small" style="margin-top: 14px">
@@ -32,7 +42,7 @@
           <span class="mini-time">{{ fmtAgo(e.ts) }}</span>
         </div>
       </div>
-      <n-empty v-else class="yt-empty" description="还没有事件，等群里有人说话就有了" />
+      <empty-state v-else title="还没有事件" hint="等群里有人说话，第一条 MessageReceived 就会出现在这里" />
     </n-card>
   </div>
 </template>
@@ -49,11 +59,16 @@ import { api } from '../api'
 import { useUiStore } from '../store/ui'
 import { kindColor, eventSummary, fmtAgo, fmtUptime } from '../fmt'
 import Sparkline from '../components/Sparkline.vue'
+import HourBars from '../components/HourBars.vue'
+import EmptyState from '../components/EmptyState.vue'
 
 /** @type {import('vue').Ref<Record<string, any>>} */
 const d = ref({})
 /** @type {import('vue').Ref<any[]>} */
 const recent = ref([])
+/** @type {import('vue').Ref<{ in: number, out: number }[]>} */
+const hourSeries = ref(Array.from({ length: 24 }, () => ({ in: 0, out: 0 })))
+const hasHourData = ref(false)
 const ui = useUiStore()
 let timer = null
 
@@ -65,11 +80,27 @@ function sample(key, v) {
 }
 
 const statCards = computed(() => [
-  { label: '今日收', value: d.value.messages_in_today, color: '#2563eb', points: trend.inToday },
-  { label: '今日发', value: d.value.messages_out_today, color: '#0ea5e9', points: trend.outToday },
+  { label: '今日收', value: d.value.messages_in_today, color: '#06b6d4', points: trend.inToday },
+  { label: '今日发', value: d.value.messages_out_today, color: '#4f46e5', points: trend.outToday },
   { label: '今日 Decision 调用（成本）', value: d.value.decision_calls_today, color: '#d97706', points: trend.decision },
   { label: '活跃任务', value: d.value.active_tasks, color: '#7c3aed', points: trend.tasks },
 ])
+
+// 前端聚合：拉最近事件样本，按今天 0 点起分小时桶（收=MessageReceived，发=BubbleSent）
+function aggregateHours(events) {
+  const midnight = new Date()
+  midnight.setHours(0, 0, 0, 0)
+  const t0 = Math.floor(midnight.getTime() / 1000)
+  const buckets = Array.from({ length: 24 }, () => ({ in: 0, out: 0 }))
+  let any = false
+  for (const e of events) {
+    if (!e.ts || e.ts < t0) continue
+    const h = new Date(e.ts * 1000).getHours()
+    if (e.kind === 'MessageReceived') { buckets[h].in++; any = true }
+    else if (e.kind === 'BubbleSent') { buckets[h].out++; any = true }
+  }
+  return { buckets, any }
+}
 
 async function load() {
   try {
@@ -82,8 +113,11 @@ async function load() {
     sample('tasks', data.active_tasks)
   } catch { /* 401 由拦截器处理 */ }
   try {
-    const { data } = await api.get('/events?limit=8')
-    recent.value = data.events
+    const { data } = await api.get('/events?limit=500')
+    recent.value = data.events.slice(0, 8)
+    const { buckets, any } = aggregateHours(data.events)
+    hourSeries.value = buckets
+    hasHourData.value = any
   } catch { /* 同上 */ }
 }
 

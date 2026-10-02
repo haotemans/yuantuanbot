@@ -1,13 +1,32 @@
 <template>
-  <pre class="json-view"><code><span v-for="(t, i) in tokens" :key="i" :class="t.cls">{{ t.text }}</span></code></pre>
+  <div class="json-wrap">
+    <button type="button" class="json-copy" :class="{ ok: copied }" @click="copy">
+      {{ copied ? '已复制' : '复制' }}
+    </button>
+    <pre class="json-view"><code><span v-for="(t, i) in tokens" :key="i" :class="t.cls">{{ t.text }}</span></code></pre>
+  </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps({
   data: { default: null },
 })
+
+const copied = ref(false)
+let copyTimer = null
+async function copy() {
+  const text = JSON.stringify(props.data, null, 2) ?? ''
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // 剪贴板权限被拒时降级：选中态提示交给按钮文案
+  }
+  copied.value = true
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => { copied.value = false }, 1600)
+}
 
 // 极简 JSON 语法高亮：字符串/键/数字/布尔/null/标点六类，逐 token 渲染（Vue 自动转义，无 v-html）
 const TOKEN_RE = /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*")(\s*:)?|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\btrue\b|\bfalse\b|\bnull\b/g
@@ -32,6 +51,32 @@ const tokens = computed(() => {
 </script>
 
 <style scoped>
+.json-wrap {
+  position: relative;
+}
+.json-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  border-radius: 7px;
+  border: 1px solid var(--yt-card-border);
+  background: var(--yt-header-bg);
+  backdrop-filter: blur(6px);
+  color: var(--yt-text-dim);
+  cursor: pointer;
+  transition: color 0.14s ease, border-color 0.14s ease;
+}
+.json-copy:hover {
+  color: var(--yt-primary);
+  border-color: var(--yt-primary);
+}
+.json-copy.ok {
+  color: #16a34a;
+  border-color: #16a34a;
+}
 .json-view {
   margin: 0;
   padding: 12px 14px;
@@ -39,10 +84,10 @@ const tokens = computed(() => {
   line-height: 1.65;
   overflow: auto;
   max-height: calc(100vh - 260px);
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--yt-card-border);
   background: var(--yt-code-bg);
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--yt-mono);
   white-space: pre-wrap;
   word-break: break-all;
 }

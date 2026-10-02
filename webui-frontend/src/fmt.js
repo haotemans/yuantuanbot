@@ -23,17 +23,28 @@ export function fmtUptime(s) {
 
 // 事件 kind 主色：trace 时间线、仪表盘迷你流、详情徽标共用一份
 export const KIND_COLORS = {
-  MessageReceived: '#0ea5e9',
-  DecisionMade: '#16a34a',
-  BubbleSent: '#d97706',
+  MessageReceived: '#06b6d4',
+  DecisionMade: '#4f46e5',
+  BubbleSent: '#818cf8',
   ReplyInterrupted: '#dc2626',
   ConsolidationDone: '#7c3aed',
-  MemoryWritten: '#2563eb',
+  MemoryWritten: '#0891b2',
   MoodChanged: '#db2777',
   ConfigReloaded: '#64748b',
 }
 export function kindColor(kind) {
   return KIND_COLORS[kind] || '#94a3b8'
+}
+
+// DecisionMade 的 action 语义色：卡片头部色条与徽标共用
+export const ACTION_COLORS = {
+  reply: '#16a34a',
+  ignore: '#64748b',
+  send_meme: '#7c3aed',
+  start_task: '#d97706',
+}
+export function actionColor(action) {
+  return ACTION_COLORS[action] || '#94a3b8'
 }
 
 // 事件行摘要：trace 列表与仪表盘迷你流统一口径

@@ -13,7 +13,7 @@
       </n-form-item>
     </n-form>
     <n-space>
-      <n-button type="primary" size="small" :loading="saving" @click="save">保存（写回 config.toml）</n-button>
+      <n-button type="primary" size="small" :loading="saving" @click="save">保存连接配置</n-button>
       <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ msg }}</span>
     </n-space>
     <n-alert type="info" style="margin-top: 10px; font-size: 12px">
