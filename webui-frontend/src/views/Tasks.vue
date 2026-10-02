@@ -5,15 +5,16 @@
         <n-select v-model:value="state" :options="stateOptions" clearable placeholder="state" size="small" style="width: 140px" @update:value="load" />
         <n-button size="small" @click="load">刷新</n-button>
       </n-space>
-      <n-list bordered hoverable clickable style="max-height: calc(100vh - 130px); overflow: auto">
+      <n-list v-if="list.length" bordered hoverable clickable style="max-height: calc(100vh - 130px); overflow: auto; border-radius: 10px">
         <n-list-item v-for="t in list" :key="t.task_id" @click="open(t)">
           <n-space size="small" align="center">
-            <n-tag size="tiny" :type="stateTag(t.state)">{{ t.state }}</n-tag>
+            <n-tag size="tiny" :type="stateTag(t.state)" round>{{ t.state }}</n-tag>
             <span>{{ t.goal }}</span>
-            <span style="color: #888; font-size: 12px">{{ t.used_calls }}/{{ t.budget_max_calls }}次</span>
+            <span style="color: var(--yt-text-dim); font-size: 12px">{{ t.used_calls }}/{{ t.budget_max_calls }}次</span>
           </n-space>
         </n-list-item>
       </n-list>
+      <n-empty v-else class="yt-empty" description="暂无任务，上方可换筛选条件" />
     </n-gi>
     <n-gi>
       <n-card v-if="cur" :title="`${cur.task_id} · ${cur.goal}`" size="small">
@@ -22,7 +23,7 @@
         </n-timeline>
         <n-empty v-if="!events.length" description="无流水" />
       </n-card>
-      <n-empty v-else description="点一个任务看时间轴" />
+      <n-empty v-else class="yt-empty" description="点击左侧任务查看时间轴" />
     </n-gi>
   </n-grid>
 </template>

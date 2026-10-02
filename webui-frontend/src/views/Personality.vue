@@ -12,7 +12,7 @@
       <n-card v-if="diffLines" title="版本对照（左旧右新）" size="small" style="margin-top: 12px">
         <div style="font-family: monospace; font-size: 12px; max-height: 320px; overflow: auto">
           <div v-for="(l, i) in diffLines" :key="i" :style="{ background: l.bg, whiteSpace: 'pre-wrap' }">
-            <span style="color: #888">{{ l.tag }}</span> {{ l.text }}
+            <span style="color: var(--yt-text-dim)">{{ l.tag }}</span> {{ l.text }}
           </div>
         </div>
       </n-card>

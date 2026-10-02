@@ -1,22 +1,25 @@
 {
   "name": "yuantuan-webui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "typecheck": "vue-tsc --noEmit",
+    "build": "npm run typecheck && vite build"
   },
   "dependencies": {
-    "axios": "^1.7.9",
-    "naive-ui": "^2.41.0",
-    "pinia": "^2.3.1",
-    "vis-network": "^9.1.9",
-    "vue": "^3.5.13",
-    "vue-router": "^4.5.0"
+    "axios": "1.20.0",
+    "naive-ui": "2.45.3",
+    "pinia": "4.0.3",
+    "vis-network": "10.1.2",
+    "vue": "3.5.43",
+    "vue-router": "5.3.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.2.1",
-    "vite": "^6.0.7"
+    "@vitejs/plugin-vue": "6.0.9",
+    "typescript": "6.0.3",
+    "vite": "8.3.2",
+    "vue-tsc": "3.3.12"
   }
 }

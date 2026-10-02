@@ -7,10 +7,12 @@
     </n-space>
     <n-tabs type="line" animated>
       <n-tab-pane name="long" tab="长期记忆">
-        <n-data-table :columns="memCols" :data="memories" size="small" :pagination="{ pageSize: 20 }" />
+        <n-skeleton v-if="!firstLoaded" text :repeat="8" style="margin-top: 6px" />
+        <n-data-table v-else :columns="memCols" :data="memories" size="small" :loading="loading" :pagination="{ pageSize: 20 }" />
       </n-tab-pane>
       <n-tab-pane name="daily" tab="每日摘要">
-        <n-data-table :columns="sumCols" :data="summaries" size="small" :pagination="{ pageSize: 20 }" />
+        <n-skeleton v-if="!firstLoaded" text :repeat="8" style="margin-top: 6px" />
+        <n-data-table v-else :columns="sumCols" :data="summaries" size="small" :loading="loading" :pagination="{ pageSize: 20 }" />
       </n-tab-pane>
     </n-tabs>
   </div>
@@ -22,8 +24,12 @@ import { api } from '../api'
 
 const ownerType = ref(null)
 const ownerId = ref('')
+/** @type {import('vue').Ref<any[]>} */
 const memories = ref([])
+/** @type {import('vue').Ref<any[]>} */
 const summaries = ref([])
+const loading = ref(false)
+const firstLoaded = ref(false)
 const typeOptions = ['person', 'chat', 'self'].map((s) => ({ label: s, value: s }))
 
 const memCols = [
@@ -42,14 +48,20 @@ const sumCols = [
 function fmt(ts) { return ts ? new Date(ts * 1000).toLocaleString() : '—' }
 
 async function load() {
-  const p = new URLSearchParams({ limit: '200' })
-  if (ownerType.value) p.set('owner_type', ownerType.value)
-  if (ownerId.value) p.set('owner_id', ownerId.value)
-  const [m, s] = await Promise.all([
-    api.get(`/memories?${p}`), api.get(`/summaries?${p}`),
-  ])
-  memories.value = m.data.memories
-  summaries.value = s.data.summaries
+  loading.value = true
+  try {
+    const p = new URLSearchParams({ limit: '200' })
+    if (ownerType.value) p.set('owner_type', ownerType.value)
+    if (ownerId.value) p.set('owner_id', ownerId.value)
+    const [m, s] = await Promise.all([
+      api.get(`/memories?${p}`), api.get(`/summaries?${p}`),
+    ])
+    memories.value = m.data.memories
+    summaries.value = s.data.summaries
+  } finally {
+    loading.value = false
+    firstLoaded.value = true
+  }
 }
 onMounted(load)
 </script>
