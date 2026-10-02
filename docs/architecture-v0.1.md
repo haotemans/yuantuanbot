@@ -348,6 +348,10 @@ artifacts
 
 执行模型：**带预算的工具循环**。不同任务调用工具的次数不同，不做步数硬限制；Runtime 只卡一条硬预算（默认工具调用次数 / 时长上限，可配置），防失控、防成本爆炸。预算管安全，不管能力。
 
+循环机制：每步 = agent_exec 输出 tool_call → Runtime 执行 → 结果截断后注入 Working Memory → 再喂回模型，直到它产出完工结果或撞预算。
+
+完工交接契约（Agent → Bot）：`result_summary`（≤300 字人话）+ artifacts 路径列表 + 关键数据点。Bot 只拿这三样组织语言，不接触工具流水。
+
 第一阶段：Task 以只读工具为主（search、web_read），写执行类工具（write_code、run_code 等）第二阶段接入。
 
 ---
@@ -391,6 +395,8 @@ audio
 ```
 
 第一阶段仅接入只读类（search、web_read）；文件/编程/多媒体工具第二阶段按 Task 预算模型接入。
+
+工具调用协议：**OpenAI 原生 function calling 为主**；Provider 声明不支持 tools 时降级为 JSON-in-text + 校验重试（与 Decision 输出校验同一套工程哲学）。
 
 ---
 
@@ -439,7 +445,7 @@ Bot：
 好了，代码整理好了，压缩包发你。
 ```
 
-Bot 永不直接调用工具；任何工具使用都以 Task 形式存在，哪怕只调一次。
+Bot 永不直接调用工具；任何工具使用都以 Task 形式存在，哪怕只调一次。Agent 交付给 Bot 的只有完工交接契约（result_summary + artifacts + 关键数据），不是工具流水。
 
 ---
 
@@ -653,37 +659,28 @@ Event Bus（进程内 channel）
 
 ---
 
-# 十二、Context 系统
+# 十二、Context 系统（机制定稿）
 
-三类：
+三类上下文，统一由 Context Builder 组装。总机制：**无状态滑窗**——每轮从 SQLite 重取最新数据组装，窗户口始终咬住最新消息；进程重启上下文天然恢复，无内存会话缓存、无一致性包袱。
 
-## Bot Context
+## Bot Context（聊天环境，喂 bot_chat）
 
-聊天环境：
+分层智能拼接（自上而下）：
 
-- 最近消息
-- 当前说话人
-- 群环境
-- 关系
+1. **system**：人设提示词 + 当前情绪一句 + 行为准则（不暴露内部机制、不刷屏、短句风格）
+2. **在场名册**：近期说话人的人物卡（person_id + 当前名片 + 信任/熟悉/亲密度 + ≤3 条相关记忆）——模型认人靠名册以 person_id 锚定，名片只是人话渲染，**绝不用昵称反推身份**
+3. **会话区**：本 chat 滑窗最新 K 条消息（含云团自己的历史发言，保持前后一致），一行一条渲染
+4. **锚点**：被@/被回复的那条消息单独标出，本次回复围绕它
 
-## Agent Context
+预算：总输入 **≤40k tokens**（默认上限，可配置）。超长按层优先级压缩：先缩会话区 K 值，再裁记忆条数；名册与锚点不动。
 
-任务环境：
+## Agent Context（任务环境，喂 agent_exec）
 
-- 目标
-- 计划
-- 工具结果
-- 状态
+- goal + 交接语境（来自 Decision.start_task 的 task_goal）
+- Working Memory：工具调用历史——**最近一步结果全量，更早的压成摘要行**；工具结果全文只落 task_events，进模型前恒经 Runtime 硬性截断（最大截断防爆上下文）
+- 循环与预算见 4.2
 
-## Decision Context
-
-给小脑：
-
-- 用户是谁
-- 当前关系
-- 消息类型
-- 是否需要行动
-- 当前情绪状态
+## Decision Context（给小脑）
 
 字段级输入契约已定稿（每字段有界、摘要优先），见 `docs/data-model.md` 第十章。
 
@@ -697,7 +694,7 @@ Event Bus（进程内 channel）
 
 不是生成语言。
 
-模型通过 API 接入（见十五章），与聊天生成共用同一个 LLM Provider 层，绑定便宜快速的模型角色。Decision 本质是分类器，不是对话者。
+模型通过 API 接入（见十五章），与聊天生成共用同一个 LLM Provider 层，绑定便宜快速的模型角色（便宜快速指 API 计费与速度，与部署服务器规格无关）。Decision 本质是分类器，不是对话者。
 
 输入消息先经 Runtime 本地 Prefilter 预筛（@检测、回复检测、发言节流、静默规则），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。主动插话与被动回复走同一条管线，无独立心跳；是否主动开口，同样由 Decision 拿着群聊上下文裁决。
 
@@ -736,13 +733,12 @@ Event Bus（进程内 channel）
 
 像真人。
 
-闲聊：
+## 回复形态（两条铁律）
 
-```text
-哈哈确实
-```
+1. **短句多条**：像真人一样切成多条短气泡连发，不发论文式长段
+2. **难题 / 长答案 → 合并转发折叠卡**：详情放进 QQ 合并转发消息（"查看N条转发消息"那种折叠卡），群里只留一句短引导；卡片内可含步骤、代码、数据
 
-明确回应：
+普通回应：
 
 ```text
 @A 我看看
@@ -762,7 +758,7 @@ Event Bus（进程内 channel）
 必要说明
 ```
 
-避免刷屏。
+避免刷屏：短句连发同样计入 Prefilter 发言节流。
 
 ## 表情包（Meme）
 
@@ -794,16 +790,17 @@ Rust。
 
 所有模型能力通过 API 接入，本地不做任何推理。
 
-Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时消费两个模型角色：
+Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运行时消费三个模型角色：
 
 | 角色 | 用途 | 模型要求 | 输出 |
 | --- | --- | --- | --- |
 | bot_chat | Bot 人格回复 | 中高档模型 | 自然语言 |
 | decision | Decision 小脑 | 便宜快速模型 | 固定 JSON Schema |
+| agent_exec | 任务执行与工具调用 | 强模型（支持 function calling） | tool_call / 结果整合 |
 
 原则：
 
-- 角色与具体模型解耦，在配置中绑定（providers.toml）
+- 三角色配置独立；允许绑同一个模型（省钱时 agent_exec 与 bot_chat 绑一家合法），角色不合并
 - 换模型只改配置，不改代码
 - LLM API 是系统唯一的重型外部依赖（meme 的 DINOv3 为可选增强槽位，默认关闭，非关键路径）
 
@@ -871,16 +868,17 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 
 技术：axum（Rust Web 框架）提供 API + 嵌入 Vue3 SPA 静态资源。
 
-八个页面：
+九个页面：
 
 1. 平台连接（OneBot 地址 / token）
-2. LLM Provider（base_url / key / 角色绑定）
+2. LLM Provider（base_url / key / 三角色绑定）
 3. 人格编辑器（改提示词 + 版本历史 + 版本 diff 视图 + 一键回滚，体验对标专业编辑器）
 4. 记忆浏览（长期记忆 / 群档案 / 每日摘要）
 5. Decision trace 流（它为什么接 / 不接这句话）
 6. 关系网可视化（Person 节点 + 关系边 + 亲密度，人机边一并成图）
 7. 知识库管理（上传 / 解析状态，功能本体默认关闭）
 8. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
+9. 任务执行可视化（Task 工具循环逐步回放：每步 tool_call / 结果 / 耗时 / 预算消耗）
 
 安全：
 
@@ -906,12 +904,12 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 5. Decision模型接入（Prefilter + Schema 校验）
 6. Memory / Relationship基础版（双通道写入 + 夜间归纳 + 每日摘要）
 7. Tool系统（只读工具起步 + 带预算的工具循环）
-8. WebUI管理端（八页 + 密码登录）
+8. WebUI管理端（九页 + 密码登录）
 
 MVP 闭环：
 
 ```text
-消息 → Prefilter → Decision → ┬ bot_chat 直答（+情绪 +meme）
+消息 → Prefilter → Decision → ┬ bot_chat 直答（+情绪 +meme，短句多条）
                               └ 最小Task（只读工具循环）→ Bot组织语言
    → 记忆/亲密度写入 → 夜间归纳（含每日摘要）→ WebUI 管理
 ```
@@ -923,19 +921,21 @@ MVP 闭环：
 - Runtime模块边界
 - Bot ↔ Decision ↔ Agent接口协议
 - Event Bus事件模型
-- Context Builder（含情绪注入、Decision 输入契约组装）
+- Context Builder（无状态滑窗、在场名册、情绪注入、Decision 输入契约组装）
 - Memory Schema（已定稿，见 docs/data-model.md）
 - Relationship Graph（@统计驱动 + 归纳提炼）
-- Task生命周期（预算模型）
-- Tool Registry
-- LLM Provider（角色路由）
+- Task生命周期（预算模型 + 完工交接契约）
+- Tool Registry（原生 function calling 优先）
+- LLM Provider（三角色路由）
 - Decision输入输出Schema（已定稿，见十三章 + data-model.md）
 - Prefilter规则集
 - 情绪系统（已定稿，见十章；亲密度调制为二期）
 - 消息流水存储（messages 表）
+- 回复形态引擎（短句切分 / 合并转发折叠卡）
 - 每日摘要生成（群 + 人物）
 - 数据备份（GitHub 私有仓）
 - 关系网可视化
+- 任务执行可视化
 - Meme 库管线（去重 / 分类 / 偷表情包队列）
 - Trace / Archive
 - QQ 适配层（OneBot 11 / NapCat）
@@ -955,3 +955,4 @@ MVP 闭环：
 - 2026-10-02：补充模型接入设计（LLM + Decision 双角色走 Provider API，其余零外部依赖）、Decision 前置本地 Prefilter、2C2G 部署形态原则。
 - 2026-10-02（拷问轮 Q1–Q20 定稿）：QQ 先行 + NapCat 独立容器（ADR-0001）；不自研 Rust QQ 协议（ADR-0003）；主动/被动统一管线；人格静态化 + 版本化（ADR-0002）；记忆双通道 + 夜间归纳 + 500 条窗口 + person_id 合并 + 敏感拒收；云团↔人亲密度；表情包机制；Task 带预算工具循环；情绪系统（ADR-0004）；消息全量落库 + GitHub 私有仓备份；WebUI 七页 + axum + 密码认证；Decision Schema 终稿。
 - 2026-10-02（拷问轮 Q21–Q25 定稿）：数据模型落地为 `docs/data-model.md`（三主体长期记忆单表、每日摘要索引、mentions 字段、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、mood 免持久化、Decision 输入契约）；WebUI 扩至八页（+Meme 库管理，人格编辑器加 diff 视图）；新增偷表情包待确认队列；`data/` 统一存储布局。
+- 2026-10-02（拷问轮 Q26–Q30 定稿）：上下文机制三件套——Bot Context 分层智能拼接（在场名册以 person_id 锚定身份、40k tokens 总预算、超长按层压缩）、全上下文无状态滑窗组装、Agent Working Memory 硬性截断（最近一步全量 + 历史摘要行）；模型角色扩为三（新增 agent_exec，独立配置允许同绑）；工具调用协议定 OpenAI 原生 function calling 优先、JSON-in-text 降级兜底；完工交接契约（result_summary + artifacts + 关键数据）；回复形态两条铁律（短句多条、难题走合并转发折叠卡）；WebUI 扩至九页（+任务执行可视化）。

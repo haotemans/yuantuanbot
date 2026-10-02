@@ -226,6 +226,18 @@ CREATE INDEX idx_te_task ON task_events(task_id, seq);
 
 产出文件实体进 `data/artifacts/`，表里只存路径；归档 = state 转 `archived` + 摘要进 `data/archive/`。
 
+## 完工交接契约（Agent → Bot）
+
+- `result_summary`：≤300 字人话结果摘要
+- `artifacts`：产出文件路径列表
+- `key_data`：关键数据点（长度、耗时、通过率等）
+
+Bot 只拿这三样组织语言，不接触工具流水。
+
+## 上下文截断规则
+
+LLM 可见的工具结果恒经 Runtime 硬性截断：最近一步结果全量进 Working Memory，更早的压成摘要行；全文只存 task_events。截断由 Runtime 执行，不指望模型自觉（与 Schema 校验同一哲学）。
+
 ---
 
 # 九、State 持久化
@@ -295,3 +307,4 @@ CREATE TABLE state_kv (
 # 修订记录
 
 - 2026-10-02 V0.1：数据模型定稿（拷问轮 Q21–Q25）：三主体长期记忆单表、每日摘要索引、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、消息 mentions 字段、mood 免持久化、Decision 输入契约。
+- 2026-10-02（Q26–Q30）：Task 章新增完工交接契约（result_summary + artifacts + key_data）与工具结果硬性截断规则。
