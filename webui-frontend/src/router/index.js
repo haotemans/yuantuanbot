@@ -11,6 +11,7 @@ const routes = [
   { path: '/relations', name: 'relations', component: () => import('../views/Relations.vue') },
   { path: '/platform', name: 'platform', component: () => import('../views/Platform.vue') },
   { path: '/models', name: 'models', component: () => import('../views/Models.vue') },
+  { path: '/params', name: 'params', component: () => import('../views/Params.vue') },
   { path: '/personality', name: 'personality', component: () => import('../views/Personality.vue') },
   { path: '/meme', name: 'meme', component: () => import('../views/Meme.vue') },
   { path: '/kb', name: 'kb', component: () => import('../views/Kb.vue') },

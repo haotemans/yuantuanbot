@@ -81,6 +81,7 @@ const groups = [
   ['配置', [
     ['platform', '平台连接', 'platform'],
     ['models', '模型', 'models'],
+    ['params', '运行参数', 'tune'],
     ['personality', '人格', 'personality'],
     ['meme', 'Meme', 'meme'],
     ['kb', '知识库', 'kb'],

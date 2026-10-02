@@ -916,7 +916,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 技术：axum 提供 REST + 单条 WebSocket（`/ws` 推送事件），前端 Vue3 + Vite + Naive UI（关系网用 vis-network），rust-embed 嵌入二进制。壳布局与三页内页定调见 `docs/runtime-design.md` 第四章。
 
-十个页面（左导航四组）：
+十一个页面（左导航四组）：
 
 总览
 1. 仪表盘 = 首页（今日收发 / Decision 成本 / 活跃任务 / 运行时长 + NapCat 心跳 + 迷你事件流）
@@ -929,10 +929,11 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 配置
 6. 平台连接（OneBot 地址 / token）
-7. LLM Provider（base_url / key / 三角色绑定）
-8. 人格编辑器（改提示词 + 版本时间线 + diff 对照 + 一键回滚，体验对标专业编辑器）
-9. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
-10. 知识库管理（上传 / 解析状态，功能本体默认关闭）
+7. LLM Provider（base_url / key / 三角色绑定 + 连通性测试）
+8. 运行参数（夜间归纳 / 上下文预算 / 回复形态 / 节流+成本闸 / Meme 开关，写回即热应用）
+9. 人格编辑器（改提示词 + 版本时间线 + diff 对照 + 一键回滚，体验对标专业编辑器）
+10. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
+11. 知识库管理（上传 / 解析状态，功能本体默认关闭）
 
 安全：
 
@@ -958,7 +959,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 5. Decision模型接入（Prefilter + Schema 校验）
 6. Memory / Relationship基础版（双通道写入 + 夜间归纳 + 每日摘要）
 7. Tool系统（只读工具起步 + 带预算的工具循环）
-8. WebUI管理端（十页 + 密码登录）
+8. WebUI管理端（十一页 + 密码登录）
 
 MVP 闭环：
 
@@ -1015,3 +1016,4 @@ MVP 闭环：
 - 2026-10-02（小改）：回复形态补充原则——3 泡为封顶非配额，不为分泡而分泡；分泡只沿自然语气断点，模型不凑数、兜底不强拆。
 - 2026-10-02（拷问轮 Q38–Q43 定稿）：运行时设计落地为 `docs/runtime-design.md`（四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、MCP 三层扩展模型）；WebUI 扩至十页（+仪表盘首页，左导航四组信息架构，技术栈定 Vue3 + Naive UI + vis-network + 单条 /ws）。
 - 2026-10-02（拷问轮 Q44–Q47 定稿）：前端交付走 CI（仓库只存源码，Actions 构建 musl 单文件发 release），主题默认亮色（暗色可切）；adapter-qq 通讯设计入 runtime-design.md 第六章——正向 WS（云团=client）、段数组映射铁律（core 不见 CQ 码）、同一 WS 双工 echo 回执 10s 超时、断线接受丢失记事件。
+- 2026-10-03：配置中心 2.0——全参数面板化（新增「运行参数」页，页面数 10→11）+ 热应用槽扩展（reply/context/consolidation/meme 换槽与定时器重建）+ 模型页连通性测试（/api/llm/test）。

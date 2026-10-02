@@ -84,12 +84,12 @@ yuantuan/
 观察
   Decision trace · 任务回放 · 记忆浏览 · 关系网
 配置
-  平台连接 · 模型 · 人格 · Meme · 知识库
+  平台连接 · 模型 · 运行参数 · 人格 · Meme · 知识库
 系统
   备份 / 日志
 ```
 
-十页中三页定调：
+十一页中三页定调：
 
 - **仪表盘**：四张数字卡（今日收发 / Decision 调用=今日成本 / 活跃任务 / 运行时长）+ NapCat 心跳线 + 最近事件迷你流——3 秒判生死
 - **Decision trace**：左实时事件流（WS 滚动）+ 右详情（完整输入/输出 JSON + reason），按 chat / action 过滤——"它刚才为什么不理我"10 秒破译
@@ -148,3 +148,4 @@ NapCat 起 WS 服务端（默认 `ws://127.0.0.1:3001`，带 token），云团�
 - 2026-10-02（拷问轮 Q44–Q47）：新增第六章 adapter-qq 通讯设计——正向 WS、段数组映射铁律（core 不见 CQ 码）、双工 echo 回执 10s 超时、断线接受丢失记事件；WebUI 主题默认亮色（暗色可切换）。
 - 2026-10-03：前端工具链升级——vite 8.3.2、typescript 6.0.3（TS7 因 vue-tsc 未兼容其 native 接口暂缓）、vue-tsc 3.3.12、@vitejs/plugin-vue 6.x；并完成全站设计打磨一轮（theme 令牌/品牌区/仪表盘 sparkline/trace 卡片化/空态骨架屏）。
 - 2026-10-03（TS7 补票条件，调研自官方源）：TS7 已 GA 但 7.0 无程序化 API；等 ① typescript@7.1 稳定版（API 落地，tracking microsoft/TypeScript#63800，预计 2026 Q4）+ ② vuejs/language-tools PR #6170 合并（vue-tsc 将由 @vue/content-mapper 取代）。两者齐即升级并迁移类型检查链路。
+- 2026-10-03：配置中心 2.0——全参数面板化（新增「运行参数」页，页面清单同步十一页）+ 热应用槽扩展（reply/context/consolidation/meme 换槽与定时器重建）+ 模型页连通性测试（/api/llm/test）。
