@@ -1,2 +1,4 @@
 target/
 data/
+webui-frontend/node_modules/
+webui-frontend/dist/
