@@ -1,0 +1,16 @@
+[package]
+name = "yuantuan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+yuantuan-core = { path = "../core" }
+yuantuan-adapter-qq = { path = "../adapter-qq" }
+yuantuan-webui = { path = "../webui" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"

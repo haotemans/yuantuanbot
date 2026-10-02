@@ -1,0 +1,13 @@
+# 云团主配置
+# 运行数据全部落在 [data].dir 下（见 docs/data-model.md 第一章）
+
+[data]
+dir = "data"
+
+[napcat]
+# NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
+ws_url = "ws://127.0.0.1:3001"
+token = ""
+
+[log]
+level = "info"

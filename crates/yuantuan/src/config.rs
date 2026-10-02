@@ -1,0 +1,95 @@
+//! config.toml 加载：缺失时生成带注释的默认模板并回落默认值，任何失败都走 anyhow 不上 panic。
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::path::Path;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub data: DataConfig,
+    pub napcat: NapcatConfig,
+    pub log: LogConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DataConfig {
+    /// 运行数据根目录（yuantuan.db 与各子目录都在其下）
+    pub dir: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct NapcatConfig {
+    /// NapCat OneBot 11 正向 WS 地址
+    pub ws_url: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    pub level: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data: DataConfig::default(),
+            napcat: NapcatConfig::default(),
+            log: LogConfig::default(),
+        }
+    }
+}
+
+impl Default for DataConfig {
+    fn default() -> Self {
+        Self { dir: "data".into() }
+    }
+}
+
+impl Default for NapcatConfig {
+    fn default() -> Self {
+        Self {
+            ws_url: "ws://127.0.0.1:3001".into(),
+            token: String::new(),
+        }
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self { level: "info".into() }
+    }
+}
+
+const DEFAULT_TEMPLATE: &str = r#"# 云团主配置
+# 运行数据全部落在 [data].dir 下（见 docs/data-model.md 第一章）
+
+[data]
+dir = "data"
+
+[napcat]
+# NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
+ws_url = "ws://127.0.0.1:3001"
+token = ""
+
+[log]
+level = "info"
+"#;
+
+pub fn load_or_default(path: &str) -> Result<Config> {
+    let p = Path::new(path);
+    if !p.exists() {
+        std::fs::write(p, DEFAULT_TEMPLATE)
+            .with_context(|| format!("写入默认配置模板失败: {path}"))?;
+        tracing::info!(path, "config.toml 不存在，已生成默认模板，继续使用内置默认值");
+        return Ok(Config::default());
+    }
+    let text = std::fs::read_to_string(p)
+        .with_context(|| format!("读取配置文件失败: {path}"))?;
+    let cfg: Config = toml::from_str(&text)
+        .with_context(|| format!("解析配置文件失败: {path}"))?;
+    Ok(cfg)
+}
