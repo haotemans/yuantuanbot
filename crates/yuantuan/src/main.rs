@@ -1,5 +1,4 @@
-//! 云团装配入口：配置 → data 目录 → SQLite 迁移 → 日志。
-//! 领域系统尚未接入（core / adapter-qq / webui 均为占位 crate）。
+//! 云团装配入口：配置 → data 目录 → SQLite 迁移 → Event Bus / tracer → adapter-qq → WebUI。
 
 mod config;
 mod db;
@@ -17,6 +16,7 @@ async fn main() -> Result<()> {
     info!(
         data_dir = %cfg.data.dir,
         napcat_ws = %cfg.napcat.ws_url,
+        napcat_enabled = cfg.napcat.enabled,
         log_level = %cfg.log.level,
         "配置加载完成"
     );
@@ -28,13 +28,34 @@ async fn main() -> Result<()> {
     // c. SQLite（WAL）+ 迁移
     let mut conn = db::open(&cfg.data.dir)?;
     info!(db = %data_root.join("yuantuan.db").display(), "SQLite 已打开（WAL）");
-    db::migrate(&mut conn)?;
+    yuantuan_core::db::migrate(&mut conn)?;
 
-    let tables = db::list_tables(&conn)?;
-    info!(count = tables.len(), tables = ?tables, "迁移完成，库内表清单");
+    let tables = yuantuan_core::db::list_tables(&conn)?;
+    info!(count = tables.len(), "迁移完成，库内表清单");
+    drop(conn);
 
-    // e. WebUI（占位数仪表盘 + 密码登录），阻塞至进程结束
-    let db_path = std::path::Path::new(&cfg.data.dir).join("yuantuan.db");
+    // d. Event Bus + tracer（全事件落 events 表）
+    let bus = yuantuan_core::event::EventBus::default();
+    let db_path = data_root.join("yuantuan.db");
+    let _tracer = yuantuan_core::event::spawn_tracer(&bus, db_path.clone());
+
+    // e. adapter-qq（[napcat].enabled=false 则跳过；连不上退避重连不死进程）
+    let _adapter = if cfg.napcat.enabled {
+        info!(ws_url = %cfg.napcat.ws_url, "adapter-qq 启动（正向 WS）");
+        Some(yuantuan_adapter_qq::spawn(
+            bus.clone(),
+            db_path.clone(),
+            yuantuan_adapter_qq::NapcatConfig {
+                ws_url: cfg.napcat.ws_url.clone(),
+                token: cfg.napcat.token.clone(),
+            },
+        ))
+    } else {
+        info!("[napcat].enabled=false，跳过 adapter-qq");
+        None
+    };
+
+    // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");
     info!(
         url = %format!("http://{}:{}/", cfg.webui.host, cfg.webui.port),

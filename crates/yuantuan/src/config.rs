@@ -23,6 +23,8 @@ pub struct DataConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct NapcatConfig {
+    /// 是否接入 NapCat（false 则跳过 adapter-qq）
+    pub enabled: bool,
     /// NapCat OneBot 11 正向 WS 地址
     pub ws_url: String,
     pub token: String,
@@ -61,6 +63,7 @@ impl Default for DataConfig {
 impl Default for NapcatConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             ws_url: "ws://127.0.0.1:3001".into(),
             token: String::new(),
         }
@@ -90,6 +93,8 @@ dir = "data"
 
 [napcat]
 # NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
+# enabled = false 时不接入 NapCat（其余子系统照常运行）
+enabled = true
 ws_url = "ws://127.0.0.1:3001"
 token = ""
 
