@@ -11,6 +11,7 @@ pub struct Config {
     pub napcat: NapcatConfig,
     pub webui: WebuiConfig,
     pub prefilter: PrefilterSection,
+    pub consolidation: ConsolidationSection,
     pub log: LogConfig,
 }
 
@@ -51,6 +52,7 @@ impl Default for Config {
             napcat: NapcatConfig::default(),
             webui: WebuiConfig::default(),
             prefilter: PrefilterSection::default(),
+            consolidation: ConsolidationSection::default(),
             log: LogConfig::default(),
         }
     }
@@ -81,11 +83,31 @@ pub struct PrefilterSection {
     pub self_msg_cap: i64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ConsolidationSection {
+    pub enabled: bool,
+    /// 每日执行时刻（本地 HH:MM）
+    pub daily_time: String,
+    /// 调试用：启动后立即执行一次
+    pub run_on_startup: bool,
+}
+
 impl Default for PrefilterSection {
     fn default() -> Self {
         Self {
             window_secs: 60,
             self_msg_cap: 12,
+        }
+    }
+}
+
+impl Default for ConsolidationSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            daily_time: "03:00".into(),
+            run_on_startup: false,
         }
     }
 }
@@ -127,6 +149,13 @@ port = 8085
 # 群聊发言节流（架构十三章节流闸；热配在后续施工单接入）
 window_secs = 60
 self_msg_cap = 12
+
+[consolidation]
+# 夜间归纳（架构七章）；daily_time 为本地 HH:MM
+enabled = true
+daily_time = "03:00"
+# 调试用：启动后立即执行一次（生产保持 false）
+run_on_startup = false
 
 [log]
 level = "info"

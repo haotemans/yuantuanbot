@@ -21,5 +21,12 @@ port = 8085
 window_secs = 60
 self_msg_cap = 12
 
+[consolidation]
+# 夜间归纳（架构七章）；daily_time 为本地 HH:MM
+enabled = true
+daily_time = "03:00"
+# 调试用：启动后立即执行一次（生产保持 false）
+run_on_startup = false
+
 [log]
 level = "info"

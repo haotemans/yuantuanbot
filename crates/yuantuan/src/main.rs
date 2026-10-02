@@ -94,8 +94,8 @@ async fn main() -> Result<()> {
     let _pipeline = yuantuan_core::bot::spawn_pipeline(yuantuan_core::bot::PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
-        llm,
-        self_qq,
+        llm: llm.clone(),
+        self_qq: self_qq.clone(),
         self_ids,
         mood: yuantuan_core::state::MoodState::default(),
         prefilter: yuantuan_core::prefilter::Config {
@@ -104,6 +104,25 @@ async fn main() -> Result<()> {
         },
         reply: Some(reply_engine),
     });
+
+    // i. 夜间归纳调度器（单实例锁；enabled=false 则跳过）
+    if cfg.consolidation.enabled {
+        let _consolidation = yuantuan_core::consolidation::spawn_scheduler(
+            yuantuan_core::consolidation::ConsolidationDeps {
+                db_path: db_path.clone(),
+                llm: llm.clone(),
+                bus: bus.clone(),
+                self_qq,
+                cfg: yuantuan_core::consolidation::ConsolidationCfg {
+                    enabled: cfg.consolidation.enabled,
+                    daily_time: cfg.consolidation.daily_time.clone(),
+                    run_on_startup: cfg.consolidation.run_on_startup,
+                },
+            },
+        );
+    } else {
+        info!("[consolidation].enabled=false，跳过夜间归纳调度器");
+    }
 
     // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");

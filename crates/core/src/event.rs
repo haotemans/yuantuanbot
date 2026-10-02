@@ -51,8 +51,28 @@ pub struct BubbleSentPayload {
     pub note: Option<String>,
 }
 
+/// 单 chat 归纳结果（ConsolidationDone 明细行）
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatConsolidationOutcome {
+    pub chat_id: String,
+    pub msg_start: i64,
+    pub msg_end: i64,
+    pub mention_pairs: usize,
+    pub facts_written: usize,
+    /// ok | llm_failed | no_new_today | skipped_done
+    pub status: String,
+}
+
+/// ConsolidationDone 载荷（各 chat 统计 + 总耗时，trace 页数据源）
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsolidationDonePayload {
+    pub date: String,
+    pub chats: Vec<ChatConsolidationOutcome>,
+    pub elapsed_ms: u64,
+}
+
 /// 事件清单（架构十一章终稿）；本阶段实装 MessageReceived / DecisionMade / BubbleSent /
-/// ReplyInterrupted，其余为变体占位
+/// ReplyInterrupted / ConsolidationDone，其余为变体占位
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum Event {
@@ -69,7 +89,7 @@ pub enum Event {
     MoodChanged,
     MemberJoined,
     MemberLeft,
-    ConsolidationDone,
+    ConsolidationDone(ConsolidationDonePayload),
     ConfigReloaded,
     PersonalityVersionChanged,
 }
@@ -90,7 +110,7 @@ impl Event {
             Event::MoodChanged => "MoodChanged",
             Event::MemberJoined => "MemberJoined",
             Event::MemberLeft => "MemberLeft",
-            Event::ConsolidationDone => "ConsolidationDone",
+            Event::ConsolidationDone(_) => "ConsolidationDone",
             Event::ConfigReloaded => "ConfigReloaded",
             Event::PersonalityVersionChanged => "PersonalityVersionChanged",
         }

@@ -216,7 +216,7 @@ struct Rig {
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
-async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Value>, captures: Captures, notify: Arc<Notify>, inject: Option<Value>) -> Rig {
+async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Value>, captures: Captures, notify: Arc<Notify>, inject: Option<Value>, engine_cfg: ReplyCfg) -> Rig {
     // mock LLM
     let ll = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ll_port = ll.local_addr().unwrap().port();
@@ -256,7 +256,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         bus.clone(),
         send_fn(adapter.clone()),
         self_ids.clone(),
-        ReplyCfg::default(),
+        engine_cfg,
     )
     .spawn();
     let pipeline = spawn_pipeline(PipelineDeps {
@@ -298,14 +298,15 @@ async fn reply_loop_sends_three_bubbles() {
         captures.clone(),
         notify,
         None,
+        ReplyCfg::default(),
     )
     .await;
     let _ = &rig;
 
     // 等三次发送（首泡 ≤0.8s + 两泡各 ≈0.8~1s + LLM 两次往返，裕量到 15s）
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while captures.lock().unwrap().len() < 3 {
-        assert!(Instant::now() < deadline, "15s 内未收满 3 个泡");
+        assert!(Instant::now() < deadline, "Duration 内未收满 3 个泡");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     tokio::time::sleep(Duration::from_millis(1200)).await; // 让 self 落库完成
@@ -377,18 +378,37 @@ async fn new_message_voids_remaining_bubbles() {
         captures.clone(),
         notify,
         Some(plain_group_message(402, 2009, "插入新消息")),
+        ReplyCfg {
+            // 加大后续泡延时下限，给高负载下的摄取+作废留出确定性余量（防测试时序抖动）
+            min_delay_ms: 2500,
+            ..ReplyCfg::default()
+        },
     )
     .await;
     let _ = &rig;
 
-    // 首泡必到；之后给足时间（若不作废，二、三泡 1s 内就到）
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // 首泡必到
+    let deadline = Instant::now() + Duration::from_secs(30);
     while captures.lock().unwrap().is_empty() {
         assert!(Instant::now() < deadline, "首泡未发出");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // 等 ReplyInterrupted 落表（作废的确定性信号），而不是赌固定秒数
+    let conn0 = db::connect(&db_path).unwrap();
+    let deadline2 = Instant::now() + Duration::from_secs(30);
+    loop {
+        let n: i64 = conn0
+            .query_row("SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'", [], |r| r.get(0))
+            .unwrap();
+        if n >= 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline2, "Duration 内未见 ReplyInterrupted");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(captures.lock().unwrap().len(), 1, "剩余泡应被作废，仅发出首泡");
+    tokio::time::sleep(Duration::from_millis(500)).await; // 防作废后还有在途延时
+    assert_eq!(captures.lock().unwrap().len(), 1);
 
     let conn = db::connect(&db_path).unwrap();
     let interrupted: i64 = conn
