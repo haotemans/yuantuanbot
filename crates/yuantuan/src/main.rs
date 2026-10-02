@@ -60,7 +60,33 @@ async fn main() -> Result<()> {
         None
     };
 
-    // g. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用）
+    // g. 回复形态引擎（per-chat 发送队列；adapter 未接入时发送函数恒报错、reply 记事件跳过）
+    let send = adapter
+        .as_ref()
+        .map(|h| yuantuan_adapter_qq::send_fn(h.clone()))
+        .unwrap_or_else(|| {
+            std::sync::Arc::new(|_req| {
+                Box::pin(async move {
+                    anyhow::bail!("adapter 未接入（[napcat].enabled=false）")
+                })
+                    as std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<Output = anyhow::Result<serde_json::Value>>
+                                + Send,
+                        >,
+                    >
+            })
+        });
+    let reply_engine = yuantuan_core::reply_engine::ReplyEngine::new(
+        db_path.clone(),
+        bus.clone(),
+        send,
+        self_ids.clone(),
+        yuantuan_core::reply_engine::ReplyCfg::default(),
+    )
+    .spawn();
+
+    // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply）
     let self_qq = adapter
         .as_ref()
         .map(|h| h.self_qq_shared())
@@ -76,6 +102,7 @@ async fn main() -> Result<()> {
             window_secs: cfg.prefilter.window_secs,
             self_msg_cap: cfg.prefilter.self_msg_cap,
         },
+        reply: Some(reply_engine),
     });
 
     // f. WebUI（阻塞至进程结束）

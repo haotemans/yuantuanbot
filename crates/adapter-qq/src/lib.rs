@@ -5,4 +5,4 @@
 mod client;
 mod ingest;
 
-pub use client::{spawn, AdapterHandle, NapcatConfig, NapcatSender};
+pub use client::{send_fn, spawn, AdapterHandle, NapcatConfig, NapcatSender};

@@ -2101,6 +2101,7 @@ dependencies = [
  "anyhow",
  "rusqlite",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",
@@ -2131,6 +2132,7 @@ name = "yuantuan-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rand 0.9.5",
  "reqwest",
  "rusqlite",
  "serde",

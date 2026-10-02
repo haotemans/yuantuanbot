@@ -1,1 +1,525 @@
-//! Reply Engine 占位：回复形态引擎（分泡/延迟/队列，本单不实现）。
+//! 回复形态引擎（架构文档十四章机制）：
+//! 发送链路 bot_chat → Bubbleizer → per-chat 发送队列（串行异步） → 适配层发送函数。
+//! - Bubbleizer：‖ 分泡、::at/::meme 指令行、3 泡封顶（超出并最后泡）、无分隔符单泡、
+//!   单泡超 500 字按标点机械切、解析失败整段单泡
+//! - 延时模拟：首泡 300~800ms；后续 clamp(0.6s+字数×40ms±30%, 0.8s, 4s)；整段总预算 8s，超预算不再延时
+//! - 异步作废：每泡发送前核对该 chat 最新外来 msg_id，变了→作废剩余 + ReplyInterrupted 事件
+//! - 单泡失败退避重试 1 次，仍失败跳过该泡记 BubbleSent(ok=false)，回复整体不失踪
+//! - 发送成功的泡落 messages（sender_pid='self'）保持会话连贯；napcat message_id 记 SelfMsgIds
+//!
+//! ::meme 说明：指令已解析；实际从库抽图发送属于施工单 7。本单选最不吵的方案——
+//! 纯 ::meme 泡跳过不发送（仅 debug 日志），混合泡只发文字部分。TODO(单7)：接 meme_library 抽图发送。
+//! 系数/泡顶/节流等全部数值目前走代码默认，TODO(热配单)：入 config。
+
+use crate::decision::DecisionOutput;
+use crate::event::{BubbleSentPayload, Event, EventBus, MessageReceivedPayload};
+use crate::prefilter::SelfMsgIds;
+use crate::state::MoodState;
+use crate::{context_builder, llm};
+use anyhow::{anyhow, Context, Result};
+use rand::Rng;
+use rusqlite::params;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+// ---------- 发送抽象（core 不依赖适配层：由装配侧注入闭包） ----------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatType {
+    Group,
+    Private,
+}
+
+#[derive(Debug, Clone)]
+pub struct SendRequest {
+    pub chat_type: ChatType,
+    /// 群号或私聊对方 QQ 号
+    pub target: u64,
+    /// OneBot 段数组
+    pub segments: Value,
+}
+
+pub type SendFn = Arc<
+    dyn Fn(SendRequest) -> Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
+        + Send
+        + Sync,
+>;
+
+// ---------- Bubbleizer ----------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bubble {
+    pub text: String,
+    pub at: bool,
+    pub meme: Option<String>,
+}
+
+/// 解析 bot_chat 定格式输出为气泡序列。
+pub fn bubbleize(raw: &str) -> Vec<Bubble> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let segments: Vec<&str> = trimmed.split('‖').collect();
+    let mut bubbles: Vec<Bubble> = Vec::new();
+    for seg in segments {
+        let mut text_lines: Vec<&str> = Vec::new();
+        let mut at = false;
+        let mut meme: Option<String> = None;
+        for line in seg.lines() {
+            let l = line.trim();
+            if let Some(rest) = l.strip_prefix("::") {
+                if rest == "at" {
+                    at = true;
+                } else if let Some(cat) = rest.strip_prefix("meme").map(str::trim) {
+                    if !cat.is_empty() {
+                        meme = Some(cat.to_string());
+                    }
+                }
+                // 未知指令行忽略，不进正文
+                continue;
+            }
+            if !l.is_empty() {
+                text_lines.push(l);
+            }
+        }
+        let text = text_lines.join("\n");
+        if text.is_empty() && meme.is_none() {
+            continue;
+        }
+        bubbles.push(Bubble { text, at, meme });
+    }
+    // 解析失败（全部段都被滤空）→ 整段单泡兜底
+    if bubbles.is_empty() {
+        return vec![Bubble {
+            text: trimmed.to_string(),
+            at: false,
+            meme: None,
+        }];
+    }
+    // 单泡超 500 字 → 按标点机械切
+    let mut cut: Vec<Bubble> = Vec::new();
+    for b in bubbles {
+        if b.text.chars().count() > 500 {
+            cut.extend(mechanical_split(&b));
+        } else {
+            cut.push(b);
+        }
+    }
+    // 3 泡封顶（封顶不是配额）：保留前 3 泡，第 4 泡起并入最后一泡
+    if cut.len() > 3 {
+        let tail: Vec<Bubble> = cut.split_off(3);
+        let last = &mut cut[2];
+        let merged_text = tail
+            .iter()
+            .map(|b| b.text.as_str())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !merged_text.is_empty() {
+            if !last.text.is_empty() {
+                last.text.push('\n');
+            }
+            last.text.push_str(&merged_text);
+        }
+        last.at = last.at || tail.iter().any(|b| b.at);
+        if last.meme.is_none() {
+            last.meme = tail.into_iter().find_map(|b| b.meme);
+        }
+    }
+    cut
+}
+
+fn mechanical_split(b: &Bubble) -> Vec<Bubble> {
+    const MAX: usize = 500;
+    let chars: Vec<char> = b.text.chars().collect();
+    let mut out: Vec<Bubble> = Vec::new();
+    let mut start = 0usize;
+    let mut first = true;
+    while chars.len() - start > MAX {
+        // 在窗口内从后往前找标点断点；找不到就硬切
+        let window_end = start + MAX;
+        let cut_at = (start + 1..=window_end)
+            .rev()
+            .find(|&i| {
+                matches!(
+                    chars[i - 1],
+                    '。' | '！' | '？' | '!' | '?' | '.' | '，' | '；' | '：' | ';' | ':' | ',' | '\n'
+                )
+            })
+            .unwrap_or(window_end);
+        let chunk: String = chars[start..cut_at].iter().collect::<String>().trim().to_string();
+        if !chunk.is_empty() {
+            out.push(Bubble {
+                text: chunk,
+                at: b.at && first,
+                meme: None,
+            });
+            first = false;
+        }
+        start = cut_at;
+    }
+    let rest: String = chars[start..].iter().collect::<String>().trim().to_string();
+    if !rest.is_empty() {
+        out.push(Bubble {
+            text: rest,
+            at: b.at && first,
+            meme: b.meme.clone(),
+        });
+    }
+    out
+}
+
+// ---------- 发送队列（per-chat 串行） ----------
+
+#[derive(Debug, Clone)]
+pub struct ReplyJob {
+    pub chat_id: String,
+    pub chat_type: ChatType,
+    pub target: u64,
+    /// 触发消息的 msg_id（仅日志观测）
+    pub anchor_msg_id: i64,
+    pub mention: bool,
+    /// @目标 QQ 号（mention 或泡内 ::at 用）
+    pub mention_qq: Option<u64>,
+    pub bubbles: Vec<Bubble>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplyCfg {
+    pub first_delay_min_ms: u64,
+    pub first_delay_max_ms: u64,
+    pub base_delay_ms: u64,
+    pub per_char_ms: u64,
+    pub jitter_ratio: f64,
+    pub min_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub total_budget_ms: u64,
+}
+
+impl Default for ReplyCfg {
+    fn default() -> Self {
+        Self {
+            first_delay_min_ms: 300,
+            first_delay_max_ms: 800,
+            base_delay_ms: 600,
+            per_char_ms: 40,
+            jitter_ratio: 0.3,
+            min_delay_ms: 800,
+            max_delay_ms: 4000,
+            total_budget_ms: 8000,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EngineHandle {
+    tx: mpsc::UnboundedSender<ReplyJob>,
+}
+
+impl EngineHandle {
+    pub fn enqueue(&self, job: ReplyJob) {
+        if self.tx.send(job).is_err() {
+            warn!("回复引擎已停止，任务丢弃");
+        }
+    }
+}
+
+pub struct ReplyEngine {
+    db_path: PathBuf,
+    bus: EventBus,
+    send: SendFn,
+    self_ids: SelfMsgIds,
+    cfg: ReplyCfg,
+}
+
+impl ReplyEngine {
+    pub fn new(db_path: PathBuf, bus: EventBus, send: SendFn, self_ids: SelfMsgIds, cfg: ReplyCfg) -> Self {
+        Self { db_path, bus, send, self_ids, cfg }
+    }
+
+    /// 派遣器：每个 chat 一个 worker（mpsc 串行）；折叠卡与普通回复同队列（稳定六条②）
+    pub fn spawn(self) -> EngineHandle {
+        let engine = Arc::new(self);
+        let (tx, mut rx) = mpsc::unbounded_channel::<ReplyJob>();
+        tokio::spawn(async move {
+            let mut workers: HashMap<String, mpsc::UnboundedSender<ReplyJob>> = HashMap::new();
+            while let Some(job) = rx.recv().await {
+                let entry = workers.entry(job.chat_id.clone()).or_insert_with(|| {
+                    let (wtx, mut wrx) = mpsc::unbounded_channel::<ReplyJob>();
+                    let eng = engine.clone();
+                    let chat = job.chat_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(j) = wrx.recv().await {
+                            process_job(&eng, j).await;
+                        }
+                        debug!(chat_id = %chat, "回复队列 worker 退出");
+                    });
+                    wtx
+                });
+                let _ = entry.send(job);
+            }
+        });
+        info!("回复形态引擎已启动");
+        EngineHandle { tx }
+    }
+}
+
+/// 本 chat 最新外来消息版本（self 泡不改变上下文版本，防自己作废自己）
+fn latest_incoming(db_path: &Path, chat_id: &str) -> i64 {
+    crate::db::connect(db_path)
+        .ok()
+        .and_then(|c| {
+            c.query_row(
+                "SELECT COALESCE(MAX(msg_id), 0) FROM messages WHERE chat_id = ?1 AND sender_pid != 'self'",
+                params![chat_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(0)
+}
+
+async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
+    let cfg = &eng.cfg;
+    let started = Instant::now();
+    let base_version = latest_incoming(&eng.db_path, &job.chat_id);
+    let total = job.bubbles.len();
+
+    for (i, b) in job.bubbles.iter().enumerate() {
+        // 延时模拟打字（超总预算则不再延时）
+        if started.elapsed().as_millis() < cfg.total_budget_ms as u128 {
+            if i == 0 {
+                let ms = rand::rng().random_range(cfg.first_delay_min_ms..=cfg.first_delay_max_ms);
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            } else {
+                let cs = b.text.chars().count() as f64;
+                let raw = cfg.base_delay_ms as f64 + cs * cfg.per_char_ms as f64;
+                let jitter = raw * cfg.jitter_ratio * rand::rng().random_range(-1.0..=1.0_f64);
+                let d = (raw + jitter).clamp(cfg.min_delay_ms as f64, cfg.max_delay_ms as f64);
+                tokio::time::sleep(Duration::from_millis(d as u64)).await;
+            }
+        }
+        // 异步作废：上下文已变动 → 作废剩余泡
+        if latest_incoming(&eng.db_path, &job.chat_id) > base_version {
+            info!(chat_id = %job.chat_id, sent = i, "上下文变动，作废剩余泡");
+            eng.bus.publish(Event::ReplyInterrupted);
+            return;
+        }
+        // TODO(单7)：接 meme_library 抽图发送。当前为最不吵方案：纯 ::meme 泡跳过，仅记日志。
+        if b.text.is_empty() && b.meme.is_some() {
+            debug!(chat_id = %job.chat_id, cat = ?b.meme, "meme 库未接入，跳过表情包泡");
+            continue;
+        }
+        // 组装 OneBot 段数组（首泡按 Decision.mention 或泡内 ::at 加 at 段；私聊不加）
+        let mut segs: Vec<Value> = Vec::new();
+        let want_at = job.chat_type == ChatType::Group
+            && job.mention_qq.is_some()
+            && ((i == 0 && job.mention) || b.at);
+        if want_at {
+            segs.push(json!({"type": "at", "data": {"qq": job.mention_qq.unwrap().to_string()}}));
+        }
+        if !b.text.is_empty() {
+            segs.push(json!({"type": "text", "data": {"text": b.text}}));
+        }
+        if segs.is_empty() {
+            continue;
+        }
+        let req = SendRequest {
+            chat_type: job.chat_type,
+            target: job.target,
+            segments: json!(segs),
+        };
+        match send_with_retry(&eng.send, &req).await {
+            Ok(data) => {
+                if let Some(id) = data.get("message_id").and_then(|x| x.as_i64()) {
+                    eng.self_ids.record(id);
+                }
+                insert_self_message(&eng.db_path, &job, &b.text);
+                eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                    chat_id: job.chat_id.clone(),
+                    bubble_index: i,
+                    total,
+                    ok: true,
+                    note: None,
+                }));
+            }
+            Err(e) => {
+                warn!(chat_id = %job.chat_id, bubble = i, error = %e, "泡发送失败，跳过该泡");
+                eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                    chat_id: job.chat_id.clone(),
+                    bubble_index: i,
+                    total,
+                    ok: false,
+                    note: Some(format!("发送失败跳过: {e}")),
+                }));
+            }
+        }
+    }
+    debug!(chat_id = %job.chat_id, total, elapsed_ms = started.elapsed().as_millis() as u64, "回复发送完成");
+}
+
+/// 单泡发送失败 → 退避重试一次（稳定六条③）；echo 10s 超时在适配层
+async fn send_with_retry(send: &SendFn, req: &SendRequest) -> Result<Value> {
+    match (send)(req.clone()).await {
+        Ok(v) => Ok(v),
+        Err(e1) => {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            (send)(req.clone()).await.map_err(|e2| anyhow!("首试 {e1}；重试 {e2}"))
+        }
+    }
+}
+
+fn insert_self_message(db_path: &Path, job: &ReplyJob, text: &str) {
+    let Ok(conn) = crate::db::connect(db_path) else { return };
+    let now = now_secs();
+    let chat_type = match job.chat_type {
+        ChatType::Group => "group",
+        ChatType::Private => "private",
+    };
+    let _ = conn.execute(
+        "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self', '云团', ?1, ?1)
+         ON CONFLICT(person_id) DO NOTHING",
+        params![now],
+    );
+    if let Err(e) = conn.execute(
+        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts)
+         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, 0, ?4)",
+        params![job.chat_id, chat_type, text, now],
+    ) {
+        warn!(error = %e, "self 回复落库失败");
+    }
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// ---------- bot_chat 调用与入队 ----------
+
+/// Decision=reply 之后：组装 Bot Context → 调 bot_chat → Bubbleizer → 入队
+pub async fn prepare_and_enqueue(
+    engine: &EngineHandle,
+    db_path: &Path,
+    llm: &llm::LlmGateway,
+    mood: &MoodState,
+    msg: &MessageReceivedPayload,
+    out: &DecisionOutput,
+) -> Result<()> {
+    let ctx = context_builder::build_bot_context(db_path, mood.get(), msg);
+    let started = Instant::now();
+    let raw = llm
+        .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
+        .await
+        .context("bot_chat 调用失败")?;
+    debug!(k_used = ctx.k_used, elapsed_ms = started.elapsed().as_millis() as u64, "bot_chat 生成完成");
+    let bubbles = bubbleize(&raw);
+    if bubbles.is_empty() {
+        return Err(anyhow!("bot_chat 输出为空"));
+    }
+    let (chat_type, target, mention_qq) = route_of(msg)?;
+    engine.enqueue(ReplyJob {
+        chat_id: msg.chat_id.clone(),
+        chat_type,
+        target,
+        anchor_msg_id: msg.msg_id,
+        mention: out.mention,
+        mention_qq,
+        bubbles,
+    });
+    Ok(())
+}
+
+fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, Option<u64>)> {
+    let sender_qq = msg
+        .sender_pid
+        .strip_prefix("p_")
+        .and_then(|s| s.parse::<u64>().ok());
+    match msg.chat_type.as_str() {
+        "group" => {
+            let gid = msg
+                .chat_id
+                .parse::<u64>()
+                .with_context(|| format!("群号无法解析: {}", msg.chat_id))?;
+            Ok((ChatType::Group, gid, sender_qq))
+        }
+        "private" => {
+            let uid = sender_qq.with_context(|| format!("私聊对象无法解析: {}", msg.sender_pid))?;
+            Ok((ChatType::Private, uid, None))
+        }
+        other => Err(anyhow!("未知 chat_type: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_bubbles_by_marker() {
+        let bs = bubbleize("哈‖确实不错‖我去试试");
+        assert_eq!(bs.len(), 3);
+        assert_eq!(bs[0].text, "哈");
+        assert_eq!(bs[2].text, "我去试试");
+        assert!(bs.iter().all(|b| !b.at && b.meme.is_none()));
+    }
+
+    #[test]
+    fn directives_parsed_and_stripped() {
+        let bs = bubbleize("::at\n在的‖::meme 开心");
+        assert_eq!(bs.len(), 2);
+        assert!(bs[0].at);
+        assert_eq!(bs[0].text, "在的");
+        assert_eq!(bs[1].meme.as_deref(), Some("开心"));
+        assert!(bs[1].text.is_empty());
+    }
+
+    #[test]
+    fn cap_merges_tail_into_third() {
+        let bs = bubbleize("一‖二‖三‖四‖五");
+        assert_eq!(bs.len(), 3);
+        assert_eq!(bs[2].text, "三\n四\n五");
+    }
+
+    #[test]
+    fn no_marker_is_single_bubble() {
+        let bs = bubbleize("一句话说完");
+        assert_eq!(vec![Bubble { text: "一句话说完".into(), at: false, meme: None }], bs);
+    }
+
+    #[test]
+    fn oversized_bubble_mechanically_split_at_punct() {
+        let chunk = "好。".repeat(300); // 600 字
+        let bs = bubbleize(&chunk);
+        assert!(bs.len() >= 2);
+        assert!(bs.iter().all(|b| b.text.chars().count() <= 500));
+        // 无标点窗口硬切也不超界
+        let hard = "啊".repeat(700);
+        let bs2 = bubbleize(&hard);
+        assert!(bs2.iter().all(|b| b.text.chars().count() <= 500));
+    }
+
+    #[test]
+    fn parse_failure_falls_back_to_single_bubble() {
+        let bs = bubbleize("‖‖‖");
+        assert_eq!(bs.len(), 1);
+        assert_eq!(bs[0].text, "‖‖‖");
+        assert!(bubbleize("").is_empty());
+    }
+
+    #[test]
+    fn multiline_segment_kept_in_one_bubble() {
+        let bs = bubbleize("第一行\n第二行‖另一个泡");
+        assert_eq!(bs.len(), 2);
+        assert_eq!(bs[0].text, "第一行\n第二行");
+    }
+}

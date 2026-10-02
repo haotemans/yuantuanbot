@@ -54,6 +54,27 @@ impl AdapterHandle {
     }
 }
 
+/// 装配助手：把句柄包成 core 回复引擎的 SendFn（断线期调用返回错误，由引擎退避重试）
+pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
+    use yuantuan_core::reply_engine::ChatType;
+    std::sync::Arc::new(move |req| {
+        let h = handle.clone();
+        Box::pin(async move {
+            let s = h
+                .sender()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("adapter 当前未连接 NapCat"))?;
+            match req.chat_type {
+                ChatType::Group => s.send_group_msg(req.target, req.segments).await,
+                ChatType::Private => s.send_private_msg(req.target, req.segments).await,
+            }
+        })
+            as std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send>,
+            >
+    })
+}
+
 /// 启动 adapter 后台任务（指数退避重连，永不返回），返回句柄
 pub fn spawn(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, self_ids: SelfMsgIds) -> AdapterHandle {
     let handle = AdapterHandle::default();

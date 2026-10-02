@@ -41,13 +41,24 @@ pub struct DecisionMadePayload {
     pub elapsed_ms: u64,
 }
 
-/// 事件清单（架构十一章终稿）；本阶段实装 MessageReceived / DecisionMade，其余为变体占位
+/// BubbleSent 载荷（每泡一条：ok=false 时 note 说明原因——发送失败跳过 / 角色未配置等）
+#[derive(Debug, Clone, Serialize)]
+pub struct BubbleSentPayload {
+    pub chat_id: String,
+    pub bubble_index: usize,
+    pub total: usize,
+    pub ok: bool,
+    pub note: Option<String>,
+}
+
+/// 事件清单（架构十一章终稿）；本阶段实装 MessageReceived / DecisionMade / BubbleSent /
+/// ReplyInterrupted，其余为变体占位
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum Event {
     MessageReceived(MessageReceivedPayload),
     MessageSent,
-    BubbleSent,
+    BubbleSent(BubbleSentPayload),
     ReplyInterrupted,
     DecisionMade(DecisionMadePayload),
     TaskCreated,
@@ -68,7 +79,7 @@ impl Event {
         match self {
             Event::MessageReceived(_) => "MessageReceived",
             Event::MessageSent => "MessageSent",
-            Event::BubbleSent => "BubbleSent",
+            Event::BubbleSent(_) => "BubbleSent",
             Event::ReplyInterrupted => "ReplyInterrupted",
             Event::DecisionMade(_) => "DecisionMade",
             Event::TaskCreated => "TaskCreated",

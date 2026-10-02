@@ -217,6 +217,7 @@ async fn decision_pipeline_end_to_end() {
         self_ids,
         mood: MoodState::default(),
         prefilter: yuantuan_core::prefilter::Config::default(),
+        reply: None,
     });
 
     // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）

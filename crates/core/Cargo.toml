@@ -11,4 +11,5 @@ toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
 anyhow = "1"
+rand = "0.9"
 tracing = "0.1"
