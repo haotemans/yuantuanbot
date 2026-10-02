@@ -879,6 +879,14 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 升级到大服务器只是解锁更重能力，不是架构迁移。
 
+## 扩展模型（三层）
+
+1. **内置功能模块**：编译进二进制，config 开关控制启停（meme / 知识库 / 备份皆此模式，关掉零开销）
+2. **能力扩展 = 新 Tool**：Tool trait + Registry 注册；为二期预留 `Tool::Remote`
+3. **生态扩展（二期）= MCP 外挂工具进程**：云团作 MCP client 接第三方工具服务，进程隔离，插件挂云团不死
+
+明确否决：Rust dylib 动态库插件（ABI 不稳）、进程内插件脚本（一个烂插件带走全 bot）。详见 `docs/runtime-design.md` 第五章。
+
 ## 数据库
 
 初期：
@@ -905,19 +913,25 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 定位：MVP 一等公民，对标 AstrBot 全图形化体验，管理员全程无需 SSH。
 
-技术：axum（Rust Web 框架）提供 API + 嵌入 Vue3 SPA 静态资源。
+技术：axum 提供 REST + 单条 WebSocket（`/ws` 推送事件），前端 Vue3 + Vite + Naive UI（关系网用 vis-network），rust-embed 嵌入二进制。壳布局与三页内页定调见 `docs/runtime-design.md` 第四章。
 
-九个页面：
+十个页面（左导航四组）：
 
-1. 平台连接（OneBot 地址 / token）
-2. LLM Provider（base_url / key / 三角色绑定）
-3. 人格编辑器（改提示词 + 版本历史 + 版本 diff 视图 + 一键回滚，体验对标专业编辑器）
+总览
+1. 仪表盘 = 首页（今日收发 / Decision 成本 / 活跃任务 / 运行时长 + NapCat 心跳 + 迷你事件流）
+
+观察
+2. Decision trace 流（左实时事件流 + 右输入输出 JSON 详情 + 过滤，它为什么接 / 不接这句话）
+3. 任务执行可视化（Task 工具循环逐步回放：每步 tool_call / 结果 / 耗时 / 预算消耗）
 4. 记忆浏览（长期记忆 / 群档案 / 每日摘要）
-5. Decision trace 流（它为什么接 / 不接这句话）
-6. 关系网可视化（Person 节点 + 关系边 + 亲密度，人机边一并成图）
-7. 知识库管理（上传 / 解析状态，功能本体默认关闭）
-8. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
-9. 任务执行可视化（Task 工具循环逐步回放：每步 tool_call / 结果 / 耗时 / 预算消耗）
+5. 关系网可视化（Person 节点 + 关系边 + 亲密度，人机边一并成图）
+
+配置
+6. 平台连接（OneBot 地址 / token）
+7. LLM Provider（base_url / key / 三角色绑定）
+8. 人格编辑器（改提示词 + 版本时间线 + diff 对照 + 一键回滚，体验对标专业编辑器）
+9. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
+10. 知识库管理（上传 / 解析状态，功能本体默认关闭）
 
 安全：
 
@@ -943,7 +957,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 5. Decision模型接入（Prefilter + Schema 校验）
 6. Memory / Relationship基础版（双通道写入 + 夜间归纳 + 每日摘要）
 7. Tool系统（只读工具起步 + 带预算的工具循环）
-8. WebUI管理端（九页 + 密码登录）
+8. WebUI管理端（十页 + 密码登录）
 
 MVP 闭环：
 
@@ -957,7 +971,7 @@ MVP 闭环：
 
 # 十八、后续实现重点
 
-- Runtime模块边界
+- Runtime模块边界（已定稿：四 crate 结构 / 启动序列 + 监督树 / 并发三串行两并发一单写者，见 docs/runtime-design.md）
 - Bot ↔ Decision ↔ Agent接口协议
 - Event Bus事件模型（已定稿，见十一章）
 - Context Builder（无状态滑窗、在场名册、情绪注入、Decision 输入契约组装）
@@ -998,3 +1012,4 @@ MVP 闭环：
 - 2026-10-02（拷问轮 Q31–Q33 定稿）：回复形态引擎完整机制——bot_chat 格式化输出契约（`‖` 分泡 + `::` 指令行，Runtime 本地解析、机械兜底）；打字延时模型（按字数 clamp + 抖动，首泡快发，总预算 ≤8s）；发送队列 per-chat 串行异步执行 + 上下文变动作废剩余泡；3 泡封顶、第 4 泡强制转折叠卡；节流按气泡计数；稳定六条。
 - 2026-10-02（拷问轮 Q34–Q37 定稿）：Prefilter 规则集终稿（R1–R7 顺序短路：自身/其他bot丢弃、@我与回复我必放行、私聊必放行几乎必回、群聊过节流闸、纯图丢弃不惊动决策）；节流放宽为每 chat 60 秒 4 回合 / 12 气泡、全局每分钟 30 次 Decision 成本闸（超限排队不丢弃，全热配）；Event Bus 终稿（16 个事件类型、全量落 events 表 7 天轮转、四类订阅者）。
 - 2026-10-02（小改）：回复形态补充原则——3 泡为封顶非配额，不为分泡而分泡；分泡只沿自然语气断点，模型不凑数、兜底不强拆。
+- 2026-10-02（拷问轮 Q38–Q43 定稿）：运行时设计落地为 `docs/runtime-design.md`（四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、MCP 三层扩展模型）；WebUI 扩至十页（+仪表盘首页，左导航四组信息架构，技术栈定 Vue3 + Naive UI + vis-network + 单条 /ws）。
