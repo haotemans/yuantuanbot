@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { isLoggedIn } from '../api'
 
+/** @type {import('vue-router').RouteRecordRaw[]} */
 const routes = [
   { path: '/login', name: 'login', component: () => import('../views/Login.vue') },
   { path: '/', name: 'dashboard', component: () => import('../views/Dashboard.vue') },

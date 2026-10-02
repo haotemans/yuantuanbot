@@ -2,8 +2,8 @@
   <div>
     <n-tabs type="line" animated @update:value="load">
       <n-tab-pane name="pending" :tab="`待审队列（${pending.length}）`">
-        <n-empty v-if="!pending.length" description="没有待审表情包" />
-        <n-grid :cols="5" :x-gap="10" :y-gap="10">
+        <n-empty v-if="!pending.length" class="yt-empty" description="没有待审的表情包" />
+        <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in pending" :key="m.id">
             <n-card size="small">
               <meme-img :id="m.id" height="110px" />
@@ -24,12 +24,13 @@
           <n-select v-model:value="cat" :options="catOptions" clearable placeholder="类别筛选" size="small" style="width: 160px" />
           <n-button size="small" @click="load">刷新</n-button>
         </n-space>
-        <n-grid :cols="5" :x-gap="10" :y-gap="10">
+        <n-empty v-if="!shownActive.length" class="yt-empty" description="该分类下还没有表情包" />
+        <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in shownActive" :key="m.id">
             <n-card size="small">
               <meme-img :id="m.id" height="110px" />
               <div style="font-size: 12px; margin-top: 4px">
-                <n-tag size="tiny">{{ m.category }}</n-tag>
+                <n-tag size="tiny" round>{{ m.category }}</n-tag>
                 用过 {{ m.use_count }} 次
               </div>
             </n-card>

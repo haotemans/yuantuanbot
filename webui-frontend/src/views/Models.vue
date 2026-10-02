@@ -2,7 +2,7 @@
   <div style="max-width: 860px">
     <n-card title="LLM Providers" size="small" style="margin-bottom: 12px">
       <n-space vertical>
-        <div v-for="(p, name) in providers" :key="name" style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px">
+        <div v-for="(p, name) in providers" :key="name" style="border: 1px solid var(--yt-card-border); border-radius: 10px; padding: 12px">
           <n-grid :cols="4" :x-gap="10">
             <n-gi><n-input :value="name" disabled size="small" /></n-gi>
             <n-gi><n-input v-model:value="p.base_url" size="small" placeholder="base_url" /></n-gi>
@@ -11,7 +11,7 @@
               <n-input v-model:value="p.api_key_env" size="small" placeholder="api_key 环境变量名（不回显）" />
             </n-gi>
           </n-grid>
-          <div style="font-size: 12px; color: #888; margin-top: 4px">
+          <div style="font-size: 12px; color: var(--yt-text-dim); margin-top: 4px">
             密钥放在服务器环境变量里，本页只存变量名；已配置状态：
             <n-tag size="tiny" :type="p.api_key_present ? 'success' : 'default'">{{ p.api_key_present ? '环境变量已就位' : '未配置/无需' }}</n-tag>
             <n-button text size="tiny" type="error" style="float: right" @click="delProvider(name)">删除</n-button>
@@ -44,6 +44,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 
+/** @type {import('vue').Ref<Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean }>>} */
 const providers = ref({})
 const roles = ref({
   decision: { provider: null, model: '' },
