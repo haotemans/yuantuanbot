@@ -147,3 +147,4 @@ NapCat 起 WS 服务端（默认 `ws://127.0.0.1:3001`，带 token），云团�
 - 2026-10-02 V0.1：定稿（拷问轮 Q38–Q43）：四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、WebUI 技术栈与十页信息架构、三层扩展模型（二期 MCP）。
 - 2026-10-02（拷问轮 Q44–Q47）：新增第六章 adapter-qq 通讯设计——正向 WS、段数组映射铁律（core 不见 CQ 码）、双工 echo 回执 10s 超时、断线接受丢失记事件；WebUI 主题默认亮色（暗色可切换）。
 - 2026-10-03：前端工具链升级——vite 8.3.2、typescript 6.0.3（TS7 因 vue-tsc 未兼容其 native 接口暂缓）、vue-tsc 3.3.12、@vitejs/plugin-vue 6.x；并完成全站设计打磨一轮（theme 令牌/品牌区/仪表盘 sparkline/trace 卡片化/空态骨架屏）。
+- 2026-10-03（TS7 补票条件，调研自官方源）：TS7 已 GA 但 7.0 无程序化 API；等 ① typescript@7.1 稳定版（API 落地，tracking microsoft/TypeScript#63800，预计 2026 Q4）+ ② vuejs/language-tools PR #6170 合并（vue-tsc 将由 @vue/content-mapper 取代）。两者齐即升级并迁移类型检查链路。
