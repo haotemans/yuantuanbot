@@ -31,12 +31,25 @@ pub struct NapcatConfig {
     pub token: String,
 }
 
-/// 暴露给装配层的句柄：拿当前会话的发送端（断线期为 None），以及自身 QQ 号（登录前为 0）。
+/// 暴露给装配层的句柄：拿当前会话的发送端（断线期为 None），自身 QQ 号（登录前为 0），连接活性。
 /// 发送能力（send_group_msg / send_private_msg）为回复形态引擎预留。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AdapterHandle {
     current: Arc<AsyncMutex<Option<NapcatSender>>>,
     self_qq: Arc<AtomicU64>,
+    connected: Arc<std::sync::atomic::AtomicBool>,
+    last_active: Arc<Mutex<Instant>>,
+}
+
+impl Default for AdapterHandle {
+    fn default() -> Self {
+        Self {
+            current: Arc::new(AsyncMutex::new(None)),
+            self_qq: Arc::new(AtomicU64::new(0)),
+            connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_active: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
 }
 
 impl AdapterHandle {
@@ -51,6 +64,11 @@ impl AdapterHandle {
     /// 自身 QQ 号的共享单元（core 侧注入用，遵守 core 不依赖协议端的铁律）
     pub fn self_qq_shared(&self) -> Arc<AtomicU64> {
         self.self_qq.clone()
+    }
+
+    /// 连接状态：已连接且最近 30s 内有任何帧活动（心跳/消息/回执都算）
+    pub fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Relaxed) && self.last_active.lock().unwrap().elapsed() <= Duration::from_secs(30)
     }
 }
 
@@ -94,6 +112,7 @@ async fn run(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, handle: Adapter
             Err(e) => warn!(error = %e, "NapCat 连接断开（窗口期消息接受丢失）"),
         }
         *handle.current.lock().await = None;
+        handle.connected.store(false, Ordering::Relaxed);
         // 会话存活超过 30s 视为有效连接，退避重置
         if started.elapsed() > Duration::from_secs(30) {
             backoff = BACKOFF_INIT;
@@ -127,7 +146,6 @@ async fn session(
     let (mut write, mut read) = ws.split();
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let counter = Arc::new(AtomicU64::new(1));
-    let mut last_active = Instant::now();
 
     // 握手：get_login_info 拿自身 QQ 号（at_me 判定），10s 超时判失败
     let echo = next_echo(&counter);
@@ -148,9 +166,10 @@ async fn session(
             break uid;
         }
         // 握手期间混入的帧照常处理；此时自身号未知，at_me 判定退化为不匹配
-        let _ = handle_frame(&v, bus, db_path, 0, &pending, &mut last_active, self_ids);
+        let _ = handle_frame(&v, bus, db_path, 0, &pending, self_ids);
     };
     handle.self_qq.store(self_qq, Ordering::Relaxed);
+    handle.connected.store(true, Ordering::Relaxed);
     info!(self_qq, "get_login_info 完成");
 
     let sender = NapcatSender {
@@ -165,6 +184,7 @@ async fn session(
         let Some(frame) = read.next().await else {
             bail!("WS 连接被对端关闭");
         };
+        *handle.last_active.lock().unwrap() = Instant::now();
         match frame {
             Ok(Message::Text(text)) => {
                 let v: Value = match serde_json::from_str(&text) {
@@ -174,7 +194,7 @@ async fn session(
                         continue;
                     }
                 };
-                if let Err(e) = handle_frame(&v, bus, db_path, self_qq, &pending, &mut last_active, self_ids) {
+                if let Err(e) = handle_frame(&v, bus, db_path, self_qq, &pending, self_ids) {
                     warn!(error = %e, "帧处理失败");
                 }
             }
@@ -191,7 +211,6 @@ fn handle_frame(
     db_path: &PathBuf,
     self_qq: u64,
     pending: &Pending,
-    last_active: &mut Instant,
     self_ids: &SelfMsgIds,
 ) -> Result<()> {
     // action 回执一律优先路由（echo 存在即为响应帧）
@@ -203,7 +222,7 @@ fn handle_frame(
     }
     match v.get("post_type").and_then(|t| t.as_str()) {
         Some("meta_event") => {
-            *last_active = Instant::now();
+            // 活性时间戳由主循环在收帧时统一更新
             Ok(())
         }
         // message_sent = 自己发出的消息回报：同样落库（sender_pid='self'），供 R6 节流计数与流水完整

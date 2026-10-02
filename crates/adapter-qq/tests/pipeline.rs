@@ -23,10 +23,9 @@ use yuantuan_core::state::MoodState;
 const SELF_QQ: u64 = 10001;
 
 fn temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+        + (std::process::id() as u128) << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -212,11 +211,11 @@ async fn decision_pipeline_end_to_end() {
     let _pipeline = spawn_pipeline(PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
-        llm: Some(Arc::new(gateway)),
+        llm: Arc::new(std::sync::RwLock::new(Some(Arc::new(gateway)))),
         self_qq: handle.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: yuantuan_core::prefilter::Config::default(),
+        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: None,
         memes_dir: temp_dir("pipeline-memes"),
     });

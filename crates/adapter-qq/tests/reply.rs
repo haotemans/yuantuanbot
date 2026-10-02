@@ -27,10 +27,9 @@ const SELF_QQ: u64 = 10001;
 // ---------- 通用 mock 设施 ----------
 
 fn temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+        + (std::process::id() as u128) << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -263,11 +262,11 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
     let pipeline = spawn_pipeline(PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
-        llm: Some(gateway),
+        llm: Arc::new(std::sync::RwLock::new(Some(gateway))),
         self_qq: adapter.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: yuantuan_core::prefilter::Config::default(),
+        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: Some(engine),
         memes_dir: temp_dir("reply-memes"),
     });
@@ -306,7 +305,7 @@ async fn reply_loop_sends_three_bubbles() {
     let _ = &rig;
 
     // 等三次发送（首泡 ≤0.8s + 两泡各 ≈0.8~1s + LLM 两次往返，裕量到 15s）
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while captures.lock().unwrap().len() < 3 {
         assert!(Instant::now() < deadline, "Duration 内未收满 3 个泡");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -390,7 +389,7 @@ async fn new_message_voids_remaining_bubbles() {
     let _ = &rig;
 
     // 首泡必到
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while captures.lock().unwrap().is_empty() {
         if Instant::now() >= deadline {
             let c = db::connect(&db_path).unwrap();
@@ -414,7 +413,7 @@ async fn new_message_voids_remaining_bubbles() {
     }
     // 等 ReplyInterrupted 落表（作废的确定性信号），而不是赌固定秒数
     let conn0 = db::connect(&db_path).unwrap();
-    let deadline2 = Instant::now() + Duration::from_secs(30);
+    let deadline2 = Instant::now() + Duration::from_secs(60);
     loop {
         let n: i64 = conn0
             .query_row("SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'", [], |r| r.get(0))

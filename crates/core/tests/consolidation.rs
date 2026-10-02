@@ -23,10 +23,9 @@ fn now_secs() -> i64 {
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+        + (std::process::id() as u128) << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir

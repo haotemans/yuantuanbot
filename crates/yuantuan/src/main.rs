@@ -98,6 +98,14 @@ async fn main() -> Result<()> {
     .spawn();
 
     // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply/send_meme）
+    //    llm/prefilter 走共享槽：WebUI config 写回即热应用
+    let llm_slot: yuantuan_core::bot::SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(llm.clone()));
+    let prefilter_slot: yuantuan_core::bot::SharedPrefilter = std::sync::Arc::new(std::sync::RwLock::new(
+        yuantuan_core::prefilter::Config {
+            window_secs: cfg.prefilter.window_secs,
+            self_msg_cap: cfg.prefilter.self_msg_cap,
+        },
+    ));
     let self_qq = adapter
         .as_ref()
         .map(|h| h.self_qq_shared())
@@ -105,14 +113,11 @@ async fn main() -> Result<()> {
     let _pipeline = yuantuan_core::bot::spawn_pipeline(yuantuan_core::bot::PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
-        llm: llm.clone(),
+        llm: llm_slot.clone(),
         self_qq: self_qq.clone(),
         self_ids,
-        mood,
-        prefilter: yuantuan_core::prefilter::Config {
-            window_secs: cfg.prefilter.window_secs,
-            self_msg_cap: cfg.prefilter.self_msg_cap,
-        },
+        mood: mood.clone(),
+        prefilter: prefilter_slot.clone(),
         reply: Some(reply_engine),
         memes_dir: memes_dir.clone(),
     });
@@ -149,7 +154,23 @@ async fn main() -> Result<()> {
         url = %format!("http://{}:{}/", cfg.webui.host, cfg.webui.port),
         "管理员面板；首次登录提交的密码即为管理员密码（首启引导）"
     );
-    yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port).await
+    let extras = yuantuan_webui::Extras {
+        bus: bus.clone(),
+        llm_slot,
+        prefilter_slot,
+        mood: mood.clone(),
+        adapter_connected: adapter
+            .as_ref()
+            .map(|h| {
+                let h = h.clone();
+                std::sync::Arc::new(move || h.is_connected())
+                    as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
+            })
+            .unwrap_or_else(|| std::sync::Arc::new(|| false)),
+        config_path: std::path::PathBuf::from("config.toml"),
+        providers_path: std::path::PathBuf::from("providers.toml"),
+    };
+    yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port, extras).await
 }
 
 /// providers.toml：缺失则生成模板；存在则解析（失败仅告警，角色全部不可用、管线降级）

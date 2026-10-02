@@ -25,10 +25,9 @@ use yuantuan_core::state::MoodState;
 const SELF_QQ: u64 = 10001;
 
 fn temp_dir(prefix: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+        + (std::process::id() as u128) << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -194,11 +193,11 @@ async fn decision_send_meme_sends_image() {
     let _pipeline = spawn_pipeline(PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
-        llm: Some(gateway),
+        llm: Arc::new(std::sync::RwLock::new(Some(gateway))),
         self_qq: adapter.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: yuantuan_core::prefilter::Config::default(),
+        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
         reply: Some(engine),
         memes_dir: memes.clone(),
     });
@@ -345,7 +344,16 @@ async fn steal_then_approve_and_reject() {
     let wport = wl.local_addr().unwrap().port();
     drop(wl);
     let db2 = db_path.clone();
-    tokio::spawn(async move { let _ = yuantuan_webui::serve(db2, "127.0.0.1", wport).await; });
+    let extras = yuantuan_webui::Extras {
+        bus: EventBus::new(16),
+        llm_slot: Arc::new(std::sync::RwLock::new(None)),
+        prefilter_slot: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        adapter_connected: Arc::new(|| false),
+        mood: MoodState::default(),
+        config_path: temp_dir("meme-noconfig").join("config.toml"),
+        providers_path: temp_dir("meme-noconfig").join("providers.toml"),
+    };
+    tokio::spawn(async move { let _ = yuantuan_webui::serve(db2, "127.0.0.1", wport, extras).await; });
     tokio::time::sleep(Duration::from_millis(300)).await;
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{wport}");
