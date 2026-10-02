@@ -179,7 +179,8 @@ Relationship Event
 关系事件的来源：
 
 - 平台事件（入群、加好友等）直接记录
-- 夜间归纳时从消息流水批量提取
+- @互动统计（A@B → 熟悉度增量，V1 熟悉度的主要驱动）
+- 夜间归纳时从消息流水批量提炼（"A 帮助 B 解决问题"类 → 信任分）
 - 不做每条消息的实时 LLM 抽取
 
 ---
@@ -201,7 +202,7 @@ Relationship Event
 **人格本身不变，行为随记忆与关系演化。** 人设提示词是静态文本：
 
 - 仅管理员可修改（WebUI 人格编辑器）
-- 每次修改强制版本化，可查看 diff、可回滚
+- 每次修改强制版本化，历史线性单向（回滚 = 新版本号 + 旧内容），可查看 diff、可回滚
 - 对话与归纳流程永远不能改写人设，只能通过记忆与关系影响行为
 
 ---
@@ -246,6 +247,8 @@ A喜欢技术讨论
 2. 归纳通道：固定时间（默认每夜）从消息流水批量提纯
 
 敏感信息（密码、密钥、证件号等）在写入阶段直接拒收，永不入库。
+
+长期记忆三主体（person / chat / self）单表存储，另有每日摘要（每群一条 + 人物按日滚动）作为聊天历史的检索索引。表结构详见 `docs/data-model.md`。
 
 ---
 
@@ -460,11 +463,11 @@ Long Memory   Working Memory   Archive
 固定时间运行（默认每夜一次）：
 
 - 每个 chat（群 / 私聊）独立取该 chat 最新 500 条消息，跨 chat 不混合取样
-- 产出三通道：关系边事件（含云团↔人亲密度）、群话题摘要（存该群长期档案）、个人长期记忆
+- 产出四通道：每日摘要（每群一条 + 人物按日滚动，聊天历史检索索引）、关系边事件（含云团↔人亲密度）、群话题摘要（存该群长期档案）、个人长期记忆
 - 落库统一按 person_id 合并
 - 敏感信息在提取时拒收
 
-消息流水全量落库（见十五章数据库），归纳与"最近 500 条"窗口都建立在其上。
+消息流水全量落库（含 mentions 字段，见十五章数据库），归纳与"最近 500 条"窗口都建立在其上。
 
 ---
 
@@ -617,7 +620,7 @@ State：
 
 - 取值：枚举 `calm | happy | angry | down`（基态 calm，可扩展）
 - 产生：Decision 每次裁决时基于当前上下文（会话内容 + 关系 + 记忆）顺带输出，无独立事件源、无额外模型调用
-- 存储：State 记录 `mood + mood_ts`，随时间衰减回 calm
+- 存储：只活在内存（重启即 calm），带时间戳，随时间衰减回 calm
 - 消费端：bot_chat 语气注入（改语气不改人设）、meme 选图类别、Decision 自身倾向（同一裁决内 mood 与 action 天然一致）
 
 二期增强：亲密度调制情绪敏感度（对高亲密的人更"不生气"）。
@@ -682,6 +685,8 @@ Event Bus（进程内 channel）
 - 是否需要行动
 - 当前情绪状态
 
+字段级输入契约已定稿（每字段有界、摘要优先），见 `docs/data-model.md` 第十章。
+
 ---
 
 # 十三、Decision 小脑
@@ -695,6 +700,8 @@ Event Bus（进程内 channel）
 模型通过 API 接入（见十五章），与聊天生成共用同一个 LLM Provider 层，绑定便宜快速的模型角色。Decision 本质是分类器，不是对话者。
 
 输入消息先经 Runtime 本地 Prefilter 预筛（@检测、回复检测、发言节流、静默规则），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。主动插话与被动回复走同一条管线，无独立心跳；是否主动开口，同样由 Decision 拿着群聊上下文裁决。
+
+输入契约：Decision Context 终稿见 `docs/data-model.md` 第十章（消息、发送者关系分、场景统计、记忆提示、当前情绪、活动任务）。
 
 职责：
 
@@ -759,9 +766,11 @@ Event Bus（进程内 channel）
 
 ## 表情包（Meme）
 
-- Meme 库：本地归档，按类别标签分类（WebUI 可管理）
+- Meme 库：本地归档（`data/memes/`），按类别标签分类，WebUI 管理（导入 / LLM 自动分类建议 / 去重 / 待确认队列）
+- 去重：md5 精确 + pHash 感知（本地底座）；DINOv3 魔搭 API 为可选增强槽位，默认关闭，挂了自动降级
+- 偷表情包：开关开启后群聊图片进待确认队列，管理员一键收编
 - 发表情包 = 普通图片消息，协议端原生能力，无额外协议依赖
-- 流程：Decision 依据当前情景输出 `send_meme + meme_type` → Runtime 从该类别随机抽一张发送
+- 流程：Decision 依据当前情景输出 `send_meme + meme_type` → Runtime 从该类别按"最久未用"加权随机抽一张发送
 - 选图类别与当前情绪状态对齐
 - 发表情包同样受 Prefilter 发言节流约束
 
@@ -796,7 +805,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 
 - 角色与具体模型解耦，在配置中绑定（providers.toml）
 - 换模型只改配置，不改代码
-- LLM API 是系统唯一的重型外部依赖
+- LLM API 是系统唯一的重型外部依赖（meme 的 DINOv3 为可选增强槽位，默认关闭，非关键路径）
 
 ## 平台接入（QQ 适配层）
 
@@ -818,6 +827,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 - Event Bus 为进程内 channel（tokio broadcast / mpsc），不依赖 Redis / MQ
 - WebUI 静态资源嵌入同一二进制
 - 日志 / trace 文件轮转并设上限
+- 所有运行数据集中于 `data/` 目录（库、memes、artifacts、archive、logs、backups），单卷挂载即迁移
 
 不内置：
 
@@ -838,7 +848,8 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 初期：
 
 - SQLite（WAL）
-- 消息流水全量落库（messages 表），为 500 条窗口与夜间归纳供数
+- 消息流水全量落库（messages 表含 mentions 字段），为 500 条窗口与夜间归纳供数
+- 全部表结构定稿见 `docs/data-model.md`
 - sqlite-vec（向量检索，可选）
 
 后期（可选解锁）：
@@ -860,15 +871,16 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 
 技术：axum（Rust Web 框架）提供 API + 嵌入 Vue3 SPA 静态资源。
 
-七个页面：
+八个页面：
 
 1. 平台连接（OneBot 地址 / token）
 2. LLM Provider（base_url / key / 角色绑定）
-3. 人格编辑器（改提示词 + 版本历史 + 一键回滚）
-4. 记忆浏览（长期记忆 / 群档案）
+3. 人格编辑器（改提示词 + 版本历史 + 版本 diff 视图 + 一键回滚，体验对标专业编辑器）
+4. 记忆浏览（长期记忆 / 群档案 / 每日摘要）
 5. Decision trace 流（它为什么接 / 不接这句话）
-6. 关系网可视化（Person 节点 + 关系边 + 亲密度）
+6. 关系网可视化（Person 节点 + 关系边 + 亲密度，人机边一并成图）
 7. 知识库管理（上传 / 解析状态，功能本体默认关闭）
+8. Meme 库管理（导入 / LLM 自动分类建议 / 去重 / 偷表情包开关与待确认队列）
 
 安全：
 
@@ -890,18 +902,18 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions），运行时�
 1. Rust Runtime 骨架
 2. AstrBot 二改迁移
 3. Bot / Agent 分离
-4. SQLite 数据层（messages 全量落库）
+4. SQLite 数据层（messages 全量落库，表结构见 docs/data-model.md）
 5. Decision模型接入（Prefilter + Schema 校验）
-6. Memory / Relationship基础版（双通道写入 + 夜间归纳）
+6. Memory / Relationship基础版（双通道写入 + 夜间归纳 + 每日摘要）
 7. Tool系统（只读工具起步 + 带预算的工具循环）
-8. WebUI管理端（七页 + 密码登录）
+8. WebUI管理端（八页 + 密码登录）
 
 MVP 闭环：
 
 ```text
 消息 → Prefilter → Decision → ┬ bot_chat 直答（+情绪 +meme）
                               └ 最小Task（只读工具循环）→ Bot组织语言
-   → 记忆/亲密度写入 → 夜间归纳 → WebUI 管理
+   → 记忆/亲密度写入 → 夜间归纳（含每日摘要）→ WebUI 管理
 ```
 
 ---
@@ -911,18 +923,20 @@ MVP 闭环：
 - Runtime模块边界
 - Bot ↔ Decision ↔ Agent接口协议
 - Event Bus事件模型
-- Context Builder（含情绪注入）
-- Memory Schema（persons / relationships / long_memories / personality_versions / meme_library 表结构）
-- Relationship Graph
+- Context Builder（含情绪注入、Decision 输入契约组装）
+- Memory Schema（已定稿，见 docs/data-model.md）
+- Relationship Graph（@统计驱动 + 归纳提炼）
 - Task生命周期（预算模型）
 - Tool Registry
 - LLM Provider（角色路由）
-- Decision输入输出Schema（已定稿，见十三章）
+- Decision输入输出Schema（已定稿，见十三章 + data-model.md）
 - Prefilter规则集
 - 情绪系统（已定稿，见十章；亲密度调制为二期）
 - 消息流水存储（messages 表）
+- 每日摘要生成（群 + 人物）
 - 数据备份（GitHub 私有仓）
 - 关系网可视化
+- Meme 库管线（去重 / 分类 / 偷表情包队列）
 - Trace / Archive
 - QQ 适配层（OneBot 11 / NapCat）
 - WebUI API（axum）
@@ -940,3 +954,4 @@ MVP 闭环：
 - 2026-10-02 V0.1：架构基线建立。
 - 2026-10-02：补充模型接入设计（LLM + Decision 双角色走 Provider API，其余零外部依赖）、Decision 前置本地 Prefilter、2C2G 部署形态原则。
 - 2026-10-02（拷问轮 Q1–Q20 定稿）：QQ 先行 + NapCat 独立容器（ADR-0001）；不自研 Rust QQ 协议（ADR-0003）；主动/被动统一管线；人格静态化 + 版本化（ADR-0002）；记忆双通道 + 夜间归纳 + 500 条窗口 + person_id 合并 + 敏感拒收；云团↔人亲密度；表情包机制；Task 带预算工具循环；情绪系统（ADR-0004）；消息全量落库 + GitHub 私有仓备份；WebUI 七页 + axum + 密码认证；Decision Schema 终稿。
+- 2026-10-02（拷问轮 Q21–Q25 定稿）：数据模型落地为 `docs/data-model.md`（三主体长期记忆单表、每日摘要索引、mentions 字段、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、mood 免持久化、Decision 输入契约）；WebUI 扩至八页（+Meme 库管理，人格编辑器加 diff 视图）；新增偷表情包待确认队列；`data/` 统一存储布局。
