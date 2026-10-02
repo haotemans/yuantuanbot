@@ -22,6 +22,8 @@ pub struct MessageReceivedPayload {
     pub reply_to: Option<i64>,
     /// sender 带 bot 标记或匿名（R2 判定原料）
     pub sender_bot: bool,
+    /// 图片段下载 URL（轻量留在事件层，不落 messages；偷表情包流程消费）
+    pub image_urls: Vec<String>,
     pub ts: i64,
 }
 

@@ -34,9 +34,17 @@ async fn main() -> Result<()> {
     info!(count = tables.len(), "迁移完成，库内表清单");
     drop(conn);
 
+    let db_path = data_root.join("yuantuan.db");
+
+    // c2. meme 入库扫描（md5/dHash 去重）
+    let memes_dir = data_root.join("memes");
+    match yuantuan_core::meme::scan_and_ingest(&memes_dir, &db_path) {
+        Ok(s) => info!(scanned = s.scanned, added = s.added, skipped_dup = s.skipped_dup, "meme 库扫描完成"),
+        Err(e) => tracing::warn!(error = %e, "meme 库扫描失败（不阻断启动）"),
+    }
+
     // d. Event Bus + tracer（全事件落 events 表）
     let bus = yuantuan_core::event::EventBus::default();
-    let db_path = data_root.join("yuantuan.db");
     let _tracer = yuantuan_core::event::spawn_tracer(&bus, db_path.clone());
 
     // e. LLM Provider（providers.toml 缺失则生成模板；角色未配置则管线降级 ignore，不崩）
@@ -61,6 +69,8 @@ async fn main() -> Result<()> {
     };
 
     // g. 回复形态引擎（per-chat 发送队列；adapter 未接入时发送函数恒报错、reply 记事件跳过）
+    //    mood 单实例：Decision 写回、引擎 ::meme 映射共读
+    let mood = yuantuan_core::state::MoodState::default();
     let send = adapter
         .as_ref()
         .map(|h| yuantuan_adapter_qq::send_fn(h.clone()))
@@ -83,10 +93,11 @@ async fn main() -> Result<()> {
         send,
         self_ids.clone(),
         yuantuan_core::reply_engine::ReplyCfg::default(),
+        mood.clone(),
     )
     .spawn();
 
-    // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply）
+    // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply/send_meme）
     let self_qq = adapter
         .as_ref()
         .map(|h| h.self_qq_shared())
@@ -97,13 +108,21 @@ async fn main() -> Result<()> {
         llm: llm.clone(),
         self_qq: self_qq.clone(),
         self_ids,
-        mood: yuantuan_core::state::MoodState::default(),
+        mood,
         prefilter: yuantuan_core::prefilter::Config {
             window_secs: cfg.prefilter.window_secs,
             self_msg_cap: cfg.prefilter.self_msg_cap,
         },
         reply: Some(reply_engine),
+        memes_dir: memes_dir.clone(),
     });
+
+    // h2. 偷表情包监听（[meme].steal_enabled）
+    if cfg.meme.steal_enabled {
+        let _steal = yuantuan_core::meme::spawn_steal_listener(&bus, db_path.clone(), memes_dir.clone());
+    } else {
+        info!("[meme].steal_enabled=false，偷表情包关闭");
+    }
 
     // i. 夜间归纳调度器（单实例锁；enabled=false 则跳过）
     if cfg.consolidation.enabled {

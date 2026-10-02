@@ -12,4 +12,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
 anyhow = "1"
 rand = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+md-5 = "0.10"
 tracing = "0.1"

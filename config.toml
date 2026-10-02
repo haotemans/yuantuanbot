@@ -28,5 +28,9 @@ daily_time = "03:00"
 # 调试用：启动后立即执行一次（生产保持 false）
 run_on_startup = false
 
+[meme]
+# 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）
+steal_enabled = true
+
 [log]
 level = "info"

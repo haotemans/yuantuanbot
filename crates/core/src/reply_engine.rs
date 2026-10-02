@@ -14,8 +14,8 @@
 use crate::decision::DecisionOutput;
 use crate::event::{BubbleSentPayload, Event, EventBus, MessageReceivedPayload};
 use crate::prefilter::SelfMsgIds;
-use crate::state::MoodState;
-use crate::{context_builder, llm};
+use crate::state::{MoodState, MoodValue};
+use crate::{context_builder, llm, meme};
 use anyhow::{anyhow, Context, Result};
 use rand::Rng;
 use rusqlite::params;
@@ -178,6 +178,14 @@ fn mechanical_split(b: &Bubble) -> Vec<Bubble> {
 
 // ---------- 发送队列（per-chat 串行） ----------
 
+/// 队列任务种类：文字泡序列 or 直接发图（meme）
+#[derive(Debug, Clone)]
+pub enum JobKind {
+    Bubbles(Vec<Bubble>),
+    /// 已抽好的 meme 图片绝对路径（直接发图，无打字延时/无作废核对）
+    Image(PathBuf),
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplyJob {
     pub chat_id: String,
@@ -188,7 +196,7 @@ pub struct ReplyJob {
     pub mention: bool,
     /// @目标 QQ 号（mention 或泡内 ::at 用）
     pub mention_qq: Option<u64>,
-    pub bubbles: Vec<Bubble>,
+    pub kind: JobKind,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +237,19 @@ impl EngineHandle {
             warn!("回复引擎已停止，任务丢弃");
         }
     }
+
+    /// 直接发图（meme）：入 per-chat 串行队列，与普通回复同队列保序（稳定六条②）
+    pub fn enqueue_image(&self, chat_id: String, chat_type: ChatType, target: u64, image: PathBuf) {
+        self.enqueue(ReplyJob {
+            chat_id,
+            chat_type,
+            target,
+            anchor_msg_id: 0,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Image(image),
+        });
+    }
 }
 
 pub struct ReplyEngine {
@@ -237,11 +258,19 @@ pub struct ReplyEngine {
     send: SendFn,
     self_ids: SelfMsgIds,
     cfg: ReplyCfg,
+    mood: MoodState,
 }
 
 impl ReplyEngine {
-    pub fn new(db_path: PathBuf, bus: EventBus, send: SendFn, self_ids: SelfMsgIds, cfg: ReplyCfg) -> Self {
-        Self { db_path, bus, send, self_ids, cfg }
+    pub fn new(
+        db_path: PathBuf,
+        bus: EventBus,
+        send: SendFn,
+        self_ids: SelfMsgIds,
+        cfg: ReplyCfg,
+        mood: MoodState,
+    ) -> Self {
+        Self { db_path, bus, send, self_ids, cfg, mood }
     }
 
     /// 派遣器：每个 chat 一个 worker（mpsc 串行）；折叠卡与普通回复同队列（稳定六条②）
@@ -287,12 +316,67 @@ fn latest_incoming(db_path: &Path, chat_id: &str) -> i64 {
 }
 
 async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
+    match job.kind.clone() {
+        JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
+        JobKind::Image(path) => process_image(eng, &job, &path, "meme").await,
+    }
+}
+
+/// 直接发图：无首泡延时、无作废核对，失败退避重试一次；落 self 图片消息保持流水连贯
+async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
+    let req = SendRequest {
+        chat_type: job.chat_type,
+        target: job.target,
+        segments: json!([{"type": "image", "data": {"file": meme::file_url(path)}}]),
+    };
+    match send_with_retry(&eng.send, &req).await {
+        Ok(data) => {
+            if let Some(id) = data.get("message_id").and_then(|x| x.as_i64()) {
+                eng.self_ids.record(id);
+            }
+            insert_self_message_ex(&eng.db_path, job, "（图片）", true);
+            eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                chat_id: job.chat_id.clone(),
+                bubble_index: 0,
+                total: 1,
+                ok: true,
+                note: Some(note.into()),
+            }));
+        }
+        Err(e) => {
+            warn!(chat_id = %job.chat_id, error = %e, "meme 图发送失败");
+            eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                chat_id: job.chat_id.clone(),
+                bubble_index: 0,
+                total: 1,
+                ok: false,
+                note: Some(format!("meme 发送失败: {e}")),
+            }));
+        }
+    }
+}
+
+/// ::meme 类别缺省时按 mood 映射（happy→开心/angry→生气/down→低落/calm→misc，映射不到→misc）
+fn resolve_meme_category(cat: Option<&str>, mood: MoodValue) -> String {
+    if let Some(c) = cat.map(str::trim).filter(|c| !c.is_empty()) {
+        return c.to_string();
+    }
+    match mood {
+        MoodValue::Happy => "开心",
+        MoodValue::Angry => "生气",
+        MoodValue::Down => "低落",
+        MoodValue::Calm => "misc",
+    }
+    .to_string()
+}
+
+async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubble]) {
     let cfg = &eng.cfg;
     let started = Instant::now();
     let base_version = latest_incoming(&eng.db_path, &job.chat_id);
-    let total = job.bubbles.len();
+    let total = bubbles.len();
 
-    for (i, b) in job.bubbles.iter().enumerate() {
+    for (i, b) in bubbles.iter().enumerate() {
         // 延时模拟打字（超总预算则不再延时）
         if started.elapsed().as_millis() < cfg.total_budget_ms as u128 {
             if i == 0 {
@@ -312,9 +396,28 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
             eng.bus.publish(Event::ReplyInterrupted);
             return;
         }
-        // TODO(单7)：接 meme_library 抽图发送。当前为最不吵方案：纯 ::meme 泡跳过，仅记日志。
+        // 纯 ::meme 泡：按类别（缺省按 mood 映射）抽图直接发图片；混合泡只发文字部分
         if b.text.is_empty() && b.meme.is_some() {
-            debug!(chat_id = %job.chat_id, cat = ?b.meme, "meme 库未接入，跳过表情包泡");
+            let memes_root = eng.db_path.parent().unwrap_or(Path::new(".")).join("memes");
+            let cat = resolve_meme_category(b.meme.as_deref(), eng.mood.get());
+            match meme::pick(&eng.db_path, &memes_root, &cat)
+                .or_else(|| meme::pick(&eng.db_path, &memes_root, "misc"))
+            {
+                Some(path) => {
+                    debug!(chat_id = %job.chat_id, category = %cat, "::meme 抽图发送");
+                    process_image(eng, job, &path, "meme(::)").await;
+                }
+                None => {
+                    debug!(chat_id = %job.chat_id, category = %cat, "meme 库无该类别图片，跳过");
+                    eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                        chat_id: job.chat_id.clone(),
+                        bubble_index: i,
+                        total,
+                        ok: false,
+                        note: Some(format!("meme 库空（类别 {cat}）")),
+                    }));
+                }
+            }
             continue;
         }
         // 组装 OneBot 段数组（首泡按 Decision.mention 或泡内 ::at 加 at 段；私聊不加）
@@ -377,6 +480,10 @@ async fn send_with_retry(send: &SendFn, req: &SendRequest) -> Result<Value> {
 }
 
 fn insert_self_message(db_path: &Path, job: &ReplyJob, text: &str) {
+    insert_self_message_ex(db_path, job, text, false)
+}
+
+fn insert_self_message_ex(db_path: &Path, job: &ReplyJob, text: &str, has_image: bool) {
     let Ok(conn) = crate::db::connect(db_path) else { return };
     let now = now_secs();
     let chat_type = match job.chat_type {
@@ -390,8 +497,8 @@ fn insert_self_message(db_path: &Path, job: &ReplyJob, text: &str) {
     );
     if let Err(e) = conn.execute(
         "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts)
-         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, 0, ?4)",
-        params![job.chat_id, chat_type, text, now],
+         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5)",
+        params![job.chat_id, chat_type, text, has_image as i64, now],
     ) {
         warn!(error = %e, "self 回复落库失败");
     }
@@ -434,12 +541,12 @@ pub async fn prepare_and_enqueue(
         anchor_msg_id: msg.msg_id,
         mention: out.mention,
         mention_qq,
-        bubbles,
+        kind: JobKind::Bubbles(bubbles),
     });
     Ok(())
 }
 
-fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, Option<u64>)> {
+pub(crate) fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, Option<u64>)> {
     let sender_qq = msg
         .sender_pid
         .strip_prefix("p_")

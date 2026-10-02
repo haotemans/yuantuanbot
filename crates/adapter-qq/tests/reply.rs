@@ -211,9 +211,9 @@ fn plain_group_message(id: u64, uid: u64, text: &str) -> Value {
 }
 
 struct Rig {
-    db_path: PathBuf,
-    bus: EventBus,
-    handles: Vec<tokio::task::JoinHandle<()>>,
+    _db_path: PathBuf,
+    _bus: EventBus,
+    _handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Value>, captures: Captures, notify: Arc<Notify>, inject: Option<Value>, engine_cfg: ReplyCfg) -> Rig {
@@ -257,6 +257,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         send_fn(adapter.clone()),
         self_ids.clone(),
         engine_cfg,
+        MoodState::default(),
     )
     .spawn();
     let pipeline = spawn_pipeline(PipelineDeps {
@@ -268,8 +269,9 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         mood: MoodState::default(),
         prefilter: yuantuan_core::prefilter::Config::default(),
         reply: Some(engine),
+        memes_dir: temp_dir("reply-memes"),
     });
-    Rig { db_path, bus, handles: vec![h1, h2, pipeline, _t] }
+    Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }
 }
 
 fn decision_json(mention: bool) -> String {
@@ -390,7 +392,24 @@ async fn new_message_voids_remaining_bubbles() {
     // 首泡必到
     let deadline = Instant::now() + Duration::from_secs(30);
     while captures.lock().unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "首泡未发出");
+        if Instant::now() >= deadline {
+            let c = db::connect(&db_path).unwrap();
+            let msgs: Vec<String> = c
+                .prepare("SELECT msg_id, sender_pid, chat_id, substr(text,1,24) FROM messages ORDER BY msg_id")
+                .unwrap()
+                .query_map([], |r| Ok(format!("{}|{}|{}|{}", r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            let evs: Vec<String> = c
+                .prepare("SELECT id, kind FROM events ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok(format!("{}|{}", r.get::<_,i64>(0)?, r.get::<_,String>(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            panic!("首泡未发出。messages={msgs:?} events={evs:?} captures={:?}", captures.lock().unwrap().len());
+        }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // 等 ReplyInterrupted 落表（作废的确定性信号），而不是赌固定秒数

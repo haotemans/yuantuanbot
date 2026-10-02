@@ -14,3 +14,8 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 anyhow = "1"
 tracing = "0.1"
+
+[dev-dependencies]
+yuantuan-webui = { path = "../webui" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

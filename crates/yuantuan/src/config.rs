@@ -12,6 +12,7 @@ pub struct Config {
     pub webui: WebuiConfig,
     pub prefilter: PrefilterSection,
     pub consolidation: ConsolidationSection,
+    pub meme: MemeSection,
     pub log: LogConfig,
 }
 
@@ -53,6 +54,7 @@ impl Default for Config {
             webui: WebuiConfig::default(),
             prefilter: PrefilterSection::default(),
             consolidation: ConsolidationSection::default(),
+            meme: MemeSection::default(),
             log: LogConfig::default(),
         }
     }
@@ -91,6 +93,19 @@ pub struct ConsolidationSection {
     pub daily_time: String,
     /// 调试用：启动后立即执行一次
     pub run_on_startup: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MemeSection {
+    /// 偷表情包：群图片自动入待审区
+    pub steal_enabled: bool,
+}
+
+impl Default for MemeSection {
+    fn default() -> Self {
+        Self { steal_enabled: true }
+    }
 }
 
 impl Default for PrefilterSection {
@@ -156,6 +171,10 @@ enabled = true
 daily_time = "03:00"
 # 调试用：启动后立即执行一次（生产保持 false）
 run_on_startup = false
+
+[meme]
+# 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）
+steal_enabled = true
 
 [log]
 level = "info"

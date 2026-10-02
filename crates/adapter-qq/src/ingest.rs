@@ -74,6 +74,7 @@ pub fn ingest_message(
     let mut at_me = false;
     let mut reply_to: Option<i64> = None;
     let mut has_image = false;
+    let mut image_urls: Vec<String> = Vec::new();
     let segments = v
         .get("message")
         .and_then(|m| m.as_array())
@@ -102,7 +103,15 @@ pub fn ingest_message(
                     .and_then(|i| i.as_str())
                     .and_then(|s| s.parse::<i64>().ok());
             }
-            Some("image") => has_image = true,
+            Some("image") => {
+                has_image = true;
+                // data.url → 事件载荷（偷表情包流程消费；不落 messages）
+                if let Some(u) = seg.pointer("/data/url").and_then(|u| u.as_str()) {
+                    if u.starts_with("http") && !image_urls.iter().any(|x| x == u) {
+                        image_urls.push(u.to_string());
+                    }
+                }
+            }
             Some("face") => {} // V1 忽略不存
             Some(other) => debug!(seg_type = other, "忽略段类型"),
             None => {}
@@ -174,6 +183,7 @@ pub fn ingest_message(
         has_image,
         reply_to,
         sender_bot,
+        image_urls,
         ts,
     }));
     Ok(())

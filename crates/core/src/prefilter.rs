@@ -147,6 +147,7 @@ mod tests {
             has_image: false,
             reply_to: None,
             sender_bot: false,
+            image_urls: Vec::new(),
             ts: now_secs(),
         }
     }

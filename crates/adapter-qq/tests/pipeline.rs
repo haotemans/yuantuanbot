@@ -218,6 +218,7 @@ async fn decision_pipeline_end_to_end() {
         mood: MoodState::default(),
         prefilter: yuantuan_core::prefilter::Config::default(),
         reply: None,
+        memes_dir: temp_dir("pipeline-memes"),
     });
 
     // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）

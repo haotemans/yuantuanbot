@@ -10,14 +10,21 @@ pub const SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    /// data/memes 根（由 db_path 推导）
+    pub memes_dir: PathBuf,
     sessions: Arc<Mutex<HashMap<String, Instant>>>,
     pub started: Instant,
 }
 
 impl AppState {
     pub fn new(db_path: PathBuf) -> Self {
+        let memes_dir = db_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("memes");
         Self {
             db_path,
+            memes_dir,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             started: Instant::now(),
         }

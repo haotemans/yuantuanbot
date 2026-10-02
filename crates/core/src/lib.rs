@@ -9,6 +9,7 @@ pub mod db;
 pub mod decision;
 pub mod event;
 pub mod llm;
+pub mod meme;
 pub mod memory;
 pub mod prefilter;
 pub mod reply_engine;

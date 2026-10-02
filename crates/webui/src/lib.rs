@@ -2,6 +2,7 @@
 //! 定稿依据：docs/runtime-design.md 第四章、docs/architecture-v0.1.md 第十五章安全小节。
 
 mod auth;
+mod memes;
 mod overview;
 mod state;
 mod static_files;
@@ -21,6 +22,10 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16) -> Result<()> {
     // /api/* 中除 login 外一律过 token 校验
     let protected = Router::new()
         .route("/api/overview", get(overview::overview))
+        .route("/api/memes", get(memes::list))
+        .route("/api/memes/{id}/approve", post(memes::approve))
+        .route("/api/memes/{id}/reject", post(memes::reject))
+        .route("/api/meme-file/{id}", get(memes::file))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
