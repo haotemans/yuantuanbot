@@ -300,6 +300,8 @@ CREATE TABLE state_kv (
 
 `anchor` 是本轮不可变的回复对象；`window_messages` 只提供 10 秒聚合窗口中的上下文。Decision 输出不包含目标 person 或目标 msg_id，Runtime 始终按 anchor 路由回复。B 的独立 @/引用请求创建自己的窗口与 anchor。
 
+窗口裁剪规则：必须保留 anchor、窗口内所有 @/引用云团消息和最后 30 条普通消息；同时应用总字符预算。超出的消息仍在 `messages` 表中，不能送入本次 Decision。窗口有创建序号，Runtime 按同 chat 的创建序号入发送队列。
+
 输出 Schema 见 architecture-v0.1.md 第十三章。
 
 ---
