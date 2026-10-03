@@ -260,6 +260,17 @@ CREATE TABLE state_kv (
 
 ```json
 {
+  "anchor": {
+    "msg_id": 100,
+    "sender_pid": "p_001",
+    "text": "原始触发消息（超长截断）",
+    "at_me": true,
+    "reply_to_me": false
+  },
+  "window_messages": [
+    {"msg_id": 100, "sender_pid": "p_001", "text": "A 的原始消息"},
+    {"msg_id": 101, "sender_pid": "p_007", "text": "窗口内普通插话"}
+  ],
   "message": {
     "text": "原文（超长截断）",
     "chat_type": "group | private",
@@ -286,6 +297,8 @@ CREATE TABLE state_kv (
   "active_task": null
 }
 ```
+
+`anchor` 是本轮不可变的回复对象；`window_messages` 只提供 10 秒聚合窗口中的上下文。Decision 输出不包含目标 person 或目标 msg_id，Runtime 始终按 anchor 路由回复。B 的独立 @/引用请求创建自己的窗口与 anchor。
 
 输出 Schema 见 architecture-v0.1.md 第十三章。
 
