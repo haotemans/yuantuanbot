@@ -661,7 +661,7 @@ Event Bus（进程内 channel）
 
 - 传输：tokio broadcast 单总线；事件为强类型枚举
 - 事件清单：`MessageReceived / MessageSent / BubbleSent / ReplyInterrupted / DecisionMade / TaskCreated / TaskStepDone / TaskFinished / MemoryWritten / RelationshipEventAppended / MoodChanged / MemberJoined / MemberLeft / ConsolidationDone / ConfigReloaded / PersonalityVersionChanged`
-- 落库：全部事件同时写入 `events` 表（轮转保留 7 天）——Decision trace 页与任务可视化页的数据源（表结构见 docs/data-model.md）
+- 落库：事件尽力写入 `events` 表（轮转保留 7 天）——Decision trace 页与任务可视化页的数据源。Q55 / ADR-0006 修订可靠性边界：消息流水必须可恢复，Decision/trace 观测事件允许过载缺失；任务业务状态不能依赖可丢失的观测事件恢复。消息恢复消费机制尚待实现（表结构见 docs/data-model.md）。
 - V1 订阅者四个：Prefilter 管线（订 MessageReceived）、tracer（全订，落表）、WebUI 实时推送（全订）、夜间归纳调度器（定时器驱动，不订消息事件）
 
 ---
