@@ -63,6 +63,7 @@ docs/          设计文档
 - [docs/data-model.md](docs/data-model.md)：14 张表结构与更新语义
 - [docs/runtime-design.md](docs/runtime-design.md)：四 crate 结构、启动序列/监督树、并发模型、WebUI 设计、adapter 通讯设计
 - [docs/governance.md](docs/governance.md)：开发治理协议
+- [docs/decision-log.md](docs/decision-log.md)：决策台账（Q1–Q51 + 未编号裁决：问题/裁决/被否项/落点，改判可溯）
 - [docs/adr/](docs/adr/)：ADR 0001–0004（NapCat 选型、静态人格、否决自研协议、情绪归属）
 
 ## 测试
