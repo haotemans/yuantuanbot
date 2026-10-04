@@ -72,7 +72,9 @@ Decision 输入（Q56/Q60/Q62，待实现）：每个窗口携带不可变 `anch
 
 窗口调度（Q57–Q64，待实现）：所有通过 Prefilter 的消息可创建或加入 10 秒窗口；同 chat 有普通等待窗口时，普通消息加入该窗口，不重复开窗；没有等待窗口时才创建普通窗口。@云团、引用云团、私聊为高优先级；@云团和引用云团始终创建独立窗口，只引用他人按普通消息处理。高优先级窗口优先获得全局 LLM 并发槽。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。失败提示每窗口最多一次，文案为空静默，有文案发送给 anchor 请求者；单泡发送失败只记内部事件。
 
-Decision 模型目标为 [Intern-Decision-4B](https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-4B)：它接收 state 与 1–16 个 choice/score/noul 问题，单次 Hugging Face 前向推理返回候选概率分布，不生成自由文本；模型卡默认 `max_length=8192` tokens，提供 Python 3.12+ 推理模块，ModelScope 页面未提供 API 推理服务。权重文件约 9.1 GB，故 2C2G Bot 主机不能承载该推理进程，需单独确定推理服务部署。现有 `LlmGateway::chat` 的 OpenAI chat/completions JSON 适配不兼容该推理契约；模型服务接入方式与 `task_goal`/`memory_write`/`reason` 自由文本字段的归属待裁决。
+Decision 模型为 [Intern-Decision-4B](https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-4B)：它接收 state 与 1–16 个 choice/score/noul 问题，单次 Hugging Face 前向推理返回候选概率分布，不生成自由文本；模型卡默认 `max_length=8192` tokens，提供 Python 3.12+ 推理模块，模型页未提供托管 API 推理，权重文件约 9.1 GB。
+
+Q65 已确认：模型托管于魔搭创空间，由项目的自定义 MCP `decide` 服务调用 Python 推理模块，Rust Bot 作为 MCP client 使用；这不同于魔搭 `studio-mcp`（其工具用于部署/管理 Studio）。现有 `LlmGateway::chat` 的 OpenAI chat/completions JSON 适配不兼容该推理契约。MCP transport、Studio 私有访问鉴权、xGPU 自动暂停与常驻 GPU 资源取舍，以及 `task_goal`/`memory_write`/`reason` 自由文本字段归属待裁决。xGPU 官方说明会在低访问期间自动暂停，因此不能默认假定服务常驻或冷启动满足交互延迟。
 
 Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继续收新消息，窗口不延长，结束后开始 Decision。该窗口不是 API 超时。回复锚点固定为 A；B 普通插话不取消给 A 的回复；B 的独立 @/引用请求异步开启自己的窗口。失败文案为空则静默，有文案才向原请求者发送。
 

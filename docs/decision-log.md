@@ -122,6 +122,7 @@
 | Q62 | Decision 输入预算 | 采用 B+C：Decision state 字符数上限 8,000，并以模型 tokenizer 对完整编译输入做硬限制，最多 8,192 tokens（含模板/schema开销）；bot_chat 仍使用独立 40,000 字符预算 | 只用字符估算；Decision 沿用 bot_chat 的 40,000 字符上限 | data-model 十章；runtime-design 三章；待实现 | ✅ |
 | Q63 | 高优先级窗口调度 | @云团、引用云团、私聊窗口可优先获得全局 LLM 并发槽；同 chat 发送仍按窗口创建顺序 | 普通/高优先级完全同等调度；完成先发 | runtime-design 三章；待实现 | ✅ |
 | Q64 | Decision/回复失败提示 | 每个窗口最多提示一次；错误文案为空则静默，有文案才发送给 anchor 原请求者。单泡发送错误只记内部事件，不再触发用户错误提示 | 所有错误强制打扰用户；同一窗口重复报错 | runtime-design 三章；待实现 | ✅ |
+| Q65 | Intern-Decision-4B 的托管与调用边界 | 模型部署到魔搭创空间，并由项目提供 MCP `decide` 服务给 Rust Bot 调用；Bot 作为 MCP client。使用的是自定义推理 MCP 服务；魔搭 `studio-mcp` 管理工具不提供该模型推理本身 | 让 2C2G Bot 主机直接加载模型；误把 Studio 管理 MCP 当成推理 API | runtime-design 三章；详细运行/访问配置待 ADR | ✅ |
 
 ## 未编号裁决（按时间序）
 
@@ -151,3 +152,4 @@
 - 2026-10-04：确认 Q57–Q60；明确窗口启动范围、@/引用优先级、同 chat 创建顺序发送及窗口上下文上限；运行代码未修改。
 - 2026-10-04：确认 Q61–Q64；普通消息合入同 chat 等待窗口、Decision 双重预算、高优先级抢占调度槽及每窗口一次可配置失败提示；运行代码未修改。
 - 2026-10-04：用户确认 Intern-Decision-4B 为 Decision 模型。模型卡显示它是结构化候选评分器、8192-token 上限、官方 Python/HF 推理路径且未提供托管 API；部署拓扑及自由文本字段处理待裁决。
+- 2026-10-04：确认 Q65 高层方向：Intern-Decision-4B 托管于魔搭创空间，以自定义 MCP `decide` 服务提供给 Bot；xGPU/常驻资源、访问控制、MCP 传输和自由文本字段细节待裁决。
