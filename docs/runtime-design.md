@@ -68,9 +68,11 @@ yuantuan/
 - 全局 LLM 请求并发上限固定为 4（Q53，待实现）；与 Task 数量和 Decision 每分钟速率分别约束。
 - WebUI 请求：axum 默认并发
 
-Decision 输入（Q56，待实现）：每个窗口携带不可变 `anchor` 与有界 `window_messages`。Decision 只能产出 action/mood/reply_len/mention 等已定稿字段，Runtime 使用 anchor 的 `msg_id` 与 `sender_pid` 路由 bot_chat 和发送队列；模型不得选择或替换回复对象。
+Decision 输入（Q56/Q60/Q62，待实现）：每个窗口携带不可变 `anchor` 与有界 `window_messages`。窗口保留 anchor、所有 @/引用云团消息及最后 30 条普通消息，`state` 字符预算 8,000；再使用模型 tokenizer 对完整编译输入（含 chat template 和 schema）强制限制为 8,192 tokens。bot_chat 保留独立 40,000 字符预算。Decision 只能产出结构化动作等字段，Runtime 使用 anchor 的 `msg_id` 与 `sender_pid` 路由，模型不得选择或替换回复对象。
 
-窗口调度（Q57–Q60，待实现）：所有通过 Prefilter 的消息都能创建 10 秒窗口；@云团、引用云团、私聊为高优先级，普通群聊为普通优先级。@云团和引用云团创建独立窗口；只引用他人按普通消息处理；普通 B 插话只补充 A 的窗口上下文。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。`window_messages` 保留 anchor、所有 @/引用云团消息和最后 30 条普通消息，并受总字符数上限约束，超出内容只留在消息库。
+窗口调度（Q57–Q64，待实现）：所有通过 Prefilter 的消息可创建或加入 10 秒窗口；同 chat 有普通等待窗口时，普通消息加入该窗口，不重复开窗；没有等待窗口时才创建普通窗口。@云团、引用云团、私聊为高优先级；@云团和引用云团始终创建独立窗口，只引用他人按普通消息处理。高优先级窗口优先获得全局 LLM 并发槽。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。失败提示每窗口最多一次，文案为空静默，有文案发送给 anchor 请求者；单泡发送失败只记内部事件。
+
+Decision 模型目标为 [Intern-Decision-4B](https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-4B)：它接收 state 与 1–16 个 choice/score/noul 问题，单次 Hugging Face 前向推理返回候选概率分布，不生成自由文本；模型卡默认 `max_length=8192` tokens，提供 Python 3.12+ 推理模块，ModelScope 页面未提供 API 推理服务。权重文件约 9.1 GB，故 2C2G Bot 主机不能承载该推理进程，需单独确定推理服务部署。现有 `LlmGateway::chat` 的 OpenAI chat/completions JSON 适配不兼容该推理契约；模型服务接入方式与 `task_goal`/`memory_write`/`reason` 自由文本字段的归属待裁决。
 
 Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继续收新消息，窗口不延长，结束后开始 Decision。该窗口不是 API 超时。回复锚点固定为 A；B 普通插话不取消给 A 的回复；B 的独立 @/引用请求异步开启自己的窗口。失败文案为空则静默，有文案才向原请求者发送。
 

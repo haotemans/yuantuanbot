@@ -738,7 +738,7 @@ Q54 补充（待实现）：A 消息命中后先等待固定 10 秒，同时继�
 - 当前情绪
 - 是否保存记忆（显式通道）
 
-输出（Schema 终稿）：
+输出（当前通用 chat/completions 原型 Schema；Intern-Decision-4B 适配方式待定，见运行时设计）：
 
 ```json
 {

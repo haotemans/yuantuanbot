@@ -298,9 +298,9 @@ CREATE TABLE state_kv (
 }
 ```
 
-`anchor` 是本轮不可变的回复对象；`window_messages` 只提供 10 秒聚合窗口中的上下文。Decision 输出不包含目标 person 或目标 msg_id，Runtime 始终按 anchor 路由回复。B 的独立 @/引用请求创建自己的窗口与 anchor。
+`anchor` 是本轮不可变的回复对象；`window_messages` 只提供 10 秒聚合窗口中的上下文。Decision 输出不包含目标 person 或目标 msg_id，Runtime 始终按 anchor 路由回复。B 的独立 @/引用请求创建自己的窗口与 anchor。同 chat 已存在普通等待窗口时，新普通消息加入该窗口；若无等待窗口，则新建窗口；@/引用云团始终另建独立窗口。
 
-窗口裁剪规则：必须保留 anchor、窗口内所有 @/引用云团消息和最后 30 条普通消息；同时应用总字符预算。超出的消息仍在 `messages` 表中，不能送入本次 Decision。窗口有创建序号，Runtime 按同 chat 的创建序号入发送队列。
+窗口裁剪规则：必须保留 anchor、窗口内所有 @/引用云团消息和最后 30 条普通消息；Decision `state` 最多 8,000 字符，并以模型 tokenizer 对完整模板/schema 后的输入做 8,192-token 硬限制。超出的消息仍在 `messages` 表中，不能送入本次 Decision。窗口有创建序号，Runtime 按同 chat 的创建序号入发送队列。bot_chat 的 40,000 字符预算单独计算。
 
 输出 Schema 见 architecture-v0.1.md 第十三章。
 
