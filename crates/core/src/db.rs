@@ -176,8 +176,79 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 "#;
 
+/// V2：媒体生成（Q007/Q009/Q013/Q014/Q016/Q017）—— 4 张表 + chats 增列
+const V2_SQL: &str = r#"
+-- 媒体 provider 表（NAI / OpenAI-Image / Gemini ...）
+CREATE TABLE IF NOT EXISTS media_providers (
+  name             TEXT PRIMARY KEY,
+  base_url         TEXT NOT NULL,
+  api_key_env      TEXT NOT NULL DEFAULT '',
+  default_endpoint TEXT NOT NULL DEFAULT 'nai_native',  -- nai_native | openai_compat | gemini | xai
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+
+-- 媒体模型表（一个 provider 下多个模型；命令 -m 入参目标）
+CREATE TABLE IF NOT EXISTS media_models (
+  alias            TEXT PRIMARY KEY,             -- 用户输入 ID（如 "nai4.5"）
+  provider         TEXT NOT NULL REFERENCES media_providers(name),
+  model_id         TEXT NOT NULL,                -- 实际请求 model id（如 "nai-diffusion-4-5-full"）
+  endpoint_style   TEXT,                          -- 覆盖 provider.default_endpoint；NULL 跟 provider 默认
+  prompt_style     TEXT NOT NULL DEFAULT 'natural', -- nai | anima | a1111 | natural（Q010）
+  daily_quota      INTEGER NOT NULL DEFAULT 0,    -- 0 = 无上限；>0 = 每日配额
+  cost_per_result  INTEGER NOT NULL DEFAULT 0,    -- 单价（0 = 免费；>0 = 计费）
+  permission       TEXT NOT NULL DEFAULT 'everyone', -- admin_only | everyone（Q009）
+  ratios           TEXT NOT NULL DEFAULT '',      -- 逗号分隔支持的比例（"1:1,2:3,3:2"）；空 = 用 provider 默认
+  default_quality  TEXT,                          -- 默认质量档位（Seedream/Seedance 用）
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_provider ON media_models(provider);
+
+-- 媒体任务表（审计 + /tasks 命令 + 任务可视化页数据源）
+CREATE TABLE IF NOT EXISTS media_tasks (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id        TEXT NOT NULL,
+  chat_type      TEXT NOT NULL,
+  sender_pid     TEXT NOT NULL REFERENCES persons(person_id),
+  model_alias    TEXT NOT NULL,
+  provider       TEXT NOT NULL,
+  endpoint_style TEXT NOT NULL,
+  raw_prompt     TEXT NOT NULL,
+  prompt         TEXT NOT NULL,            -- 优化后的最终 prompt
+  ratio          TEXT NOT NULL,
+  count          INTEGER NOT NULL,
+  seed           INTEGER,
+  cost           INTEGER NOT NULL DEFAULT 0,
+  state          TEXT NOT NULL,             -- queued | running | success | failed | canceled
+  error          TEXT,
+  artifacts      TEXT,                      -- JSON 数组：落盘绝对路径
+  created_at     INTEGER NOT NULL,
+  finished_at    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mt_chat_ts   ON media_tasks(chat_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_mt_sender_ts ON media_tasks(sender_pid, created_at);
+CREATE INDEX IF NOT EXISTS idx_mt_state     ON media_tasks(state);
+
+-- 用户余额表（Q009）；余额为 0 则计费模型不可用
+CREATE TABLE IF NOT EXISTS media_credits (
+  person_id  TEXT PRIMARY KEY REFERENCES persons(person_id),
+  balance    INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+
+-- Q014：chat 上次成功任务的 seed（缺省 --seed 时复用，可复现）
+-- chats 表原本不存在；现以 state_kv 为通道："last_media_seed:{chat_id}" → int
+-- 选 state_kv 而非新表，因为键值型写多读少，且不需 schema 变更
+"#;
+
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 1] = [("V0.1 基线：14 张表（data-model.md）", V1_SQL)];
+const MIGRATIONS: [(&str, &str); 2] = [
+    ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
+    ("V0.2 媒体生成：media_providers/models/tasks/credits 4 张表", V2_SQL),
+];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     let current: u32 = conn

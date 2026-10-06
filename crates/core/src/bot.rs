@@ -39,6 +39,8 @@ pub struct PipelineDeps {
     pub ctx_cfg: crate::context_builder::SharedContextCfg,
     /// data/memes 根目录（meme 抽图）
     pub memes_dir: PathBuf,
+    /// 媒体命令上下文（MOD-022e /image 直派）；None 时命令忽略走原 Decision 管线
+    pub media_ctx: Option<crate::tools::media::command::MediaCtx>,
 }
 
 /// 订阅 Event Bus 的 Decision 管线；主动插话与被动回复走同一条管线
@@ -79,6 +81,16 @@ fn reply_engine_route(m: &MessageReceivedPayload) -> anyhow::Result<(reply_engin
 }
 
 async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
+    // Q008=C：/image /画 显式命令直派，先于 Prefilter 与 Decision（Command deterministic path）。
+    // 显式命令不参与节流与成本闸，且独立于 LLM 角色可用性——用户在配 LLM 之前也能用 media。
+    if let (Some(media_ctx), Some(body)) = (
+        deps.media_ctx.as_ref(),
+        crate::tools::media::command::match_image_command(&m.text),
+    ) {
+        crate::tools::media::command::handle_image_command(media_ctx, m, body).await;
+        return;
+    }
+
     let q = deps.self_qq.load(Ordering::Relaxed);
     let self_pid = (q != 0).then(|| format!("p_{q}"));
     let pf = *deps.prefilter.read().unwrap(); // 热应用：每条取当前阈值

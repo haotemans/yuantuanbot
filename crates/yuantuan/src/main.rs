@@ -150,10 +150,18 @@ async fn main() -> Result<()> {
         self_ids,
         mood: mood.clone(),
         prefilter: prefilter_slot.clone(),
-        reply: Some(reply_engine),
+        reply: Some(reply_engine.clone()),
         reply_cfg: reply_slot.clone(),
         ctx_cfg: ctx_slot.clone(),
         memes_dir: memes_dir.clone(),
+        media_ctx: Some(yuantuan_core::tools::media::command::MediaCtx {
+            db_path: db_path.clone(),
+            data_dir: data_root.clone(),
+            bus: bus.clone(),
+            reply_engine: Some(reply_engine.clone()),
+            registry: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            self_pid_admin: std::sync::Arc::new(|_pid: &str| false), // TODO(Q011)：从配置/环境读 admin pid 列表
+        }),
     });
 
     // h2. 偷表情包监听（开关走热应用槽，进程内常驻）

@@ -1,1 +1,94 @@
-//! Tools 占位：Tool trait 与 Registry（本单不实现）。
+//! Tools 系统（架构文档十五章扩展模型第 2 条："能力扩展 = 新 Tool"）。
+//!
+//! Tool = 可被 Agent / 命令直派调用的最小能力单元；Registry 持有全部已注册 Tool。
+//!
+//! 当前阶段（MOD-022 系列）：
+//! - 注册第一个真工具：`media_image`（Q007/Q016，生图；协议细节见 `tools::media`）
+//! - Tool 抽象刻意保守：还没接 Agent 循环（Q004），先让命令直派链路稳定用
+//! - 后续 Q004 落地时，Tool trait 会扩 parameters_schema（OpenAI/Anthropic function calling）
+
+use anyhow::Result;
+use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+pub mod media;
+
+/// 工具调用上下文：调用方所需的运行资料注入。
+/// 命令直派场景下：chat_id / sender_pid 用于配额与权限校验；send_fn 用于把产物段发回 NapCat。
+/// Agent 循环场景（Q004 未来）：还会有 task_id / working_memory 等。
+#[derive(Debug, Clone)]
+pub struct ToolCtx {
+    pub chat_id: String,
+    pub chat_type: String,
+    pub sender_pid: String,
+    /// 调用方 chat 的语言（后续 prompt 优化按此切换风格；Q010）
+    pub locale: Option<String>,
+}
+
+/// 单个工具调用结果。
+/// 设计原则：Tool 不直接发消息，只返回结构化结果；由调用方（命令直派 / Agent / Bot）决定怎么发。
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    /// 一句话给 LLM 或日志用的可读摘要
+    pub summary: String,
+    /// 附件（已落盘文件的绝对路径列表；例如生图成功的 png）
+    pub artifacts: Vec<String>,
+    /// 关键数据点（结构化结果，供调用方拼装 Bot 语言；如 seed/耗时/比例等）
+    pub data: Value,
+}
+
+/// Tool trait：所有能力扩展必须实现。
+/// send + sync 是因为 Registry 在 tokio 多任务间共享。
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// 工具名（稳定 ID，Registry 用这个名字索引；命令与 Agent 都用同一份）
+    fn name(&self) -> &'static str;
+    /// 一句中文描述（给 WebUI 展示与 LLM prompt 用）
+    fn description(&self) -> &'static str;
+
+    /// 执行。
+    /// - `ctx` 是调用上下文（chat/sender 等）
+    /// - `args` 是已 parse 的参数（命令直派管道已把 `-m/-r/--seed` 等转成结构化 Value）
+    async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput>;
+}
+
+/// 工具注册表：进程内单例（Arc 共享），启动时把所有 Tool 注册进来。
+/// 新增 Tool 的途径 = 实现 Tool + 在装配处 `registry.register(...)`。
+#[derive(Default, Clone)]
+pub struct Registry {
+    inner: Arc<std::sync::RwLock<HashMap<&'static str, Arc<dyn Tool>>>>,
+}
+
+impl Registry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register<T: Tool + 'static>(&self, tool: T) {
+        let name = tool.name();
+        self.inner
+            .write()
+            .expect("tools registry poisoned")
+            .insert(name, Arc::new(tool));
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.inner
+            .read()
+            .expect("tools registry poisoned")
+            .get(name)
+            .cloned()
+    }
+
+    /// 列出所有已注册工具名（WebUI 调试页 / 命令帮助用）
+    pub fn names(&self) -> Vec<&'static str> {
+        self.inner
+            .read()
+            .expect("tools registry poisoned")
+            .keys()
+            .copied()
+            .collect()
+    }
+}

@@ -1,13 +1,3 @@
-# 云团 LLM Provider 配置（架构文档十五章）
-# OpenAI 兼容 chat/completions；三角色独立绑定（允许绑同一家，角色不合并）。
-# api_key_env 为环境变量名（密钥不入库不入仓）；留空则无需密钥（如本地 mock）。
-
-# [provider.example]
-# base_url = "https://api.example.com/v1"
-# api_key_env = "EXAMPLE_API_KEY"
-# models = ["some-model"]
+[provider]
 
 [roles]
-# decision   = { provider = "example", model = "便宜快速模型" }
-# bot_chat   = { provider = "example", model = "中高档模型" }
-# agent_exec = { provider = "example", model = "强模型" }
