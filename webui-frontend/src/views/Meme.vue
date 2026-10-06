@@ -6,7 +6,7 @@
         <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in pending" :key="m.id">
             <n-card size="small">
-              <meme-img :id="m.id" height="110px" />
+              <MemeImg :id="m.id" height="110px" />
               <n-input v-model:value="m._cat" size="tiny" placeholder="类别（如 开心）" style="margin: 6px 0" />
               <n-space size="small">
                 <n-button size="tiny" type="success" @click="approve(m)">收编</n-button>
@@ -28,7 +28,7 @@
         <n-grid v-else :cols="5" :x-gap="10" :y-gap="10">
           <n-gi v-for="m in shownActive" :key="m.id">
             <n-card size="small">
-              <meme-img :id="m.id" height="110px" />
+              <MemeImg :id="m.id" height="110px" />
               <div style="font-size: 12px; margin-top: 4px">
                 <n-tag size="tiny" round>{{ m.category }}</n-tag>
                 用过 {{ m.use_count }} 次

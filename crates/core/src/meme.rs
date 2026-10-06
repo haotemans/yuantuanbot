@@ -210,7 +210,21 @@ pub fn file_url(path: &Path) -> String {
 pub type SharedSteal = std::sync::Arc<std::sync::RwLock<bool>>;
 
 /// 装配侧无条件启动；enabled 槽为 false 时跳过处理（订阅群图片消息，URL 下载 → _inbox → pending）
+/// 概率采样：每张图只以 steal_sample_rate（默认 0.5%）概率入待审，避免待审队列被滥用爆库
 pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf, enabled: SharedSteal) -> JoinHandle<()> {
+    spawn_steal_listener_with_rate(bus, db_path, memes_dir, enabled, STEAL_SAMPLE_RATE)
+}
+
+/// 偷图采样率：每张群图片只以 0.5% 概率入待审队列。原本"凡图必偷"的策略在多人群场景会爆待审区
+pub const STEAL_SAMPLE_RATE: f64 = 0.005;
+
+pub fn spawn_steal_listener_with_rate(
+    bus: &EventBus,
+    db_path: PathBuf,
+    memes_dir: PathBuf,
+    enabled: SharedSteal,
+    sample_rate: f64,
+) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         let http = match reqwest::Client::builder()
@@ -223,7 +237,7 @@ pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf
                 return;
             }
         };
-        info!("偷表情包监听已启动（待审区 data/memes/_inbox/；开关走热应用槽）");
+        info!(sample_rate, "偷表情包监听已启动（待审区 data/memes/_inbox/；开关走热应用槽；按概率采样）");
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
@@ -234,6 +248,11 @@ pub fn spawn_steal_listener(bus: &EventBus, db_path: PathBuf, memes_dir: PathBuf
                         continue;
                     }
                     for url in &m.image_urls {
+                        // 每张图独立采样，0.5% 概率入待审
+                        let roll: f64 = rand::Rng::random(&mut rand::rng());
+                        if roll >= sample_rate {
+                            continue;
+                        }
                         if let Err(e) = steal_one(&http, &db_path, &memes_dir, url).await {
                             debug!(error = %e, url = %url, "图片不入待审（下载失败或重复）");
                         }

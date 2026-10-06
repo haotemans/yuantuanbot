@@ -321,11 +321,13 @@ async fn steal_then_approve_and_reject() {
         },
         self_ids,
     );
-    let _steal = meme::spawn_steal_listener(
+    // 测试用 sample_rate=1.0 保证确定性（生产默认 0.005）
+    let _steal = meme::spawn_steal_listener_with_rate(
         &bus,
         db_path.clone(),
         memes.clone(),
         Arc::new(std::sync::RwLock::new(true)),
+        1.0,
     );
 
     // 等 pending 行落库
