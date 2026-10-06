@@ -132,8 +132,17 @@ impl CostGate {
 
 pub struct LlmGateway {
     roles: HashMap<Role, ResolvedRole>,
+    /// 原始 provider 配置（base_url + api_key），用于 WebUI 的「获取可用模型」功能
+    providers: HashMap<String, ProviderRuntime>,
     http: reqwest::Client,
     gate: CostGate,
+}
+
+/// 运行时的 provider 凭据（解析后），用于按名查询
+#[derive(Debug, Clone)]
+struct ProviderRuntime {
+    base_url: String,
+    api_key: Option<String>,
 }
 
 impl LlmGateway {
@@ -180,12 +189,30 @@ impl LlmGateway {
             }
         }
 
+        // 同时落一份原始 provider 凭据，供「获取可用模型」按名查找
+        let mut providers = HashMap::new();
+        for (name, p) in &file.provider {
+            let api_key = if p.api_key_env.is_empty() {
+                None
+            } else {
+                std::env::var(&p.api_key_env).ok().filter(|s| !s.is_empty())
+            };
+            providers.insert(
+                name.clone(),
+                ProviderRuntime {
+                    base_url: p.base_url.trim_end_matches('/').to_string(),
+                    api_key,
+                },
+            );
+        }
+
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .context("构建 LLM HTTP client 失败")?;
         Ok(Self {
             roles,
+            providers,
             http,
             gate: CostGate::new(30),
         })
@@ -232,6 +259,38 @@ impl LlmGateway {
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow!("provider 响应缺 choices[0].message.content"))?;
         Ok((r.model.clone(), started.elapsed().as_millis() as u64))
+    }
+
+    /// 拉取指定 provider 的可用模型列表（调 `GET {base_url}/models`，OpenAI 兼容）。
+    /// 返回模型 id 数组（已排序去重）；provider 不存在 / 请求失败 / 响应非预期格式都会报错。
+    pub async fn fetch_models(&self, provider_name: &str) -> Result<Vec<String>> {
+        let p = self
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| anyhow!("provider `{provider_name}` 不存在"))?
+            .clone();
+        let mut req = self.http.get(format!("{}/models", p.base_url));
+        if let Some(k) = &p.api_key {
+            req = req.bearer_auth(k);
+        }
+        let resp = req.send().await.context("连接 provider 失败")?;
+        let status = resp.status();
+        let text = resp.text().await.context("读取响应失败")?;
+        if !status.is_success() {
+            bail!("HTTP {status}: {}", &text[..text.len().min(200)]);
+        }
+        let v: Value = serde_json::from_str(&text).context("响应非 JSON")?;
+        let arr = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow!("响应缺 data 数组"))?;
+        let mut out: Vec<String> = arr
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
     }
 
     /// chat/completions 调用：先过成本闸；json_mode 时带 response_format=json_object

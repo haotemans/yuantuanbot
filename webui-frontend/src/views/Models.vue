@@ -97,23 +97,22 @@
       <template #header>
         <div class="sec-head">
           <span class="sec-title">Providers</span>
-          <span class="sec-sub">{{ Object.keys(providers).length }} 个端点</span>
+          <span class="sec-sub">{{ Object.keys(providers).length }} 个端点 · OpenAI 兼容</span>
         </div>
       </template>
-      <n-grid v-if="providerList.length" cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
-        <n-gi v-for="item in providerList" :key="item.name">
-          <provider-card :name="item.name" :p="item.p" :usage="providerUsage(item.name)"
-                         @delete="delProvider(item.name)" />
-        </n-gi>
-      </n-grid>
+      <template #header-extra>
+        <n-input v-model:value="newName" size="small" placeholder="新 provider 名"
+                 style="width: 200px" @keyup.enter="addProvider" />
+        <n-button size="small" type="primary" secondary @click="addProvider" style="margin-left: 8px">
+          + 添加 Provider
+        </n-button>
+      </template>
+      <div v-if="providerList.length" class="provider-list">
+        <provider-card v-for="item in providerList" :key="item.name" :name="item.name" :p="item.p"
+                       :usage="providerUsage(item.name)" @delete="delProvider(item.name)" />
+      </div>
       <empty-state v-else title="还没有 Provider"
                    hint="添加一个 OpenAI 兼容端点（base_url + 环境变量名）；密钥放服务器环境变量里" />
-
-      <div class="add-row">
-        <n-input v-model:value="newName" size="small" placeholder="新 provider 名（如 openai / deepseek）"
-                 style="max-width: 280px" @keyup.enter="addProvider" />
-        <n-button size="small" secondary type="primary" @click="addProvider">+ 添加</n-button>
-      </div>
     </n-card>
   </div>
 </template>
@@ -126,7 +125,7 @@ import ProviderCard from '../components/ProviderCard.vue'
 import YtIcon from '../components/YtIcon.vue'
 import axios from 'axios'
 
-/** @type {import('vue').Ref<Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean }>>} */
+/** @type {import('vue').Ref<Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>>} */
 const providers = ref({})
 const roles = ref({
   decision: { provider: null, model: '' },
@@ -164,16 +163,18 @@ async function load() {
     const { data } = await api.get('/config')
     const ps = data.providers?.provider || {}
     // 保留已输入但未保存的字段（避免刷新丢草稿）；刷新只补新发现的 provider
-    /** @type {Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean }>} */
+    /** @type {Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>} */
     const next = {}
     for (const [name, p] of Object.entries(ps)) {
       next[name] = providers.value[name] || {
         base_url: p.base_url || '',
-        modelsText: (p.models || []).join(','),
+        modelsText: (p.models || []).join(', '),
         api_key_env: '',
         api_key_present: !!p.api_key_present,
+        protocol: 'openai_chat',
       }
       next[name].api_key_present = !!p.api_key_present
+      if (!next[name].protocol) next[name].protocol = 'openai_chat'
     }
     providers.value = next
     const rs = data.providers?.roles || {}
@@ -204,7 +205,7 @@ async function testRole(r) {
 function addProvider() {
   const n = newName.value.trim()
   if (!n || providers.value[n]) return
-  providers.value[n] = { base_url: '', modelsText: '', api_key_env: '', api_key_present: false }
+  providers.value[n] = { base_url: '', modelsText: '', api_key_env: '', api_key_present: false, protocol: 'openai_chat' }
   newName.value = ''
 }
 function delProvider(n) {
@@ -373,12 +374,10 @@ async function save() {
 .save-msg.ok { color: #16a34a; }
 .save-msg.fail { color: #dc2626; }
 
-/* ===== 添加行 ===== */
-.add-row {
+/* ===== Provider 列表 ===== */
+.provider-list {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--yt-card-border);
 }
 </style>

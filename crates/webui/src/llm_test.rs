@@ -60,3 +60,27 @@ pub async fn test(State(state): State<AppState>, Json(body): Json<TestBody>) -> 
 fn bad(msg: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": msg })))
 }
+
+/// GET /api/llm/models?provider=<name>：调 provider 的 /v1/models 拿全部可用模型 id，
+/// 返回 {ok:true, models:[...]}。provider 不存在 / 请求失败均返回 400 {ok:false,error}。
+#[derive(Deserialize)]
+pub struct ModelsQuery {
+    provider: String,
+}
+
+pub async fn list_models(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ModelsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let gateway = state
+        .extras
+        .llm_slot
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| bad("LLM gateway 未初始化（providers.toml 缺失或解析失败）"))?;
+    match gateway.fetch_models(&q.provider).await {
+        Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
+        Err(e) => Err(bad(&format!("获取模型列表失败：{e}"))),
+    }
+}
