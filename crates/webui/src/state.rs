@@ -31,6 +31,8 @@ pub struct Extras {
     pub adapter_connected: Arc<dyn Fn() -> bool + Send + Sync>,
     /// NapCat access_token 共享槽（ws_handler 每次连接时 read，热应用 write 立即生效）
     pub napcat_token_slot: Option<yuantuan_core::napcat_slot::SharedToken>,
+    /// 备份配置共享槽（面板写回后热应用，每日调度器每轮循环 read）
+    pub backup_cfg: yuantuan_core::backup::SharedBackupCfg,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
     pub config_path: PathBuf,
@@ -51,6 +53,7 @@ impl Extras {
             self_qq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             adapter_connected: Arc::new(|| false),
             napcat_token_slot: None,
+            backup_cfg: yuantuan_core::backup::shared_backup_cfg(),
             mood: yuantuan_core::state::MoodState::default(),
             config_path,
             providers_path,

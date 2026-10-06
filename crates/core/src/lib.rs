@@ -2,6 +2,7 @@
 //! 各子系统本单仅占位，见 docs/runtime-design.md 第一章。
 
 pub mod agent;
+pub mod backup;
 pub mod bot;
 pub mod consolidation;
 pub mod context_builder;

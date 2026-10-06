@@ -27,6 +27,12 @@ async fn main() -> Result<()> {
     let data_root = db::init_data_dirs(&cfg.data.dir)?;
     info!(path = %data_root.display(), "data/ 目录结构就绪（memes/ artifacts/ archive/ logs/ backups/）");
 
+    // b'. 启动时检测恢复标记：用户在 WebUI 点了「一键恢复」+ 手动重启后，这里把 tar 解压覆盖 data/
+    //     必须在 db::open 之前——恢复期间 db 文件可能被替换
+    if let Err(e) = yuantuan_core::backup::restore_from_pending(&data_root).await {
+        tracing::warn!(error = %e, "恢复标记处理失败（继续启动）");
+    }
+
     // c. SQLite（WAL）+ 迁移
     let mut conn = db::open(&cfg.data.dir)?;
     info!(db = %data_root.join("yuantuan.db").display(), "SQLite 已打开（WAL）");
@@ -209,6 +215,17 @@ async fn main() -> Result<()> {
         info!("[consolidation].enabled=false，跳过夜间归纳调度器");
     }
 
+    // i'. 备份调度器（每日定时 + 热应用槽）。启用与否由槽内 cfg.enabled 决定（运行时可热切换）
+    let backup_cfg_slot: yuantuan_core::backup::SharedBackupCfg =
+        yuantuan_core::backup::shared_backup_cfg();
+    {
+        *backup_cfg_slot.write().unwrap() = cfg.backup.clone();
+    }
+    let _backup_scheduler = yuantuan_core::backup::spawn_daily_scheduler(
+        backup_cfg_slot.clone(),
+        data_root.clone(),
+    );
+
     // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");
     let panel_url = format!("http://{}:{}/", cfg.webui.host, cfg.webui.port);
@@ -265,6 +282,7 @@ async fn main() -> Result<()> {
         } else {
             None
         },
+        backup_cfg: backup_cfg_slot.clone(),
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };

@@ -191,6 +191,22 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         if back.get("log").is_some() {
             requires_restart.push("log 级别（重启生效）".into());
         }
+
+        // backup：全部字段热应用（直接写共享槽；下次定时循环 read 即生效）
+        if let Some(bk_cfg) = back.get("backup") {
+            let enabled = bk_cfg.get("enabled").and_then(|v| v.as_bool());
+            let repo_url = bk_cfg.get("repo_url").and_then(|v| v.as_str());
+            let pat_env = bk_cfg.get("pat_env").and_then(|v| v.as_str());
+            let daily_time = bk_cfg.get("daily_time").and_then(|v| v.as_str());
+            let keep_days = bk_cfg.get("keep_days").and_then(|v| v.as_integer()).map(|n| n as i64);
+            let mut slot = state.extras.backup_cfg.write().unwrap();
+            if let Some(v) = enabled { slot.enabled = v; }
+            if let Some(v) = repo_url { slot.repo_url = v.to_string(); }
+            if let Some(v) = pat_env { slot.pat_env = v.to_string(); }
+            if let Some(v) = daily_time { slot.daily_time = v.to_string(); }
+            if let Some(v) = keep_days { slot.keep_days = v; }
+            applied.push("backup 配置热应用（下次定时循环即生效）".into());
+        }
     }
 
     // providers.toml 写回：重建 LlmGateway 换槽；文件内容须解析+校验（roles 引用存在性）

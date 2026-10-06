@@ -17,6 +17,7 @@ pub struct Config {
     pub meme: MemeSection,
     pub log: LogConfig,
     pub media: MediaSection,
+    pub backup: yuantuan_core::backup::BackupCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,6 +63,7 @@ impl Default for Config {
             meme: MemeSection::default(),
             log: LogConfig::default(),
             media: MediaSection::default(),
+            backup: yuantuan_core::backup::BackupCfg::default(),
         }
     }
 }
@@ -302,6 +304,18 @@ admin_qq = []
 optimizer_role = "bot_chat"
 # 默认每次任务的最大并发（预留；当前占位）
 max_concurrent = 2
+
+[backup]
+# 备份推 GitHub 私有仓（Q-B02/Q-B05）。enabled=false 时仅本地产出 + 滚动清理
+enabled = false
+# 私有仓 https URL（如 https://github.com/<you>/yuantuan-backup.git）
+repo_url = ""
+# PAT 环境变量名（密钥不入仓不入库；建议开个 fine-grained PAT 仅 contents:write 这一个仓）
+pat_env = "YUANTUAN_BACKUP_PAT"
+# 每日定时（本地 HH:MM）
+daily_time = "03:00"
+# 本地 backups/ 保留天数（>0；超期文件启动新备份时删除）
+keep_days = 7
 
 [log]
 level = "info"

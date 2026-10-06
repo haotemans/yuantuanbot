@@ -2,6 +2,7 @@
 //! 定稿依据：docs/runtime-design.md 第四章、docs/architecture-v0.1.md 第十五章安全小节。
 
 mod auth;
+mod backup_api;
 mod config_api;
 mod dashboard;
 mod events_api;
@@ -50,6 +51,10 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/tasks", get(tasks_api::list))
         .route("/api/tasks/{id}/events", get(tasks_api::events))
         .route("/api/kb/status", get(kb_status))
+        .route("/api/backup/run", post(backup_api::run))
+        .route("/api/backup/list", get(backup_api::list))
+        .route("/api/backup/restore", post(backup_api::restore))
+        .route("/api/backup/file/{name}", get(backup_api::file))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,
