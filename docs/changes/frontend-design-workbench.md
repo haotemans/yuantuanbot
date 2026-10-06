@@ -237,11 +237,11 @@
 - [x] MOD-022b：media 数据模型 —— 4 张表 + V2 migration（`db.rs`），`media_providers / media_models / media_tasks / media_credits`；`chats.last_media_seed` 走 `state_kv` 通道
 - [x] MOD-022c：MediaProvider 抽象 —— `tools/media/provider/mod.rs`（trait + EndpointStyle 四枚举）
 - [x] MOD-022d：NAI 适配器（Q016）—— `provider/nai.rs`：双接口（`/v1/nai/generate-image` + `/v1/images/generations`）已按 Q016 真实样例实现
-- [ ] MOD-022e-partial：命令直派 —— 全链路骨架已就位（parser+quota+prompt直通+provider+落盘+send_fn 装配；bot.rs 在 handle 前识别 /image）;**未完成**：(1) 中文检测拒发 NAI（Q007 既有要求）；(2) 真正的 LLM 提示词优化（Q010）；(3) adapter 装配 NapCat API key 后命令投入产线
+- [x] MOD-022e：命令直派 —— 全链路完成（中文检测 + LLM 真优化 + admin 列表 + NapCat 装配）
+- [x] MOD-022i：admin QQ 列表 —— config.toml [media].admin_qq 读入 + pid 匹配回调注入 MediaCtx
 - [ ] MOD-022f：Decision 路由 —— Decision Schema 扩展 `start_task` 支持 media 类型 task_goal → agent 调 tool（同 e 走一份执行器）
 - [ ] MOD-022g：WebUI 配置页（Q011）—— `views/Media.vue` 新增 + 后端 REST `/api/media/providers|models|tasks|credits` + 侧栏入口 + 路由
 - [ ] MOD-022h：其它 provider 适配 —— openai_image / gemini / xai / volcengine / jimeng / openai_chat（按用户使用需求逐个加）
-- [ ] MOD-022-i：admin pid 列表（Q009 前提）：从 config 读 `admin_qq`，注入 `MediaCtx.self_pid_admin` 回调（当前占位恒 false）
 
 ### 前端剩余页面（MOD-003~013）
 

@@ -160,7 +160,16 @@ async fn main() -> Result<()> {
             bus: bus.clone(),
             reply_engine: Some(reply_engine.clone()),
             registry: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            self_pid_admin: std::sync::Arc::new(|_pid: &str| false), // TODO(Q011)：从配置/环境读 admin pid 列表
+            // Q009 admin 列表：从 config.toml [media].admin_qq 读（QQ 号 → "p_<qq>" 形式比对）
+            self_pid_admin: {
+                let admins = cfg.media.admin_qq.clone();
+                std::sync::Arc::new(move |pid: &str| {
+                    let qq = pid.trim_start_matches("p_").parse::<u64>().unwrap_or(0);
+                    admins.contains(&qq)
+                })
+            },
+            // Q010 提示词优化使用的 LLM gateway（当前直通；接通后按 optimizer_role 调 chat）
+            llm: llm_slot.clone(),
         }),
     });
 

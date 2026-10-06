@@ -8,6 +8,11 @@ use super::{EndpointStyle, MediaProvider, ProviderCfg};
 use crate::tools::media::params::{nai_dimensions, with_quality_tags, NAI_NEGATIVE_PROMPT};
 use crate::tools::media::{ImageArtifacts, ImageRequest};
 
+/// 是否含 CJK 统一表意文字（简体/繁体/日文汉字）；用于 NAI 中文 prompt 拦截
+fn contains_cjk(s: &str) -> bool {
+    s.chars().any(|c| matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}'))
+}
+
 pub struct NaiProvider {
     cfg: ProviderCfg,
     http: reqwest::Client,
@@ -26,6 +31,11 @@ impl NaiProvider {
     async fn call_nai_native(&self, req: &ImageRequest, model_id: &str) -> Result<Vec<String>> {
         let (w, h) = nai_dimensions(&req.ratio)
             .ok_or_else(|| anyhow::anyhow!("NAI 不支持比例 {}", req.ratio))?;
+        // 中文检测：NAI 对中文 prompt 不友好（Q010 LLM 优化会先翻译成英文；
+        // 但当优化失败 fallback 原文时，这里作为最后一道防线拒发，避免无意义请求）
+        if contains_cjk(&req.prompt) {
+            anyhow::bail!("prompt 含中文字符，NAI 不支持；请先经过提示词优化翻译为英文");
+        }
         // Q018：质量标签注入 prompt 头部（用户已含任一标签则跳过）
         let final_prompt = with_quality_tags(&req.prompt);
         let body = json!({

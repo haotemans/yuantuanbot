@@ -16,6 +16,7 @@ pub struct Config {
     pub context: ContextSection,
     pub meme: MemeSection,
     pub log: LogConfig,
+    pub media: MediaSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +61,7 @@ impl Default for Config {
             context: ContextSection::default(),
             meme: MemeSection::default(),
             log: LogConfig::default(),
+            media: MediaSection::default(),
         }
     }
 }
@@ -179,6 +181,28 @@ impl Default for MemeSection {
     }
 }
 
+/// [media] 媒体生成（Q009/Q010/Q011/Q018）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct MediaSection {
+    /// 管理员 QQ 号列表（admin_only 模型仅这些人可用）
+    pub admin_qq: Vec<u64>,
+    /// 提示词优化使用的 LLM 角色（默认 bot_chat；可选 decision/agent_exec）
+    pub optimizer_role: String,
+    /// 默认每次任务的最大并发（保留；当前占位）
+    pub max_concurrent: u32,
+}
+
+impl Default for MediaSection {
+    fn default() -> Self {
+        Self {
+            admin_qq: Vec::new(),
+            optimizer_role: "bot_chat".into(),
+            max_concurrent: 2,
+        }
+    }
+}
+
 impl Default for PrefilterSection {
     fn default() -> Self {
         Self {
@@ -267,6 +291,15 @@ run_on_startup = false
 [meme]
 # 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）
 steal_enabled = true
+
+[media]
+# 媒体生成（Q009/Q010/Q011/Q018）
+# admin_qq：管理员 QQ 列表（admin_only 模型仅这些人可用）
+admin_qq = []
+# optimizer_role：提示词优化使用的 LLM 角色（默认 bot_chat；可选 decision/agent_exec）
+optimizer_role = "bot_chat"
+# 默认每次任务的最大并发（预留；当前占位）
+max_concurrent = 2
 
 [log]
 level = "info"

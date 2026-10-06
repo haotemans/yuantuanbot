@@ -8,8 +8,8 @@ dir = "data"
 # NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
 # enabled = false 时不接入 NapCat（其余子系统照常运行）
 enabled = true
-ws_url = "ws://127.0.0.1:3001"
-token = ""
+ws_url = "ws://127.0.0.1:6199/ws"
+token = "RulgIMHkkxwQ4iyx"
 
 [webui]
 # 管理面板监听地址（仅本机；公网暴露走反代，见架构文档安全小节）

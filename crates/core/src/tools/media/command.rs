@@ -25,6 +25,8 @@ pub struct MediaCtx {
     pub reply_engine: Option<EngineHandle>,
     pub registry: Arc<std::sync::RwLock<std::collections::HashMap<String, Arc<dyn MediaProvider>>>>,
     pub self_pid_admin: Arc<dyn Fn(&str) -> bool + Send + Sync>,
+    /// Q010 提示词优化使用的 LLM gateway 共享槽（bot 管线的 SharedLlm 同构）
+    pub llm: Arc<std::sync::RwLock<Option<Arc<crate::llm::LlmGateway>>>>,
 }
 
 /// 消息是否触发生图命令；返回 body（去掉 /image 或 /画 前缀的部分）
@@ -101,9 +103,12 @@ pub async fn handle_image_command(ctx: &MediaCtx, m: &MessageReceivedPayload, bo
         None => load_chat_last_seed(&ctx.db_path, &chat_id),
     };
 
-    // 第六步：提示词优化（Q010；当前直通，未来接 LLM）
+    // 第六步：提示词优化（Q010；LLM 可用则改写，不可用/失败 fallback 原文）
     let style = prompt_style_from_str(&model_row.prompt_style);
-    let optimized = super::prompt::optimize_prompt(&cmd.prompt, style).await;
+    let optimized = {
+        let llm_gw = ctx.llm.read().unwrap().clone();
+        super::prompt::optimize_prompt(&cmd.prompt, style, llm_gw.as_deref()).await
+    };
 
     // 第七步：构造 ImageRequest 并调 provider
     let req = ImageRequest {
