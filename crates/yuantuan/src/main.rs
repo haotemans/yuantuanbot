@@ -220,7 +220,8 @@ async fn main() -> Result<()> {
     info!("  首次登录密码 = 管理员密码（首启引导）");
     info!("");
 
-    // Windows：自动打开面板（终端里 tracing 输出的 URL 不可点击，省得用户手动复制）
+    // 自动打开面板：仅 Windows 有效（你日常开发机）。
+    // Linux 服务器上通常没 GUI、且访问是从本地浏览器跨网到来，启动时根本不该 open
     #[cfg(target_os = "windows")]
     {
         let url = panel_url.clone();
@@ -229,6 +230,15 @@ async fn main() -> Result<()> {
                 .args(["/c", "start", "", &url])
                 .spawn();
         });
+        info!("  已自动打开浏览器到面板");
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 服务器：banner 里给 ssh 端口转发提示，用户自己挑访问方式
+        if cfg.webui.host == "127.0.0.1" {
+            info!("  远程访问：ssh -L {}:127.0.0.1:{} user@本机，浏览器开 http://127.0.0.1:{}/",
+                cfg.webui.port, cfg.webui.port, cfg.webui.port);
+        }
     }
     let extras = yuantuan_webui::Extras {
         bus: bus.clone(),
