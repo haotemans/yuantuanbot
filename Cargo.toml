@@ -5,4 +5,5 @@ members = [
     "crates/adapter-qq",
     "crates/webui",
     "crates/yuantuan",
+    "plugins/hello",
 ]

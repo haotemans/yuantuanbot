@@ -182,6 +182,14 @@ async fn main() -> Result<()> {
         }),
     });
 
+    // h1'. 插件层装配（Q-P01 编译期加载 Rust crate；Q-P04 面板启禁走 enabled 标记文件）
+    //     当前加载：plugins/<name>/enabled 存在则其 register() 被调用，返回的 Tool 全部进 Registry
+    let tools_registry = yuantuan_core::tools::Registry::new();
+    let enabled_plugins = load_enabled_plugins(&tools_registry);
+    if !enabled_plugins.is_empty() {
+        info!(plugins = ?enabled_plugins, "插件层装配完成");
+    }
+
     // h2. 偷表情包监听（开关走热应用槽，进程内常驻）
     let steal_slot: yuantuan_core::meme::SharedSteal =
         std::sync::Arc::new(std::sync::RwLock::new(cfg.meme.steal_enabled));
@@ -287,6 +295,32 @@ async fn main() -> Result<()> {
         providers_path: std::path::PathBuf::from("providers.toml"),
     };
     yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port, extras).await
+}
+
+/// 扫描 plugins/<name>/enabled 标记：启用的插件调用其 register() 把 Tool 注册进 Registry
+/// 当前编译期决定（crate 是否被 link 进 yuantuan）；enabled 文件只控制运行时是否注册
+/// 未来热加插件需要 build.rs 监听这个目录做条件 include——本期先做编译期注册
+fn load_enabled_plugins(registry: &yuantuan_core::tools::Registry) -> Vec<String> {
+    let plugins_dir = std::path::Path::new("plugins");
+    if !plugins_dir.exists() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    // 已知编译进来的插件：构建期通过 Cargo feature 决定是否链接；enabled 文件只是运行时开关
+    #[cfg(feature = "plugin-hello")]
+    {
+        let enabled_marker = plugins_dir.join("hello").join("enabled");
+        if enabled_marker.exists() {
+            for tool in yuantuan_plugin_hello::register() {
+                registry.register_arc(tool);
+            }
+            out.push("hello".to_string());
+            info!("插件 hello 已启用并注册");
+        } else {
+            info!("插件 hello 存在但未启用（缺 plugins/hello/enabled 标记）");
+        }
+    }
+    out
 }
 
 /// 从 media_providers 表装配 MediaProvider registry：

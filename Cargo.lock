@@ -2383,6 +2383,7 @@ dependencies = [
  "tracing-subscriber",
  "yuantuan-adapter-qq",
  "yuantuan-core",
+ "yuantuan-plugin-hello",
  "yuantuan-webui",
 ]
 
@@ -2425,6 +2426,16 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "yuantuan-plugin-hello"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde_json",
+ "yuantuan-core",
 ]
 
 [[package]]

@@ -67,11 +67,16 @@ impl Registry {
     }
 
     pub fn register<T: Tool + 'static>(&self, tool: T) {
+        self.register_arc(Arc::new(tool));
+    }
+
+    /// 已 Arc 包装的工具直接注册（插件 register() 通常返回 Vec<Arc<dyn Tool>>）
+    pub fn register_arc(&self, tool: Arc<dyn Tool>) {
         let name = tool.name();
         self.inner
             .write()
             .expect("tools registry poisoned")
-            .insert(name, Arc::new(tool));
+            .insert(name, tool);
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
