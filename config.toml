@@ -13,12 +13,9 @@ level = "info"
 steal_enabled = true
 
 [napcat]
-# NapCat OneBot 11 反向 WS（与 AstrBot aiocqhttp 同形态）
-# yuantuan 起服务器监听 listen_addr；NapCat 用「Websockets客户端」卡片主动连入。
-# 卡片 URL 填 ws://{listen_addr}/ws、Token 填下面这个 token；保存后 NapCat 主进程会主动拨进来
 enabled = true
 listen_addr = "127.0.0.1:6199"
-token = "RulglMHkkxwQ4iyx"
+token = "7CCd11ITRrVyvUjR"
 
 [prefilter]
 self_msg_cap = 12
