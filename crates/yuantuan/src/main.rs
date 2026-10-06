@@ -4,6 +4,8 @@ mod config;
 mod db;
 
 use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use tracing::info;
 
 #[tokio::main]
@@ -160,7 +162,7 @@ async fn main() -> Result<()> {
             data_dir: data_root.clone(),
             bus: bus.clone(),
             reply_engine: Some(reply_engine.clone()),
-            registry: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            registry: load_media_registry(&db_path),
             // Q009 admin 列表：从 config.toml [media].admin_qq 读（QQ 号 → "p_<qq>" 形式比对）
             self_pid_admin: {
                 let admins = cfg.media.admin_qq.clone();
@@ -267,6 +269,89 @@ async fn main() -> Result<()> {
         providers_path: std::path::PathBuf::from("providers.toml"),
     };
     yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port, extras).await
+}
+
+/// 从 media_providers 表装配 MediaProvider registry：
+/// - 按 endpoint 形态实例化对应适配器（当前仅 NAI；openai_compat/gemini/xai 后续按需扩展）
+/// - api_key_env 读环境变量；缺失则跳过该 provider 并告警
+/// - 失败行不阻断启动，只 warn
+fn load_media_registry(db_path: &std::path::Path) -> Arc<RwLock<HashMap<String, Arc<dyn yuantuan_core::tools::media::provider::MediaProvider>>>> {
+    use yuantuan_core::tools::media::provider::{EndpointStyle, MediaProvider, ProviderCfg};
+    use yuantuan_core::tools::media::provider::nai::NaiProvider;
+
+    let registry: HashMap<String, Arc<dyn MediaProvider>> = HashMap::new();
+    let registry = Arc::new(RwLock::new(registry));
+
+    let conn = match yuantuan_core::db::connect(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "media_providers 装配：打开 db 失败，registry 为空");
+            return registry;
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT name, base_url, api_key_env, default_endpoint FROM media_providers WHERE enabled = 1"
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "media_providers 装配：prepare 失败，registry 为空");
+            return registry;
+        }
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    });
+    let rows: Vec<_> = match rows {
+        Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "media_providers 装配：query 失败，registry 为空");
+            return registry;
+        }
+    };
+
+    let mut reg = registry.write().expect("media registry poisoned");
+    for (name, base_url, api_key_env, default_endpoint) in rows {
+        let api_key = if api_key_env.is_empty() {
+            None
+        } else {
+            match std::env::var(&api_key_env) {
+                Ok(k) if !k.is_empty() => Some(k),
+                _ => {
+                    tracing::warn!(provider = %name, env = %api_key_env, "media provider 的 API key 环境变量缺失，跳过");
+                    continue;
+                }
+            }
+        };
+        let endpoint = match default_endpoint.as_str() {
+            "nai_native" => EndpointStyle::NaiNative,
+            "openai_compat" => EndpointStyle::OpenaiCompat,
+            "gemini" => EndpointStyle::Gemini,
+            "xai" => EndpointStyle::Xai,
+            _ => EndpointStyle::NaiNative,
+        };
+        let cfg = ProviderCfg {
+            name: name.clone(),
+            base_url,
+            api_key,
+            default_endpoint: endpoint,
+        };
+        let provider: Arc<dyn MediaProvider> = match endpoint {
+            EndpointStyle::NaiNative | EndpointStyle::OpenaiCompat => Arc::new(NaiProvider::new(cfg)),
+            EndpointStyle::Gemini | EndpointStyle::Xai => {
+                tracing::warn!(provider = %name, endpoint = ?endpoint, "暂不支持该 endpoint，跳过");
+                continue;
+            }
+        };
+        info!(provider = %name, endpoint = ?endpoint, "media provider 装配完成");
+        reg.insert(name, provider);
+    }
+    drop(reg);
+    registry
 }
 
 /// providers.toml：缺失则生成模板；存在则解析（失败仅告警，角色全部不可用、管线降级）
