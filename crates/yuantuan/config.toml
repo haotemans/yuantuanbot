@@ -1,0 +1,44 @@
+[consolidation]
+daily_time = "03:00"
+enabled = true
+run_on_startup = false
+
+[context]
+budget_chars = 40000
+k = 20
+roster_mem_per = 3
+
+[data]
+dir = "data"
+
+[log]
+level = "info"
+
+[meme]
+steal_enabled = true
+
+[napcat]
+enabled = true
+token = "FgBA8qKs7qYWvN73"
+ws_url = "ws://127.0.0.1:3001"
+
+[prefilter]
+decision_cost_per_min = 30
+self_msg_cap = 12
+window_secs = 60
+
+[reply]
+base_delay_ms = 600
+bubble_cap = 3
+bubble_char_cap = 500
+first_delay_max_ms = 800
+first_delay_min_ms = 300
+jitter_ratio = 0.3
+max_delay_ms = 4000
+min_delay_ms = 800
+per_char_ms = 40
+total_budget_ms = 8000
+
+[webui]
+host = "127.0.0.1"
+port = 8085

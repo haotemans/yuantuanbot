@@ -9,7 +9,7 @@
       </n-form-item>
       <n-form-item label="Token">
         <n-input v-model:value="form.token" type="password" show-password-on="click"
-                 placeholder="掩码不回读；留空保存=清空" />
+                 placeholder="不回读；留空 = 保留后端原值" />
       </n-form-item>
     </n-form>
     <n-space>
@@ -27,6 +27,7 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api'
 
 const form = ref({ enabled: true, ws_url: '', token: '' })
+/** @type {import('vue').Ref<Record<string, any>>} */
 const whole = ref({})
 const saving = ref(false)
 const msg = ref('')
@@ -36,19 +37,27 @@ onMounted(async () => {
   const { data } = await api.get('/config')
   whole.value = data.config
   const n = data.config.napcat || {}
+  // token 不回读（后端掩码返回），只让用户输入新值；whole 里清掉避免保存时把掩码回写覆盖真 token
   form.value = { enabled: n.enabled ?? true, ws_url: n.ws_url ?? '', token: '' }
+  if (whole.value.napcat) whole.value.napcat = { ...whole.value.napcat, token: undefined }
 })
 
 async function save() {
   saving.value = true
   msg.value = ''
   try {
-    const config = { ...whole.value, napcat: { ...form.value } }
-    if (!config.napcat.token) delete config.napcat.token // 留空不写入该键（默认空）
+    const newNapcat = { ...whole.value.napcat }
+    newNapcat.enabled = form.value.enabled
+    newNapcat.ws_url = form.value.ws_url
+    // 只在用户显式输入了新 token 时才写入；否则保留后端原值（不写回掩码）
+    if (form.value.token) newNapcat.token = form.value.token
+    else delete newNapcat.token
+    const config = { ...whole.value, napcat: newNapcat }
     const { data } = await api.post('/config', { config })
     ok.value = true
     msg.value = `已保存（${(data.applied || []).join('、') || '无热应用项'}）`
     whole.value = config
+    form.value.token = '' // 提交成功后清空，避免下次保存又把新 token 当旧值
   } catch (e) {
     ok.value = false
     msg.value = e.response?.data?.error || '保存失败'
