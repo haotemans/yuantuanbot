@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{EndpointStyle, MediaProvider, ProviderCfg};
-use crate::tools::media::params::{nai_dimensions, NAI_NEGATIVE_PROMPT};
+use crate::tools::media::params::{nai_dimensions, with_quality_tags, NAI_NEGATIVE_PROMPT};
 use crate::tools::media::{ImageArtifacts, ImageRequest};
 
 pub struct NaiProvider {
@@ -26,8 +26,10 @@ impl NaiProvider {
     async fn call_nai_native(&self, req: &ImageRequest, model_id: &str) -> Result<Vec<String>> {
         let (w, h) = nai_dimensions(&req.ratio)
             .ok_or_else(|| anyhow::anyhow!("NAI 不支持比例 {}", req.ratio))?;
+        // Q018：质量标签注入 prompt 头部（用户已含任一标签则跳过）
+        let final_prompt = with_quality_tags(&req.prompt);
         let body = json!({
-            "input": req.prompt,
+            "input": final_prompt,
             "model": model_id,
             "action": "generate",
             "parameters": {

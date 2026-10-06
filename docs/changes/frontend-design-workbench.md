@@ -149,6 +149,15 @@
 - 副产：openai_compat 模式 = 与 gpt-image-2 完全同构 → MOD-022h 适配 openai_image 时直接复用
 - 默认选择：模型可选择 endpoint_style；不显式时 NAI 走 `nai_native`，OpenAI 系走 `openai_compat`
 
+### Q018 默认质量标签与负面词
+- decision: 精选精简配方 —— 质量标签 `masterpiece, best quality, year 2025, highres`（4 个高信号）；负面词 `lowres, bad anatomy, bad hands, missing fingers, extra digits, worst quality, jpeg artifacts, watermark`（8 个高信号）；质量标签自动注入 prompt 头部（用户已含任一标签则跳过，避免重复）
+- rationale: 用户原话"year2025之类的，还有负面质量词，但是不要太多了"——砍 AstrBot 17 个负面词至 8 个；质量标签 4 个避免噪声
+- evidence: 用户对话 2026-10-06 截图（NAI Diffusion V4.5 full + 28 步 + k_euler_ancestral + karras + 4.5 scale + qualityToggle ✓）
+- affected-code: `tools/media/params.rs`（NAI_QUALITY_TAGS / NAI_NEGATIVE_PROMPT / with_quality_tags 函数）+ `tools/media/provider/nai.rs`（nai_native 调用时注入）
+- tests: 两个 cargo test 验证（注入逻辑 + 防重复）
+- status: confirmed
+- 注：openai_compat endpoint **不注入质量标签**（OpenAI 标准接口不期望 Danbooru tag 语法）
+
 ### Q017 其它生图 provider 参考标杆
 - decision: 参考 **gpt-image-2**（OpenAI 图片接口 `/v1/images/generations` 标准）与 **nanobanana**（gemini-2.0 flash image preview 等；Google 生图接口）作为 OpenAI/Gemini 协议适配器的真实样例
 - rationale: 用户原话"参考 gpt-image2 和 nanobanana"
