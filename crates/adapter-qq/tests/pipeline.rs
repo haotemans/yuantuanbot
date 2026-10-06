@@ -213,7 +213,7 @@ async fn decision_pipeline_end_to_end() {
         db_path.clone(),
         NapcatConfig {
             listen_addr: format!("127.0.0.1:{nap_port}"),
-            token: String::new(),
+            token: yuantuan_adapter_qq::shared_token(""),
         },
         self_ids.clone(),
     );

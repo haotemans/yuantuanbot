@@ -254,7 +254,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         db_path.clone(),
         NapcatConfig {
             listen_addr: format!("127.0.0.1:{nl_port}"),
-            token: String::new(),
+            token: yuantuan_adapter_qq::shared_token(""),
         },
         self_ids.clone(),
     );

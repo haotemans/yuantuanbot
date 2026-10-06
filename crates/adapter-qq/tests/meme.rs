@@ -185,7 +185,7 @@ async fn decision_send_meme_sends_image() {
         db_path.clone(),
         NapcatConfig {
             listen_addr: format!("127.0.0.1:{nl_port}"),
-            token: String::new(),
+            token: yuantuan_adapter_qq::shared_token(""),
         },
         self_ids.clone(),
     );
@@ -317,7 +317,7 @@ async fn steal_then_approve_and_reject() {
         db_path.clone(),
         NapcatConfig {
             listen_addr: format!("127.0.0.1:{nl_port}"),
-            token: String::new(),
+            token: yuantuan_adapter_qq::shared_token(""),
         },
         self_ids,
     );

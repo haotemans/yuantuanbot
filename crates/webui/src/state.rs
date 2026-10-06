@@ -29,6 +29,8 @@ pub struct Extras {
     pub self_qq: Arc<std::sync::atomic::AtomicU64>,
     /// adapter 连接状态探针（断连 >30s 视为离线，由装配侧换算好）
     pub adapter_connected: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// NapCat access_token 共享槽（ws_handler 每次连接时 read，热应用 write 立即生效）
+    pub napcat_token_slot: Option<yuantuan_core::napcat_slot::SharedToken>,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
     pub config_path: PathBuf,
@@ -48,6 +50,7 @@ impl Extras {
             consolidation: Arc::new(Mutex::new(None)),
             self_qq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             adapter_connected: Arc::new(|| false),
+            napcat_token_slot: None,
             mood: yuantuan_core::state::MoodState::default(),
             config_path,
             providers_path,

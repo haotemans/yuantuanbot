@@ -63,12 +63,14 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    if !state.cfg.token.is_empty() {
+    // 每次连接都读最新 token，热应用立即生效
+    let expected_token = state.cfg.token.read().unwrap().clone();
+    if !expected_token.is_empty() {
         let auth = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let expected = format!("Bearer {}", state.cfg.token);
+        let expected = format!("Bearer {}", expected_token);
         if auth != expected {
             warn!(got_auth = ?headers.get("authorization"), "反向 WS 鉴权失败：token 不匹配");
             return Err(StatusCode::UNAUTHORIZED);

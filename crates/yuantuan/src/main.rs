@@ -62,8 +62,9 @@ async fn main() -> Result<()> {
     // e. LLM Provider（providers.toml 缺失则生成模板；角色未配置则管线降级 ignore，不崩）
     let llm = load_llm_gateway();
 
-    // f. adapter-qq（[napcat].enabled=false 则跳过；连不上退避重连不死进程）
+    // f. adapter-qq（[napcat].enabled=false 则跳过；token 走共享槽让 webui 热应用立刻生效）
     let self_ids = yuantuan_core::prefilter::SelfMsgIds::default();
+    let napcat_token_slot = yuantuan_adapter_qq::shared_token(&cfg.napcat.token);
     let adapter = if cfg.napcat.enabled {
         info!(listen_addr = %cfg.napcat.listen_addr, "adapter-qq 启动（反向 WS，等待 NapCat Websockets客户端连入）");
         Some(yuantuan_adapter_qq::spawn(
@@ -71,7 +72,7 @@ async fn main() -> Result<()> {
             db_path.clone(),
             yuantuan_adapter_qq::NapcatConfig {
                 listen_addr: cfg.napcat.listen_addr.clone(),
-                token: cfg.napcat.token.clone(),
+                token: napcat_token_slot.clone(),
             },
             self_ids.clone(),
         ))
@@ -243,6 +244,11 @@ async fn main() -> Result<()> {
                     as std::sync::Arc<dyn Fn() -> bool + Send + Sync>
             })
             .unwrap_or_else(|| std::sync::Arc::new(|| false)),
+        napcat_token_slot: if cfg.napcat.enabled {
+            Some(napcat_token_slot.clone())
+        } else {
+            None
+        },
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };

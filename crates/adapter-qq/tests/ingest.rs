@@ -102,7 +102,7 @@ async fn ingest_group_and_private_messages() {
         db_path.clone(),
         NapcatConfig {
             listen_addr: format!("127.0.0.1:{port}"),
-            token: String::new(),
+            token: yuantuan_adapter_qq::shared_token(""),
         },
         SelfMsgIds::default(),
     );

@@ -16,9 +16,12 @@
       <n-button type="primary" size="small" :loading="saving" @click="save">保存连接配置</n-button>
       <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ msg }}</span>
     </n-space>
-    <n-alert type="warning" style="margin-top: 10px; font-size: 12px">
+    <n-alert type="info" style="margin-top: 10px; font-size: 12px">
       反向 WS 形态：yuantuan 起服务器监听 <code>ws://{{ form.listen_addr || '127.0.0.1:6199' }}/ws</code>，
-      NapCat 通过「Websockets客户端」卡片主动连入。Token 与监听地址改动需<strong>重启后端进程</strong>才能生效。
+      NapCat 通过「Websockets客户端」卡片主动连入。
+    </n-alert>
+    <n-alert type="success" style="margin-top: 8px; font-size: 12px">
+      Token 改动<strong>立即生效</strong>（下次 NapCat 拨入即用新值）。监听地址改动需<strong>重启后端进程</strong>。
     </n-alert>
     <n-alert type="info" style="margin-top: 8px; font-size: 12px">
       NapCat WebUI 卡片配置示例：URL 填 <code>ws://{{ form.listen_addr || '127.0.0.1:6199' }}/ws</code>，Token 填上面这个值。
@@ -66,9 +69,10 @@ async function save() {
     const { data } = await api.post('/config', { config })
     ok.value = true
     const restarts = (data.requires_restart || []).filter(r => r.includes('napcat'))
-    msg.value = restarts.length
-      ? `已保存；⚠️ NapCat 连接需重启后端进程才生效`
-      : `已保存（${(data.applied || []).join('、') || '无热应用项'}）`
+    const parts = []
+    if ((data.applied || []).some(a => a.includes('token'))) parts.push('token 已热应用')
+    if (restarts.length) parts.push('⚠️ listen_addr 改动需重启')
+    msg.value = `已保存${parts.length ? '：' + parts.join('，') : ''}`
     whole.value = config
     form.value.token = '' // 提交成功后清空，避免下次保存又把新 token 当旧值
   } catch (e) {

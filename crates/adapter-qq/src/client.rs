@@ -23,11 +23,16 @@ pub fn new_pending() -> Pending {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// 共享的 access token（重导出 core 类型；本 crate 内部与外部调用都用这一个）。
+/// 仅 token 支持热应用；listen_addr 改动仍需重启进程（端口绑定是一次性的）。
+pub use yuantuan_core::napcat_slot::{shared_token, SharedToken};
+
 #[derive(Debug, Clone)]
 pub struct NapcatConfig {
     /// 反向 WS 监听地址，例如 "127.0.0.1:6199"。NapCat Websockets客户端 URL 填 `ws://{listen_addr}/ws`
     pub listen_addr: String,
-    pub token: String,
+    /// 共享 token：ws_handler 在每次连接进来时 read，热应用侧可 write 立即生效
+    pub token: SharedToken,
 }
 
 /// 暴露给装配层的句柄：拿当前会话的发送端（断线期为 None），自身 QQ 号（登录前为 0），连接活性。

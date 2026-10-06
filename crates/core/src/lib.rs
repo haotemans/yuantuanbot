@@ -11,6 +11,7 @@ pub mod event;
 pub mod llm;
 pub mod meme;
 pub mod memory;
+pub mod napcat_slot;
 pub mod prefilter;
 pub mod reply_engine;
 pub mod state;

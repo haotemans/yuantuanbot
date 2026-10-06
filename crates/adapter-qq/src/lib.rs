@@ -6,5 +6,5 @@ mod client;
 mod ingest;
 mod server;
 
-pub use client::{send_fn, AdapterHandle, NapcatConfig, NapcatSender};
+pub use client::{send_fn, shared_token, AdapterHandle, NapcatConfig, NapcatSender, SharedToken};
 pub use server::spawn;
