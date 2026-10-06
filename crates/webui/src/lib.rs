@@ -4,6 +4,7 @@
 mod auth;
 mod backup_api;
 mod config_api;
+mod plugins_api;
 mod dashboard;
 mod events_api;
 mod llm_test;
@@ -55,6 +56,8 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/backup/list", get(backup_api::list))
         .route("/api/backup/restore", post(backup_api::restore))
         .route("/api/backup/file/{name}", get(backup_api::file))
+        .route("/api/plugins/list", get(plugins_api::list))
+        .route("/api/plugins/toggle", post(plugins_api::toggle))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_session,

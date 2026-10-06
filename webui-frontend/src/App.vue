@@ -85,6 +85,7 @@ const groups = [
     ['params', '运行参数', 'tune'],
     ['personality', '人格', 'personality'],
     ['meme', 'Meme', 'meme'],
+    ['plugins', '插件', 'plugins'],
     ['kb', '知识库', 'kb'],
   ]],
   ['系统', [['backup', '备份 / 日志', 'backup']]],

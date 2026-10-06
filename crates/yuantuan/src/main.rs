@@ -291,6 +291,7 @@ async fn main() -> Result<()> {
             None
         },
         backup_cfg: backup_cfg_slot.clone(),
+        tools_registry: tools_registry.clone(),
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };

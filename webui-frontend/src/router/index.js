@@ -15,6 +15,7 @@ const routes = [
   { path: '/personality', name: 'personality', component: () => import('../views/Personality.vue') },
   { path: '/meme', name: 'meme', component: () => import('../views/Meme.vue') },
   { path: '/kb', name: 'kb', component: () => import('../views/Kb.vue') },
+  { path: '/plugins', name: 'plugins', component: () => import('../views/Plugins.vue') },
   { path: '/backup', name: 'backup', component: () => import('../views/Backup.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

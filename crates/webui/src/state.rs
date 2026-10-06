@@ -33,6 +33,8 @@ pub struct Extras {
     pub napcat_token_slot: Option<yuantuan_core::napcat_slot::SharedToken>,
     /// 备份配置共享槽（面板写回后热应用，每日调度器每轮循环 read）
     pub backup_cfg: yuantuan_core::backup::SharedBackupCfg,
+    /// 工具注册表（Plugins 面板列出哪些插件被实际加载）
+    pub tools_registry: yuantuan_core::tools::Registry,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
     pub config_path: PathBuf,
@@ -54,6 +56,7 @@ impl Extras {
             adapter_connected: Arc::new(|| false),
             napcat_token_slot: None,
             backup_cfg: yuantuan_core::backup::shared_backup_cfg(),
+            tools_registry: yuantuan_core::tools::Registry::new(),
             mood: yuantuan_core::state::MoodState::default(),
             config_path,
             providers_path,
