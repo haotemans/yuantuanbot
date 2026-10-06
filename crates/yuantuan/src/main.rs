@@ -210,22 +210,26 @@ async fn main() -> Result<()> {
     // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");
     let panel_url = format!("http://{}:{}/", cfg.webui.host, cfg.webui.port);
-    let api_base = format!("http://{}:{}/api", cfg.webui.host, cfg.webui.port);
-    let ws_feed = format!("ws://{}:{}/ws", cfg.webui.host, cfg.webui.port);
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    info!("  管理面板（浏览器打开）  : {}", panel_url);
-    info!("  后端 API               : {}", api_base);
-    info!("  面板 WS 推送           : {}", ws_feed);
+    info!("");
+    info!("  ┌─ 管理面板 ─────────────────────────────────");
+    info!("  │  {}", panel_url);
+    info!("  └────────────────────────────────────────────");
     if cfg.napcat.enabled {
-        let napcat_url = format!("ws://{}/ws (token={})", cfg.napcat.listen_addr, if cfg.napcat.token.is_empty() { "无" } else { "有" });
-        info!("  NapCat 反向 WS 监听    : {}", napcat_url);
-        info!("  └ NapCat WebUI 网络配置 → Websockets客户端 → URL 填上面这个 → 保存并重启 NapCat");
-    } else {
-        info!("  NapCat                 : 已禁用");
+        info!("  NapCat 反向 WS 监听 ws://{}/ws", cfg.napcat.listen_addr);
     }
-    info!("  vite dev（前端热改）   : cd webui-frontend && npm run dev  →  http://127.0.0.1:5173/");
-    info!("  首次登录的密码 = 管理员密码（首启引导）");
-    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("  首次登录密码 = 管理员密码（首启引导）");
+    info!("");
+
+    // Windows：自动打开面板（终端里 tracing 输出的 URL 不可点击，省得用户手动复制）
+    #[cfg(target_os = "windows")]
+    {
+        let url = panel_url.clone();
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "", &url])
+                .spawn();
+        });
+    }
     let extras = yuantuan_webui::Extras {
         bus: bus.clone(),
         llm_slot,
