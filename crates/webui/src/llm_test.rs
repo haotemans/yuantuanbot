@@ -84,3 +84,64 @@ pub async fn list_models(
         Err(e) => Err(bad(&format!("获取模型列表失败：{e}"))),
     }
 }
+
+/// POST /api/llm/models/probe {base_url, api_key_env}：
+/// 探测未保存的 provider——前端新增 provider 时直接调本端点，不必先把 provider 写进 providers.toml。
+/// api_key_env 为环境变量名（不回显密钥本身）；空字符串 = 无需鉴权。
+#[derive(Deserialize)]
+pub struct ProbeBody {
+    base_url: String,
+    api_key_env: Option<String>,
+}
+
+pub async fn probe_models(Json(body): Json<ProbeBody>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let base = body.base_url.trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Err(bad("base_url 不能为空"));
+    }
+    if !base.starts_with("http://") && !base.starts_with("https://") {
+        return Err(bad("base_url 必须以 http:// 或 https:// 开头"));
+    }
+    let api_key = match body.api_key_env.as_deref().unwrap_or("").trim() {
+        "" => None,
+        env_name => match std::env::var(env_name) {
+            Ok(k) if !k.is_empty() => Some(k),
+            _ => return Err(bad(&format!("环境变量 {env_name} 未设置或为空"))),
+        },
+    };
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(bad(&format!("构造 HTTP client 失败：{e}"))),
+    };
+    let mut req = http.get(format!("{base}/models"));
+    if let Some(k) = &api_key {
+        req = req.bearer_auth(k);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return Err(bad(&format!("连接失败：{e}"))),
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(bad(&format!("HTTP {status}: {}", &text[..text.len().min(200)])));
+    }
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Err(bad("响应非 JSON")),
+    };
+    let arr = match v.get("data").and_then(|d| d.as_array()) {
+        Some(a) => a,
+        None => return Err(bad("响应缺 data 数组（不是 OpenAI 兼容端点？）")),
+    };
+    let mut out: Vec<String> = arr
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(Json(json!({ "ok": true, "models": out })))
+}

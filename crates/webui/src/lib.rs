@@ -43,6 +43,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/config", get(config_api::get_config).post(config_api::post_config))
         .route("/api/llm/test", post(llm_test::test))
         .route("/api/llm/models", get(llm_test::list_models))
+        .route("/api/llm/models/probe", post(llm_test::probe_models))
         .route("/api/personality/versions", get(personality::list).post(personality::create))
         .route("/api/personality/versions/{no}", get(personality::get_one))
         .route("/api/personality/rollback/{no}", post(personality::rollback))

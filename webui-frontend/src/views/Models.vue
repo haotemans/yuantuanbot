@@ -315,8 +315,8 @@ async function save() {
 .test-pill.fail { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
 
 /* ===== 通用 section head ===== */
-.sec-head { display: flex; align-items: baseline; gap: 10px; }
-.sec-title { font-weight: 700; font-size: 14px; color: var(--yt-ink-1); }
+.sec-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sec-title { font-weight: 700; font-size: 14px; color: var(--yt-ink-1); white-space: nowrap; }
 .sec-sub { font-size: 12px; color: var(--yt-ink-3); }
 
 /* ===== 角色绑定卡片 ===== */

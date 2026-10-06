@@ -146,7 +146,11 @@ async function fetchModels() {
   fetchError.value = ''
   fetchOk.value = false
   try {
-    const { data } = await api.get('/llm/models', { params: { provider: props.name } })
+    // 用 probe：直接用当前表单的 base_url + api_key_env，无需先保存进 providers.toml
+    const { data } = await api.post('/llm/models/probe', {
+      base_url: props.p.base_url,
+      api_key_env: props.p.api_key_env || '',
+    })
     availableModels.value = data.models || []
     fetchOk.value = true
     if (!availableModels.value.length) fetchError.value = 'provider 返回了空模型列表'
