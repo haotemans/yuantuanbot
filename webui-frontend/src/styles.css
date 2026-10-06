@@ -1,18 +1,25 @@
-/* 云团 WebUI 全局样式 v2：设计令牌落地（亮/暗双套） + 现代 SaaS 面板观感统一 */
+/* 云团 WebUI 全局样式 v3：视觉基座刷新
+   v3 变更点：更柔和的背景层次、更清晰的卡片分割、克制的阴影、更明确的 hover 反馈、
+   ink 色阶（--yt-ink-1/2/3）替代散落各处的 text-dim、新增 --yt-ring / --yt-soft-bg。 */
 
 :root {
-  --yt-bg: #f3f5fa;
-  --yt-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 8px 24px -10px rgba(15, 23, 42, 0.12);
-  --yt-card-shadow-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 14px 32px -10px rgba(79, 70, 229, 0.18);
-  --yt-card-border: #e6e9f4;
-  --yt-header-bg: rgba(255, 255, 255, 0.82);
-  --yt-header-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 4px 16px -6px rgba(15, 23, 42, 0.1);
+  --yt-bg: #eef1f8;
+  --yt-soft-bg: #f6f8fc;
+  --yt-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px -8px rgba(15, 23, 42, 0.08);
+  --yt-card-shadow-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 14px 32px -10px rgba(79, 70, 229, 0.16);
+  --yt-card-border: rgba(226, 230, 244, 0.9);
+  --yt-header-bg: rgba(255, 255, 255, 0.78);
+  --yt-header-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px -6px rgba(15, 23, 42, 0.08);
+  --yt-ink-1: #0f172a;
+  --yt-ink-2: #334155;
+  --yt-ink-3: #64748b;
   --yt-text-dim: #64748b;
   --yt-canvas-bg: #fafbfe;
   --yt-code-bg: #f8fafc;
   --yt-tl-line: #e2e8f0;
   --yt-hover-bg: rgba(79, 70, 229, 0.06);
   --yt-active-bg: rgba(79, 70, 229, 0.1);
+  --yt-ring: rgba(79, 70, 229, 0.28);
   --yt-primary: #4f46e5;
   --yt-primary-soft: #6366f1;
   --yt-grad-from: #06b6d4;
@@ -27,20 +34,25 @@
 }
 
 html.dark {
-  --yt-bg: #0f1218;
+  --yt-bg: #0b0e14;
+  --yt-soft-bg: #10141c;
   --yt-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 28px -12px rgba(0, 0, 0, 0.6);
   --yt-card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 34px -12px rgba(99, 102, 241, 0.35);
-  --yt-card-border: rgba(255, 255, 255, 0.09);
-  --yt-header-bg: rgba(22, 24, 30, 0.82);
+  --yt-card-border: rgba(255, 255, 255, 0.08);
+  --yt-header-bg: rgba(18, 21, 29, 0.78);
   --yt-header-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px -8px rgba(0, 0, 0, 0.55);
+  --yt-ink-1: #f1f5f9;
+  --yt-ink-2: #cbd5e1;
+  --yt-ink-3: #94a3b8;
   --yt-text-dim: #94a3b8;
-  --yt-canvas-bg: #14171d;
-  --yt-code-bg: #12151b;
+  --yt-canvas-bg: #10141c;
+  --yt-code-bg: #0d1117;
   --yt-tl-line: rgba(255, 255, 255, 0.1);
-  --yt-hover-bg: rgba(129, 140, 248, 0.14);
-  --yt-active-bg: rgba(129, 140, 248, 0.2);
-  --yt-primary: #6366f1;
-  --yt-primary-soft: #818cf8;
+  --yt-hover-bg: rgba(129, 140, 248, 0.12);
+  --yt-active-bg: rgba(129, 140, 248, 0.18);
+  --yt-ring: rgba(129, 140, 248, 0.3);
+  --yt-primary: #818cf8;
+  --yt-primary-soft: #a5b4fc;
   --yt-grad-from: #0891b2;
   --yt-grad-to: #6366f1;
   --yt-jk-key: #c4b5fd;
@@ -53,7 +65,9 @@ html.dark {
 
 body {
   background: var(--yt-bg);
+  color: var(--yt-ink-1);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* 数字 / ID / 代码统一等宽栈（JetBrains Mono 类 fallback） */
@@ -65,11 +79,22 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+/* 全局交互焦点环（键盘可访问性） */
+:focus-visible {
+  outline: 2px solid var(--yt-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 /* 卡片：统一圆角与浮起阴影 */
 .n-card {
   box-shadow: var(--yt-card-shadow);
-  transition: box-shadow 0.18s ease;
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
 }
+
+/* 次要文字默认色（naive 内部不读自设变量，这里做一层桥接） */
+.n-text.depth-2 { color: var(--yt-ink-2) !important; }
+.n-text.depth-3 { color: var(--yt-ink-3) !important; }
 
 /* 顶栏：半透明 + 毛玻璃 + 微阴影 */
 .yt-header {
@@ -89,15 +114,11 @@ code {
 .yt-brand-logo {
   width: 30px;
   height: 30px;
-  border-radius: 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 15px;
-  font-weight: 700;
-  background: linear-gradient(135deg, var(--yt-grad-from) 0%, var(--yt-grad-to) 100%);
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.35);
+  border-radius: 50%;
+  display: block;
+  object-fit: cover;
+  background: var(--yt-soft-bg);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12), inset 0 0 0 1px var(--yt-card-border);
 }
 .yt-brand-name {
   font-weight: 700;
@@ -122,8 +143,30 @@ code {
 
 /* 页面容器：内容页限宽居中（全高分栏页不用） */
 .yt-page {
-  max-width: 1160px;
+  max-width: 1220px;
   margin: 0 auto;
+}
+
+/* 页头：标题 + 辅助信息一条；所有内容页共用 */
+.yt-page-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 0 14px;
+  flex-wrap: wrap;
+}
+.yt-page-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--yt-ink-1);
+}
+.yt-page-sub {
+  font-size: 12.5px;
+  color: var(--yt-ink-3);
+}
+.yt-page-head .spacer {
+  flex: 1;
 }
 
 /* 页面顶部工具栏：过滤/操作控件化收拢一条 */
@@ -147,23 +190,65 @@ code {
 /* 路由淡入过渡 */
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .fade-enter-from {
   opacity: 0;
-  transform: translateY(4px);
+  transform: translateY(6px);
 }
 .fade-leave-to {
   opacity: 0;
+  transform: translateY(-3px);
 }
 
 /* 详情面板滑入 */
 .slide-in-enter-active {
-  transition: opacity 0.22s ease, transform 0.22s ease;
+  transition: opacity 0.24s ease, transform 0.24s ease;
 }
 .slide-in-enter-from {
   opacity: 0;
-  transform: translateX(16px);
+  transform: translateX(18px);
+}
+
+/* ===== 全局动效基座（挂载入场 / 元素切换 / 错误抖动） ===== */
+/* 使用：class="yt-anim-fade-up" style="--d: 120ms"（--d 为 stagger 延迟） */
+@keyframes yt-kf-fade-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes yt-kf-fade-down {
+  from { opacity: 0; transform: translateY(-14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes yt-kf-pop {
+  0% { opacity: 0; transform: scale(0.96) translateY(8px); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes yt-kf-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-5px); }
+  40%, 80% { transform: translateX(5px); }
+}
+.yt-anim-fade-up { animation: yt-kf-fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; animation-delay: var(--d, 0ms); }
+.yt-anim-fade-down { animation: yt-kf-fade-down 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; animation-delay: var(--d, 0ms); }
+.yt-anim-pop { animation: yt-kf-pop 0.45s cubic-bezier(0.34, 1.4, 0.5, 1) both; animation-delay: var(--d, 0ms); }
+
+/* 输入/卡片切换（Login 在 needSetup 切换时用） */
+.yt-field-enter-active, .yt-field-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
+.yt-field-enter-from { opacity: 0; transform: translateY(4px); }
+.yt-field-leave-to { opacity: 0; transform: translateY(-4px); }
+
+/* 错误条：抖动 + 淡入 */
+.yt-shake-fade-enter-active { animation: yt-kf-shake 0.35s ease, yt-kf-fade-up 0.25s ease; }
+.yt-shake-fade-leave-active { transition: opacity 0.18s ease; }
+.yt-shake-fade-leave-to { opacity: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .yt-anim-fade-up, .yt-anim-fade-down, .yt-anim-pop,
+  .yt-shake-fade-enter-active { animation: none !important; }
+  .fade-enter-active, .fade-leave-active,
+  .slide-in-enter-active,
+  .yt-field-enter-active, .yt-field-leave-active { transition: none !important; }
 }
 
 /* 细滚动条 */
@@ -182,7 +267,7 @@ code {
   background: transparent;
 }
 
-/* ===== 登录页：左右分屏，左侧品牌渐变缓慢流动 ===== */
+/* ===== 登录页：左侧品牌区带漂浮光斑 + 网格点缀；右侧卡片带多层阴影 ===== */
 .login-split {
   min-height: 100vh;
   display: grid;
@@ -194,81 +279,110 @@ code {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 56px 48px;
+  padding: 64px 56px;
   color: #fff;
-  background: linear-gradient(150deg, #0e7490 0%, var(--yt-grad-from) 28%, var(--yt-grad-to) 72%, #312e81 100%);
+  background: linear-gradient(150deg, #164e63 0%, #0e7490 18%, var(--yt-grad-from) 38%, var(--yt-grad-to) 68%, #4338ca 88%, #312e81 100%);
   background-size: 220% 220%;
-  animation: yt-grad-flow 18s ease-in-out infinite alternate;
+  animation: yt-grad-flow 20s ease-in-out infinite alternate;
 }
-.login-hero-side::before,
+/* 底层网格纹理（低透明度直线网格，增加质感） */
+.login-hero-side::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 36px 36px;
+  pointer-events: none;
+}
+/* 光斑（多层实现极光感） */
 .login-hero-side::after {
   content: '';
   position: absolute;
+  width: 520px;
+  height: 520px;
   border-radius: 50%;
-  filter: blur(2px);
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.14), transparent 65%);
+  top: -140px;
+  right: -140px;
+  background: radial-gradient(circle, rgba(103, 232, 249, 0.32), transparent 62%);
+  filter: blur(1px);
   pointer-events: none;
+  animation: yt-orb-float 12s ease-in-out infinite alternate;
 }
-.login-hero-side::before {
-  width: 420px;
-  height: 420px;
-  top: -120px;
-  right: -100px;
-}
-.login-hero-side::after {
-  width: 360px;
-  height: 360px;
-  bottom: -140px;
+.login-hero-glow-b {
+  position: absolute;
+  width: 380px;
+  height: 380px;
+  border-radius: 50%;
+  bottom: -110px;
   left: -80px;
+  background: radial-gradient(circle, rgba(167, 139, 250, 0.3), transparent 65%);
+  pointer-events: none;
+  animation: yt-orb-float 14s ease-in-out infinite alternate-reverse;
 }
 @keyframes yt-grad-flow {
   0% { background-position: 0% 20%; }
   100% { background-position: 100% 80%; }
 }
+@keyframes yt-orb-float {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(-24px, 18px) scale(1.06); }
+}
 @media (prefers-reduced-motion: reduce) {
-  .login-hero-side { animation: none; }
+  .login-hero-side, .login-hero-side::after, .login-hero-glow-b { animation: none; }
 }
 .login-hero-side .yt-brand-logo {
-  width: 48px;
-  height: 48px;
-  font-size: 24px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.16);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.28);
 }
 .login-hero-name {
   display: flex;
   align-items: center;
-  gap: 16px;
-  font-size: 42px;
+  gap: 18px;
+  font-size: 46px;
   font-weight: 800;
   letter-spacing: 2px;
   position: relative;
 }
 .login-hero-slogan {
-  margin: 18px 0 30px;
+  margin: 22px 0 36px;
   font-size: 15.5px;
-  line-height: 1.9;
-  color: rgba(255, 255, 255, 0.86);
+  line-height: 1.95;
+  color: rgba(255, 255, 255, 0.88);
   position: relative;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
 .login-hero-points {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   position: relative;
 }
 .login-hero-point {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   font-size: 13.5px;
-  color: rgba(255, 255, 255, 0.92);
+  color: rgba(255, 255, 255, 0.94);
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+  width: fit-content;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+.login-hero-point:hover {
+  background: rgba(255, 255, 255, 0.12);
+  transform: translateX(4px);
 }
 .login-hero-point svg {
   flex: none;
-  opacity: 0.9;
+  opacity: 0.95;
 }
 .login-form-side {
   display: flex;
@@ -276,10 +390,16 @@ code {
   justify-content: center;
   padding: 40px 24px;
   background: var(--yt-bg);
+  position: relative;
 }
 .login-form-card {
   width: 100%;
-  max-width: 380px;
+  max-width: 400px;
+  border: 1px solid var(--yt-card-border);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 12px 32px -12px rgba(15, 23, 42, 0.12),
+    0 32px 64px -32px rgba(79, 70, 229, 0.18);
 }
 @media (max-width: 860px) {
   .login-split {

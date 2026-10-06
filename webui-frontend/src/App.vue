@@ -4,15 +4,15 @@
     <n-message-provider>
       <router-view v-if="$route.name === 'login'" />
       <n-layout v-else style="height: 100vh">
-        <n-layout-header class="yt-header" style="height: 54px; display: flex; align-items: center; padding: 0 18px; gap: 14px">
-          <n-button quaternary circle size="small" @click="ui.toggleSider">
+        <n-layout-header class="yt-header" style="height: 54px; display: flex; align-items: center; padding: 0 20px; gap: 16px">
+          <n-button quaternary circle size="small" @click="ui.toggleSider" class="yt-icon-btn">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M4 6h16M4 12h16M4 18h16" />
             </svg>
           </n-button>
           <div class="yt-brand">
-            <span class="yt-brand-logo">云</span>
+            <img :src="mascot" class="yt-brand-logo" alt="云团" />
             <span class="yt-brand-name">云团</span>
             <span class="yt-brand-sub">群聊 Agent 运维面板</span>
           </div>
@@ -24,7 +24,7 @@
           </n-tooltip>
           <n-tag size="small" :type="moodTag" round>mood · {{ ui.mood }}</n-tag>
           <div style="margin-left: auto; display: flex; align-items: center; gap: 12px">
-            <n-switch v-model:value="ui.dark" size="small" @update:value="ui.toggleTheme">
+            <n-switch v-model:value="ui.dark" size="small" @update:value="ui.toggleTheme" class="yt-theme-switch">
               <template #checked>暗</template>
               <template #unchecked>亮</template>
             </n-switch>
@@ -34,12 +34,12 @@
           </div>
         </n-layout-header>
         <n-layout has-sider position="absolute" style="top: 54px">
-          <n-layout-sider class="yt-sider" bordered collapse-mode="width" :width="196" :collapsed-width="62"
+          <n-layout-sider class="yt-sider" bordered collapse-mode="width" :width="200" :collapsed-width="64"
                           :collapsed="ui.collapsed" :native-scrollbar="false">
             <n-menu :options="menuOptions" :value="String($route.name)" :collapsed="ui.collapsed"
-                    :collapsed-icon-size="20" :root-indent="20" style="padding: 6px 0" @update:value="go" />
+                    :collapsed-icon-size="20" :root-indent="22" :indent="16" style="padding: 4px 8px" @update:value="go" />
           </n-layout-sider>
-          <n-layout-content :native-scrollbar="false" content-style="padding: 18px 20px;">
+          <n-layout-content :native-scrollbar="false" content-style="padding: 20px 22px;">
             <router-view v-slot="{ Component }">
               <transition name="fade" mode="out-in">
                 <component :is="Component" />
@@ -61,6 +61,7 @@ import { lightOverrides, darkOverrides } from './theme'
 import { wsConnected, ensureWs } from './ws'
 import { TOKEN_KEY, api } from './api'
 import YtIcon from './components/YtIcon.vue'
+import mascot from './assets/mascot.png'
 
 const ui = useUiStore()
 const route = useRoute()
