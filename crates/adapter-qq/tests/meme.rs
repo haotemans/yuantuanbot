@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{send_fn, spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
@@ -76,9 +76,18 @@ async fn mock_llm_decision_meme(listener: TcpListener) {
 
 type Captures = Arc<Mutex<Vec<Value>>>;
 
-async fn mock_napcat_capture(listener: TcpListener, initial: Vec<Value>, captures: Captures) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let ws = accept_async(stream).await.unwrap();
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+async fn mock_napcat_capture(port: u16, initial: Vec<Value>, captures: Captures) {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (ws, _) = connect_async(&url).await.expect("mock NapCat 连不上");
     let (w, mut r) = ws.split();
     let w = Arc::new(tokio::sync::Mutex::new(w));
     let req = r.next().await.unwrap().unwrap();
@@ -165,9 +174,8 @@ async fn decision_send_meme_sends_image() {
     let gateway = Arc::new(LlmGateway::load(&providers_path).unwrap());
 
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
-    let nl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nl_port = nl.local_addr().unwrap().port();
-    tokio::spawn(mock_napcat_capture(nl, vec![at_message(501, 2001, "来个开心图")], captures.clone()));
+    let nl_port = free_port();
+    tokio::spawn(mock_napcat_capture(nl_port, vec![at_message(501, 2001, "来个开心图")], captures.clone()));
 
     let bus = EventBus::new(128);
     let _tracer = spawn_tracer(&bus, db_path.clone());
@@ -176,7 +184,7 @@ async fn decision_send_meme_sends_image() {
         bus.clone(),
         db_path.clone(),
         NapcatConfig {
-            ws_url: format!("ws://127.0.0.1:{nl_port}"),
+            listen_addr: format!("127.0.0.1:{nl_port}"),
             token: String::new(),
         },
         self_ids.clone(),
@@ -202,6 +210,7 @@ async fn decision_send_meme_sends_image() {
         reply_cfg: Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: memes.clone(),
+        media_ctx: None,
     });
 
     // 等 1 次发送
@@ -292,11 +301,10 @@ async fn steal_then_approve_and_reject() {
     let img_url = format!("http://127.0.0.1:{img_port}/pic.png");
 
     // mock NapCat 推两条相同图片消息（第二条应被去重跳过）
-    let nl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nl_port = nl.local_addr().unwrap().port();
+    let nl_port = free_port();
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
     tokio::spawn(mock_napcat_capture(
-        nl,
+        nl_port,
         vec![image_message(601, 2002, &img_url), image_message(602, 2002, &img_url)],
         captures,
     ));
@@ -308,7 +316,7 @@ async fn steal_then_approve_and_reject() {
         bus.clone(),
         db_path.clone(),
         NapcatConfig {
-            ws_url: format!("ws://127.0.0.1:{nl_port}"),
+            listen_addr: format!("127.0.0.1:{nl_port}"),
             token: String::new(),
         },
         self_ids,

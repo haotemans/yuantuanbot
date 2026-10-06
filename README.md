@@ -29,7 +29,29 @@ cd webui-frontend && npm install && npm run build && cd ..
 cargo run -p yuantuan
 ```
 
-然后浏览器开 `http://127.0.0.1:8085/`：首次输入的密码即为管理员密码（首启引导）→ 「配置 / 模型」页绑定 providers（或手改 providers.toml 后在页面保存触发 LLM 热重建）→ 配好 NapCat 地址即可上线。公网暴露走反代（caddy 等），不要把 8085 直连公网。
+## 地址与端口速查
+
+| 用途 | 地址 / 端口 | 谁监听 | 备注 |
+|---|---|---|---|
+| **管理面板（前端）** | http://127.0.0.1:8085/ | yuantuan | 浏览器打开，首次输入的密码即为管理员密码 |
+| **后端 API + WS** | http://127.0.0.1:8085/api/* 和 ws://127.0.0.1:8085/ws | yuantuan | 由 axum 提供；与面板同源 |
+| **NapCat 反向 WS** | ws://127.0.0.1:6199/ws | **yuantuan** | yuantuan 监听，NapCat 主动连入（AstrBot 同款形态） |
+| **NapCat WebUI** | http://127.0.0.1:6099/webui | QQ.exe（NapCat 主进程） | NapCat 自带的管理面板 |
+| **vite dev（前端热改）** | http://127.0.0.1:5173/ | `npm run dev` | 仅调前端时启用；已配 proxy 到 8085 |
+
+### 启动顺序
+
+1. `cargo run -p yuantuan`（先把 6199 监听架起来，看 banner 里的 `NapCat 反向 WS 监听 : ws://127.0.0.1:6199/ws`）。
+2. NapCat WebUI（`http://127.0.0.1:6099/webui`）→ 网络配置 → 新建 → **Websockets客户端**：
+   - 名称：随意（如 `云团`）
+   - URL：`ws://127.0.0.1:6199/ws`
+   - Token：`config.toml` 里 `[napcat] token`（默认 `RulglMHkkxwQ4iyx`）
+   - 启用：开
+   - 保存（**无需重启 NapCat 主进程**——Websockets客户端是出站连接，保存即生效）
+3. 后端日志出现 `NapCat WS 已连接` + `get_login_info 完成 self_qq=...` 即链路通。
+4. 浏览器开 http://127.0.0.1:8085/ 首次输入的密码即为管理员密码 → 「配置 / 模型」页绑定 providers。
+
+公网暴露走反代（caddy 等），不要把 8085 直连公网。
 
 ### 忘记管理员密码
 

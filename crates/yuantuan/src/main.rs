@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
     let cfg = config::load_or_default("config.toml")?;
     info!(
         data_dir = %cfg.data.dir,
-        napcat_ws = %cfg.napcat.ws_url,
+        napcat_listen = %cfg.napcat.listen_addr,
         napcat_enabled = cfg.napcat.enabled,
         log_level = %cfg.log.level,
         "配置加载完成"
@@ -65,12 +65,12 @@ async fn main() -> Result<()> {
     // f. adapter-qq（[napcat].enabled=false 则跳过；连不上退避重连不死进程）
     let self_ids = yuantuan_core::prefilter::SelfMsgIds::default();
     let adapter = if cfg.napcat.enabled {
-        info!(ws_url = %cfg.napcat.ws_url, "adapter-qq 启动（正向 WS）");
+        info!(listen_addr = %cfg.napcat.listen_addr, "adapter-qq 启动（反向 WS，等待 NapCat Websockets客户端连入）");
         Some(yuantuan_adapter_qq::spawn(
             bus.clone(),
             db_path.clone(),
             yuantuan_adapter_qq::NapcatConfig {
-                ws_url: cfg.napcat.ws_url.clone(),
+                listen_addr: cfg.napcat.listen_addr.clone(),
                 token: cfg.napcat.token.clone(),
             },
             self_ids.clone(),
@@ -208,10 +208,23 @@ async fn main() -> Result<()> {
 
     // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");
-    info!(
-        url = %format!("http://{}:{}/", cfg.webui.host, cfg.webui.port),
-        "管理员面板；首次登录提交的密码即为管理员密码（首启引导）"
-    );
+    let panel_url = format!("http://{}:{}/", cfg.webui.host, cfg.webui.port);
+    let api_base = format!("http://{}:{}/api", cfg.webui.host, cfg.webui.port);
+    let ws_feed = format!("ws://{}:{}/ws", cfg.webui.host, cfg.webui.port);
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    info!("  管理面板（浏览器打开）  : {}", panel_url);
+    info!("  后端 API               : {}", api_base);
+    info!("  面板 WS 推送           : {}", ws_feed);
+    if cfg.napcat.enabled {
+        let napcat_url = format!("ws://{}/ws (token={})", cfg.napcat.listen_addr, if cfg.napcat.token.is_empty() { "无" } else { "有" });
+        info!("  NapCat 反向 WS 监听    : {}", napcat_url);
+        info!("  └ NapCat WebUI 网络配置 → Websockets客户端 → URL 填上面这个 → 保存并重启 NapCat");
+    } else {
+        info!("  NapCat                 : 已禁用");
+    }
+    info!("  vite dev（前端热改）   : cd webui-frontend && npm run dev  →  http://127.0.0.1:5173/");
+    info!("  首次登录的密码 = 管理员密码（首启引导）");
+    info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     let extras = yuantuan_webui::Extras {
         bus: bus.clone(),
         llm_slot,

@@ -1,12 +1,12 @@
-//! 集成测试：mock NapCat WS 服务端 → get_login_info 响应 + 2 条群消息（一条@bot）+ 1 条私聊，
+//! 集成测试：mock NapCat WS 客户端（反向 WS 形态）→ 主动 connect 我们的 6199/ws，
+//! 收 get_login_info 并回执，再发 2 条群消息（一条@bot）+ 1 条私聊，
 //! 断言 messages/persons/identities/member_profiles/events 与段数组映射规则。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{spawn, NapcatConfig};
 use yuantuan_core::db;
@@ -27,11 +27,19 @@ fn temp_db() -> PathBuf {
     db
 }
 
-async fn mock_napcat(listener: TcpListener) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let mut ws = accept_async(stream).await.unwrap();
+/// 从 OS 拿一个空闲端口（避免测试之间冲突；测试并发时各自的 mock ws 各自独占一个端口）
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
+}
 
-    // 期待 get_login_info，并原样回 echo
+async fn mock_napcat(port: u16) {
+    // 短暂等待服务器起完 listen
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut ws, _resp) = connect_async(&url).await.expect("mock NapCat 连不上");
+
+    // 收 get_login_info，并原样回 echo
     let req = ws.next().await.unwrap().unwrap();
     let v: Value = serde_json::from_str(&req.into_text().unwrap()).unwrap();
     assert_eq!(v["action"], "get_login_info");
@@ -84,9 +92,8 @@ async fn mock_napcat(listener: TcpListener) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ingest_group_and_private_messages() {
     let db_path = temp_db();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(mock_napcat(listener));
+    let port = free_port();
+    let server = tokio::spawn(mock_napcat(port));
 
     let bus = EventBus::new(64);
     let _tracer = spawn_tracer(&bus, db_path.clone());
@@ -94,7 +101,7 @@ async fn ingest_group_and_private_messages() {
         bus.clone(),
         db_path.clone(),
         NapcatConfig {
-            ws_url: format!("ws://127.0.0.1:{port}"),
+            listen_addr: format!("127.0.0.1:{port}"),
             token: String::new(),
         },
         SelfMsgIds::default(),

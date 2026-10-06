@@ -1,36 +1,29 @@
-# 云团主配置
-# 运行数据全部落在 [data].dir 下（见 docs/data-model.md 第一章）
+[consolidation]
+daily_time = "03:00"
+enabled = true
+run_on_startup = false
 
 [data]
 dir = "data"
 
-[napcat]
-# NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
-# enabled = false 时不接入 NapCat（其余子系统照常运行）
-enabled = true
-ws_url = "ws://127.0.0.1:6199/ws"
-token = "RulgIMHkkxwQ4iyx"
-
-[webui]
-# 管理面板监听地址（仅本机；公网暴露走反代，见架构文档安全小节）
-host = "127.0.0.1"
-port = 8085
-
-[prefilter]
-# 群聊发言节流（架构十三章节流闸；热配在后续施工单接入）
-window_secs = 60
-self_msg_cap = 12
-
-[consolidation]
-# 夜间归纳（架构七章）；daily_time 为本地 HH:MM
-enabled = true
-daily_time = "03:00"
-# 调试用：启动后立即执行一次（生产保持 false）
-run_on_startup = false
-
-[meme]
-# 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）
-steal_enabled = true
-
 [log]
 level = "info"
+
+[meme]
+steal_enabled = true
+
+[napcat]
+# NapCat OneBot 11 反向 WS（与 AstrBot aiocqhttp 同形态）
+# yuantuan 起服务器监听 listen_addr；NapCat 用「Websockets客户端」卡片主动连入。
+# 卡片 URL 填 ws://{listen_addr}/ws、Token 填下面这个 token；保存后 NapCat 主进程会主动拨进来
+enabled = true
+listen_addr = "127.0.0.1:6199"
+token = "RulglMHkkxwQ4iyx"
+
+[prefilter]
+self_msg_cap = 12
+window_secs = 60
+
+[webui]
+host = "127.0.0.1"
+port = 8085

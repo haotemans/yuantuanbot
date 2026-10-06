@@ -125,13 +125,14 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
 
 # 六、adapter-qq 通讯设计
 
-## WS 拓扑：正向连接
+## WS 拓扑：反向连接（AstrBot 同款）
 
-NapCat 起 WS 服务端（默认 `ws://127.0.0.1:3001`，带 token），云团作客户端主动连接：
+云团作为服务器监听 `127.0.0.1:6199`（`[napcat] listen_addr`），NapCat 在网络配置中新增 **Websockets客户端** 卡片，URL 填 `ws://127.0.0.1:6199/ws`、Token 填 `[napcat] token`。**与 AstrBot 的 aiocqhttp 完全同形态**——协议端主动连出，bot 框架起服务器接。
 
-- 重连逻辑由 supervisor 管理（指数退避 1s→60s），客户端侧天然顺手
-- NapCat 配置不登记云团地址，部署少一步
-- 不为事件流额外开端口
+设计理由：
+- **UI 一致性**：NapCat 的「Websockets客户端」卡片就是 `ws://ip:port/path` 形态，用户熟悉，不需要在 Host/Port 之间拆协议前缀
+- **服务器侧更可控**：鉴权/连接管理由我们自己写，NapCat 改配置即可切换目标，不必重启整个 QQ 主进程
+- **无需客户端退避**：NapCat 出站连接自身有退避，我方只需 listen 等待
 
 ## 消息段模型（铁律）
 
@@ -148,11 +149,11 @@ NapCat 起 WS 服务端（默认 `ws://127.0.0.1:3001`，带 token），云团�
 
 - 上下行复用同一条 WS：事件下行，action 上行
 - 每条 action 带 echo UUID，等响应回执 **10 秒超时判失败** → 交回复形态引擎的单泡退避重试
-- OneBot meta_event 心跳监测，超时触发 supervisor 重连
+- 鉴权：NapCat 客户端在 HTTP Upgrade 时带 `Authorization: Bearer <token>`，yuantuan 侧在 ws_handler 校验
 
 ## 断线策略（V1）
 
-断线窗口期消息 NapCat 不缓存，**接受丢失记事件**（`AdapterDisconnected(start, end)`，面板可见）——人也会错过消息；不补拉历史（各家 history API 实现参差，二期再议）。
+断线窗口期消息 NapCat 不缓存，**接受丢失记事件**——人也会错过消息；不补拉历史（各家 history API 实现参差，二期再议）。NapCat 自身会在断开后重连，我们只需接受下一个连接。
 
 ---
 
@@ -164,3 +165,4 @@ NapCat 起 WS 服务端（默认 `ws://127.0.0.1:3001`，带 token），云团�
 - 2026-10-03：前端工具链升级——vite 8.3.2、typescript 6.0.3（TS7 因 vue-tsc 未兼容其 native 接口暂缓）、vue-tsc 3.3.12、@vitejs/plugin-vue 6.x；并完成全站设计打磨一轮（theme 令牌/品牌区/仪表盘 sparkline/trace 卡片化/空态骨架屏）。
 - 2026-10-03（TS7 补票条件，调研自官方源）：TS7 已 GA 但 7.0 无程序化 API；等 ① typescript@7.1 稳定版（API 落地，tracking microsoft/TypeScript#63800，预计 2026 Q4）+ ② vuejs/language-tools PR #6170 合并（vue-tsc 将由 @vue/content-mapper 取代）。两者齐即升级并迁移类型检查链路。
 - 2026-10-03：配置中心 2.0——全参数面板化（新增「运行参数」页，页面清单同步十一页）+ 热应用槽扩展（reply/context/consolidation/meme 换槽与定时器重建）+ 模型页连通性测试（/api/llm/test）。
+- 2026-10-06：**adapter-qq 从正向 WS 翻转为反向 WS**（与 AstrBot aiocqhttp 同形态）。原因：早期 session 把 NapCat 「Websocket服务器」卡片字面当成 NapCat 服务端，把 AstrBot 文档里的 `ws://宿主:6199/ws` 当成 NapCat 的对外端口，从而起了 client-style 的出站连接。正确拓扑：云团起服务器监听 6199/ws，NapCat 用「Websockets客户端」卡片主动连入。`[napcat] ws_url` 字段名废弃，改 `listen_addr`。错误教训：读协议文档只看 URL 字面没看拓扑方向。

@@ -31,8 +31,8 @@ pub struct DataConfig {
 pub struct NapcatConfig {
     /// 是否接入 NapCat（false 则跳过 adapter-qq）
     pub enabled: bool,
-    /// NapCat OneBot 11 正向 WS 地址
-    pub ws_url: String,
+    /// 反向 WS 监听地址：yuantuan 起服务器在 `http://{listen_addr}/ws` 等 NapCat 主动连入（AstrBot 同款形态）
+    pub listen_addr: String,
     pub token: String,
 }
 
@@ -76,7 +76,7 @@ impl Default for NapcatConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            ws_url: "ws://127.0.0.1:3001".into(),
+            listen_addr: "127.0.0.1:6199".into(),
             token: String::new(),
         }
     }
@@ -245,10 +245,12 @@ const DEFAULT_TEMPLATE: &str = r#"# 云团主配置
 dir = "data"
 
 [napcat]
-# NapCat OneBot 11 正向 WS（见 docs/runtime-design.md 第六章）
+# NapCat OneBot 11 反向 WS（见 docs/runtime-design.md 第六章；与 AstrBot aiocqhttp 同形态）
 # enabled = false 时不接入 NapCat（其余子系统照常运行）
+# 此处是「yuantuan 服务端的监听地址」，NapCat WebUI → 网络配置 → Websockets客户端 →
+# URL 填 ws://{listen_addr}/ws、Token 填 token 字段；保存后 NapCat 主进程会主动连进来
 enabled = true
-ws_url = "ws://127.0.0.1:3001"
+listen_addr = "127.0.0.1:6199"
 token = ""
 
 [webui]

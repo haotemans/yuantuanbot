@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
@@ -107,10 +107,11 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// mock NapCat：回 get_login_info，然后逐条推送事件
-async fn mock_napcat(listener: TcpListener, events: Vec<Value>) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let mut ws = accept_async(stream).await.unwrap();
+/// mock NapCat：反向 WS 形态，主动 connect 我们监听的 /ws，回 get_login_info，再推送事件
+async fn mock_napcat(port: u16, events: Vec<Value>) {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut ws, _) = connect_async(&url).await.expect("mock NapCat 连不上");
     let req = ws.next().await.unwrap().unwrap();
     let v: Value = serde_json::from_str(&req.into_text().unwrap()).unwrap();
     assert_eq!(v["action"], "get_login_info");
@@ -127,6 +128,14 @@ async fn mock_napcat(listener: TcpListener, events: Vec<Value>) {
         tokio::time::sleep(Duration::from_millis(120)).await;
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn at_message(id: u64, uid: u64, text: &str) -> Value {
@@ -188,22 +197,22 @@ async fn decision_pipeline_end_to_end() {
     assert!(gateway.role(yuantuan_core::llm::Role::Decision).is_some());
 
     // bus + tracer + adapter + 管线
+    // bus + tracer + adapter + 管线
     let bus = EventBus::new(128);
     let _tracer = spawn_tracer(&bus, db_path.clone());
     let self_ids = SelfMsgIds::default();
-    let nap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nap_port = nap_listener.local_addr().unwrap().port();
+    let nap_port = free_port();
     let nap_events = vec![
         at_message(201, 2001, "云团在吗"),
         at_message(202, 2001, "我很喜欢 Rust"),
         at_message(203, 2001, "测试兜底"),
     ];
-    tokio::spawn(mock_napcat(nap_listener, nap_events));
+    tokio::spawn(mock_napcat(nap_port, nap_events));
     let handle = spawn(
         bus.clone(),
         db_path.clone(),
         NapcatConfig {
-            ws_url: format!("ws://127.0.0.1:{nap_port}"),
+            listen_addr: format!("127.0.0.1:{nap_port}"),
             token: String::new(),
         },
         self_ids.clone(),
@@ -220,6 +229,7 @@ async fn decision_pipeline_end_to_end() {
         reply_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("pipeline-memes"),
+        media_ctx: None,
     });
 
     // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）

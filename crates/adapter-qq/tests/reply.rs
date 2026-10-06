@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{send_fn, spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
@@ -112,17 +112,26 @@ async fn read_body(s: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
 
 type Captures = Arc<Mutex<Vec<(Instant, Value)>>>;
 
-/// mock NapCat：登录握手 → 推初始事件 → 捕获 send_*_msg action（记录时刻+段数组，回 echo ok）
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// mock NapCat：反向 WS 形态，主动 connect /ws → 登录握手 → 推初始事件 → 捕获 send_*_msg action（记录时刻+段数组，回 echo ok）
 /// inject_after_first：首个 action 响应完成后等 150ms 注入该事件（异步作废测试用）
 async fn mock_napcat(
-    listener: TcpListener,
+    port: u16,
     initial: Vec<Value>,
     captures: Captures,
     first_action: Arc<Notify>,
     inject_after_first: Option<Value>,
 ) {
-    let (stream, _) = listener.accept().await.unwrap();
-    let ws = accept_async(stream).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (ws, _) = connect_async(&url).await.expect("mock NapCat 连不上");
     let (w, mut r) = ws.split();
     let w = Arc::new(tokio::sync::Mutex::new(w));
 
@@ -233,10 +242,9 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
     .unwrap();
     let gateway = Arc::new(LlmGateway::load(&providers_path).unwrap());
 
-    // mock NapCat
-    let nl = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let nl_port = nl.local_addr().unwrap().port();
-    let h2 = tokio::spawn(mock_napcat(nl, nap_events, captures, notify, inject));
+    // mock NapCat（反向 WS：主动 connect 我们的 /ws）
+    let nl_port = free_port();
+    let h2 = tokio::spawn(mock_napcat(nl_port, nap_events, captures, notify, inject));
 
     let bus = EventBus::new(256);
     let _t = spawn_tracer(&bus, db_path.clone());
@@ -245,7 +253,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         bus.clone(),
         db_path.clone(),
         NapcatConfig {
-            ws_url: format!("ws://127.0.0.1:{nl_port}"),
+            listen_addr: format!("127.0.0.1:{nl_port}"),
             token: String::new(),
         },
         self_ids.clone(),
@@ -272,6 +280,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         reply_cfg: reply_slot,
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("reply-memes"),
+        media_ctx: None,
     });
     Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }
 }

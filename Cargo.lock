@@ -2341,6 +2341,7 @@ name = "yuantuan-adapter-qq"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "futures-util",
  "image",
  "reqwest",
