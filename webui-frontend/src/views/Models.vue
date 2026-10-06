@@ -101,12 +101,18 @@
         </div>
       </template>
       <template #header-extra>
-        <n-input v-model:value="newName" size="small" placeholder="新 provider 名"
-                 style="width: 200px" @keyup.enter="addProvider" />
-        <n-button size="small" type="primary" secondary @click="addProvider" style="margin-left: 8px">
-          + 添加 Provider
-        </n-button>
+        <div class="header-actions">
+          <n-input v-model:value="newName" size="small" placeholder="新 provider 名（必填）"
+                   :status="newNameError ? 'error' : undefined"
+                   style="width: 200px" @keyup.enter="addProvider" />
+          <n-button size="small" type="primary" secondary @click="addProvider">
+            + 添加 Provider
+          </n-button>
+        </div>
       </template>
+      <n-alert v-if="newNameError" type="warning" :bordered="false" size="small" style="margin-bottom: 12px">
+        {{ newNameError }}
+      </n-alert>
       <div v-if="providerList.length" class="provider-list">
         <provider-card v-for="item in providerList" :key="item.name" :name="item.name" :p="item.p"
                        :usage="providerUsage(item.name)" @delete="delProvider(item.name)" />
@@ -202,9 +208,18 @@ async function testRole(r) {
   }
 }
 
+const newNameError = ref('')
 function addProvider() {
   const n = newName.value.trim()
-  if (!n || providers.value[n]) return
+  if (!n) {
+    newNameError.value = '⚠️ 先在输入框填一个名字，比如 openai / deepseek'
+    return
+  }
+  if (providers.value[n]) {
+    newNameError.value = `⚠️ "${n}" 已存在；列表里找它点「编辑」`
+    return
+  }
+  newNameError.value = ''
   providers.value[n] = { base_url: '', modelsText: '', api_key_env: '', api_key_present: false, protocol: 'openai_chat' }
   newName.value = ''
 }
@@ -315,9 +330,12 @@ async function save() {
 .test-pill.fail { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
 
 /* ===== 通用 section head ===== */
-.sec-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.sec-title { font-weight: 700; font-size: 14px; color: var(--yt-ink-1); white-space: nowrap; }
-.sec-sub { font-size: 12px; color: var(--yt-ink-3); }
+.sec-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.sec-title { font-weight: 700; font-size: 14px; color: var(--yt-ink-1); white-space: nowrap; flex: none; }
+.sec-sub { font-size: 12px; color: var(--yt-ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1100px) {
+  .sec-sub { display: none; }
+}
 
 /* ===== 角色绑定卡片 ===== */
 .role-bind-card {
@@ -379,5 +397,16 @@ async function save() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.inline-error {
+  color: #dc2626;
+  font-size: 12px;
+  margin-top: 4px;
+  white-space: nowrap;
 }
 </style>

@@ -116,8 +116,11 @@ const fetchOk = ref(false)
 const newModel = ref('')
 const availableModels = ref([])
 
+// 协议下拉：OpenAI 当前实现可用；Anthropic/Gemini 暂为占位提示
 const protocolOptions = [
   { label: 'OpenAI Chat Completions', value: 'openai_chat' },
+  { label: 'Anthropic Messages（暂未实现）', value: 'anthropic', disabled: true },
+  { label: 'Google Gemini（暂未实现）', value: 'gemini', disabled: true },
 ]
 
 const selectedModels = computed(() =>
