@@ -282,6 +282,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         memes_dir: temp_dir("reply-memes"),
         media_ctx: None,
         skill_registry: None,
+        per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
     Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }
 }

@@ -41,6 +41,10 @@ pub struct Extras {
     pub mcp_manager: Option<std::sync::Arc<yuantuan_core::mcp::McpManager>>,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
+    /// Q52 per-chat mpsc 容量热应用槽（G008）
+    pub per_chat_cap: yuantuan_core::bot::SharedPerChatCap,
+    /// SelfMsgIds 实例引用（G008 热应用 set_cap）
+    pub self_ids: yuantuan_core::prefilter::SelfMsgIds,
     pub config_path: PathBuf,
     pub providers_path: PathBuf,
 }
@@ -64,6 +68,8 @@ impl Extras {
             skill_registry: yuantuan_core::skills::SkillRegistry::new(),
             mcp_manager: None,
             mood: yuantuan_core::state::MoodState::default(),
+            per_chat_cap: Arc::new(RwLock::new(32)),
+            self_ids: yuantuan_core::prefilter::SelfMsgIds::default(),
             config_path,
             providers_path,
         }

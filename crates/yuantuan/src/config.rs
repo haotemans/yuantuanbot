@@ -19,6 +19,29 @@ pub struct Config {
     pub media: MediaSection,
     pub backup: yuantuan_core::backup::BackupCfg,
     pub mcp: yuantuan_core::mcp::McpConfig,
+    pub pipeline: PipelineSection,
+}
+
+/// [pipeline] 消息管线调优参数（G008 裁决：可调非设计裁决，走热应用）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PipelineSection {
+    /// Q52 per-chat mpsc 队列容量：单 chat 瞬时洪峰超此值时降级同步 handle
+    pub per_chat_queue_cap: usize,
+    /// 自身已发消息 NapCat message_id 内存环形容量（R4 判定原料）
+    pub self_msg_ids_cap: usize,
+    /// Decision 成本闸启动初始值（次/分；运行期被 [prefilter].decision_cost_per_min 热应用覆盖）
+    pub decision_cost_per_min_init: usize,
+}
+
+impl Default for PipelineSection {
+    fn default() -> Self {
+        Self {
+            per_chat_queue_cap: 32,
+            self_msg_ids_cap: 512,
+            decision_cost_per_min_init: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -66,6 +89,7 @@ impl Default for Config {
             media: MediaSection::default(),
             backup: yuantuan_core::backup::BackupCfg::default(),
             mcp: yuantuan_core::mcp::McpConfig::default(),
+            pipeline: PipelineSection::default(),
         }
     }
 }
@@ -306,6 +330,16 @@ admin_qq = []
 optimizer_role = "bot_chat"
 # 默认每次任务的最大并发（预留；当前占位）
 max_concurrent = 2
+
+[pipeline]
+# 消息管线调优（面板「运行参数」可热调；G008 裁决值）
+# per_chat_queue_cap：Q52 单 chat 消息队列容量（洪峰降级保护阈值）
+per_chat_queue_cap = 32
+# self_msg_ids_cap：R4「回复/引用我的消息」判定原料（NapCat message_id 内存环形容量）
+self_msg_ids_cap = 512
+# decision_cost_per_min_init：Decision 成本闸启动初始值（次/分）
+# 注：运行期 [prefilter].decision_cost_per_min 热应用覆盖此项
+decision_cost_per_min_init = 30
 
 [backup]
 # 备份推 GitHub 私有仓（Q-B02/Q-B05）。enabled=false 时仅本地产出 + 滚动清理

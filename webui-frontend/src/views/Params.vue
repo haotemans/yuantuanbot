@@ -49,6 +49,23 @@
               </n-form-item>
             </n-form>
           </n-card>
+
+          <n-card title="消息管线" size="small" style="margin-top: 14px">
+            <n-form label-placement="left" label-width="180">
+              <n-form-item label="单 chat 队列容量">
+                <n-input-number v-model:value="f.pipeline.per_chat_queue_cap" :min="4" :max="512" style="width: 160px" />
+              </n-form-item>
+              <n-form-item label="自发消息 ID 缓存">
+                <n-input-number v-model:value="f.pipeline.self_msg_ids_cap" :min="32" :max="4096" style="width: 160px" />
+              </n-form-item>
+              <n-form-item label="Decision 成本闸初始值">
+                <n-input-number v-model:value="f.pipeline.decision_cost_per_min_init" :min="1" :max="120" style="width: 160px" />
+              </n-form-item>
+            </n-form>
+            <p class="param-hint">
+              Q52 单 chat 洪峰降级阈值（只影响新 worker）· R4「回复我」判定缓存大小 · 成本闸启动值（运行期被「Decision 成本闸」覆盖）。
+            </p>
+          </n-card>
         </n-gi>
 
         <n-gi>
@@ -120,6 +137,11 @@ const f = ref({
     total_budget_ms: 8000, bubble_cap: 3, bubble_char_cap: 500,
   },
   prefilter: { window_secs: 60, self_msg_cap: 12, decision_cost_per_min: 30 },
+  pipeline: {
+    per_chat_queue_cap: 32,
+    self_msg_ids_cap: 512,
+    decision_cost_per_min_init: 30,
+  },
   meme: { steal_enabled: true },
 })
 /** 原始 config 全量（GET 快照，保存时合并回写，避免吞掉 napcat/webui 等面板外的节） */
@@ -135,7 +157,7 @@ onMounted(async () => {
   const { data } = await api.get('/config')
   const c = data.config || {}
   whole.value = c
-  for (const k of ['consolidation', 'context', 'reply', 'prefilter', 'meme']) {
+  for (const k of ['consolidation', 'context', 'reply', 'prefilter', 'pipeline', 'meme']) {
     if (c[k]) f.value[k] = { ...f.value[k], ...c[k] }
   }
   loaded.value = true
@@ -152,6 +174,7 @@ async function save() {
       context: { ...f.value.context },
       reply: { ...f.value.reply },
       prefilter: { ...f.value.prefilter },
+      pipeline: { ...f.value.pipeline },
       meme: { ...f.value.meme },
     }
     const { data } = await api.post('/config', { config })

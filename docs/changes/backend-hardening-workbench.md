@@ -8,8 +8,28 @@
   - Q54 10s 窗口聚合（下一步，依赖本次 Q52/Q53）
   - 监督树 / 优雅停机 SIGTERM（下一轮）
   - Q65 MCP decide 服务（暂缓，继续 OpenAI 兼容）
+- 2026-10-07 二轮 grill（用户反馈「改配置还是 6199」触发 config 边界审计）
 
 ## 已确认裁决（本轮 grill)
+
+### G007 B 类配置（listen_addr/webui host/data dir/MCP servers）生效机制
+- decision: 面板「保存并重启」——config 写回后 SIGTERM 自己，同进程 exec 重启（零中断）
+- rationale: 比热重绑定 listener/webui 子进程简单；比手动重启用户友好
+- affected-code: crates/yuantuan/src/main.rs(SIGTERM handler + exec 重启）, crates/webui/src/config_api.rs（新增 /api/config/restart 端点）, webui-frontend（配置页按钮）
+- status: confirmed
+
+### G008 D 类调优常量提升到 config
+- decision: PER_CHAT_QUEUE_CAP / CostGate 初始值 / SelfMsgIds CAP 三项入 config.toml `[pipeline]` 段，走共享槽热应用
+- rationale: 调优参数不是设计裁决，是实现参数；应可由面板调
+- affected-code: crates/yuantuan/src/config.rs, crates/core/src/bot.rs, crates/core/src/prefilter.rs, crates/core/src/llm.rs, 运行参数页面板 + config_api
+- status: confirmed
+
+### G009 A 类设计裁决常量保持定死
+- decision: Q53 LLM 并发上限 = 4、TASK_BUDGET_MAX_CALLS = 10 保持编译期常量，不暴露
+- rationale: runtime-design 已明确「全局 LLM 请求并发上限固定为 4」/「最多 3 个并发任务预算 10 轮」是设计裁决不是调优参数；要改需新一轮 grill
+- status: confirmed
+
+## 已确认裁决（一轮 grill)
 
 ### G001 dispatcher 范围
 - decision: 先 Q52+Q53 底座，不一次上 Q54
@@ -74,4 +94,50 @@
 - `/image` 回放跳过意味着用户崩溃瞬间的 /image 命令永远丢——裁决如此(G005),media 副作用大且通常用户已重发
 - `replay_pending` 单线程串行回放,大量待处理时启动阻塞;当前场景(本地 dev)消息量小,够用;正式部署前若要优化可 batch 并发,需重新裁决保序边界
 - Q53 的 4 许可固定编译期,未接 [llm] 热应用槽;若需运行时调,新一轮 grill(当前裁决是 runtime-design 已定稿"固定为 4")
+
+---
+
+## 二轮(2026-10-07):B/C/D 类配置边界审计 + G007/G008/G009
+
+### 触发
+用户:「你是不是很多配置都定死了 我修改重启还是6199」。审计发现四类:
+- A 类设计裁决定死(Q53=4,TASK budget=10)——G009 保持
+- B 类 config 有但需重启,UI 没说清——G007 面板一键重启
+- C 类 config 有且热应用——已正常
+- D 类代码定死 config 没暴露——G008 提升到 [pipeline]
+
+### MOD-B04 [pipeline] 新段
+`per_chat_queue_cap=32 / self_msg_ids_cap=512 / decision_cost_per_min_init=30`,默认 config.toml 模板已补
+
+### MOD-B05 热应用槽贯通
+- `SharedPerChatCap` spawn worker 时读(旧 worker 容量定型,新 worker 用新值)
+- `SelfMsgIds::with_cap / set_cap`(set_cap 立刻 truncate 老条目)
+- main.rs 装配 + PipelineDeps 接线 + `[pipeline]` post_config 热应用
+
+### MOD-B06/B07 面板一键重启
+- POST `/api/config/restart` → 202 → 500ms 后 spawn 新进程(带 `YUANTUAN_DELAY_START_MS=1200`)→ exit(0)
+- Platform.vue 加「保存并重启」橙色按钮,3.2s 自动刷新页面
+
+### 意外修复 1:Stdio::inherit broken pipe
+**现象**:第一次 restart,新进程 spawn 后立刻死,没起 listener
+**根因**:`Stdio::inherit()` 继承旧进程的 stdout/stderr 管道 fd,旧进程 exit 后管道 close,新进程第一次 println/tracing write 就 broken pipe panic
+**修复**:Stdio 全 null;代价是新进程 stdout 不进旧终端(诊断走 data/logs/ 或手动重启)
+
+### 意外修复 2:GET /config 脱敏回填丢 token(老坑)
+**现象**:面板拿到 masked `token: "***"`,原样 POST 回去,后端 `fs::write` 覆写整个 config.toml → 真 token 没了
+**修复**:后端 `unmask_in_place`——POST 收到 `***` 值时从磁盘原文件还原真值再写回;前端 Platform.vue 保留掩码字段不删
+**验证**:`grep "^token" config.toml` 在保存前后不变
+
+### 浏览器验证(自动)
+- 保存并重启按钮存在 ✓
+- 改 6199→6299 保存:config.toml 写入 6299 ✓ netstat 6299 LISTENING pid 新 ✓ 6199 释放 ✓
+- 重启后 session 失效(内存 session 表,已知)
+- Token 卡在「已配置」✓
+- 改回 6199 同样工作 ✓
+
+### 验证命令
+- `cargo test --workspace` 19 个 test result: ok 零失败
+- vite build 497ms
+- curl POST /api/config/restart → 202 → 旧 pid → 新 pid 切换
+
 

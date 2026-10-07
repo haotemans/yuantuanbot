@@ -231,6 +231,7 @@ async fn decision_pipeline_end_to_end() {
         memes_dir: temp_dir("pipeline-memes"),
         media_ctx: None,
         skill_registry: None,
+        per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
 
     // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）

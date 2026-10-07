@@ -212,6 +212,7 @@ async fn decision_send_meme_sends_image() {
         memes_dir: memes.clone(),
         media_ctx: None,
         skill_registry: None,
+        per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
 
     // 等 1 次发送

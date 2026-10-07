@@ -84,7 +84,8 @@
         </n-form-item>
       </n-form>
       <n-space>
-        <n-button type="primary" :loading="saving" @click="save">保存连接配置</n-button>
+        <n-button type="primary" :loading="saving" @click="save(false)">保存连接配置</n-button>
+        <n-button type="warning" :loading="saving || restarting" @click="save(true)">保存并重启</n-button>
         <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ msg }}</span>
       </n-space>
     </n-card>
@@ -135,7 +136,7 @@
 
     <n-alert type="info" style="margin-top: 14px">
       Token 改动<strong>立即生效</strong>（下次 NapCat 拨入即用新值）。
-      监听地址改动需<strong>重启后端进程</strong>才能让 axum 重新 bind。
+      监听地址改动需<strong>重启</strong>：点「保存并重启」面板触发后端重启（约 3 秒自动刷新），无需手动 taskkill。
     </n-alert>
   </div>
 </template>
@@ -152,6 +153,7 @@ const hasToken = ref(false)
 /** @type {import('vue').Ref<Record<string, any>>} */
 const whole = ref({})
 const saving = ref(false)
+const restarting = ref(false)
 const msg = ref('')
 const ok = ref(false)
 
@@ -173,14 +175,14 @@ async function loadConfig() {
     token: '',
   }
   hasToken.value = !!(n.token && n.token !== '')
-  if (whole.value.napcat) whole.value.napcat = { ...whole.value.napcat, token: undefined }
+  // 不删 token 字段：保留掩码 "***" 给后端 unmask 还原（用户填新值时会被替换）
 }
 
 async function reload() {
   await Promise.all([loadDashboard(), loadConfig()])
 }
 
-async function save() {
+async function save(andRestart = false) {
   saving.value = true
   msg.value = ''
   try {
@@ -189,18 +191,26 @@ async function save() {
     newNapcat.listen_addr = form.value.listen_addr
     delete newNapcat.ws_url
     if (form.value.token) newNapcat.token = form.value.token
-    else delete newNapcat.token
+    // 用户留空 = 保留 newNapcat.token 原值(掩码 "***",后端 unmask 还原真值)
     const config = { ...whole.value, napcat: newNapcat }
     const { data } = await api.post('/config', { config })
+    whole.value = config
+    form.value.token = ''
     ok.value = true
+    if (andRestart) {
+      restarting.value = true
+      msg.value = '已保存,重启中…(页面会自动刷新)'
+      setTimeout(() => { window.location.reload() }, 3200)
+      try {
+        await api.post('/config/restart')
+      } catch { /* 重启后旧连接会断,请求可能失败属预期 */ }
+      return
+    }
     const restarts = (data.requires_restart || []).filter(r => r.includes('napcat'))
     const parts = []
     if ((data.applied || []).some(a => a.includes('token'))) parts.push('token 已热应用')
     if (restarts.length) parts.push('⚠️ listen_addr 改动需重启后端')
     msg.value = `已保存${parts.length ? '：' + parts.join('，') : ''}`
-    whole.value = config
-    form.value.token = ''
-    if (form.value.token) hasToken.value = true
   } catch (e) {
     ok.value = false
     msg.value = e.response?.data?.error || '保存失败'

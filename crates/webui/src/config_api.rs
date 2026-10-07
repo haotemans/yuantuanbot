@@ -71,6 +71,32 @@ fn masked_providers(v: Value) -> Value {
     masked(v)
 }
 
+/// G-hotfix：面板回填的 "***" 值从磁盘原文件还原真实值
+/// 只处理「值恰为 ***」的叶子字段;递归 table
+fn unmask_in_place(incoming: &mut Value, orig: &Value) {
+    match (incoming, orig) {
+        (Value::Object(new_map), Value::Object(orig_map)) => {
+            for (k, v) in new_map.iter_mut() {
+                if v.as_str() == Some("***") {
+                    if let Some(real) = orig_map.get(k) {
+                        *v = real.clone();
+                    }
+                } else if let Some(orig_v) = orig_map.get(k) {
+                    unmask_in_place(v, orig_v);
+                }
+            }
+        }
+        (Value::Array(new_arr), Value::Array(orig_arr)) => {
+            for (i, v) in new_arr.iter_mut().enumerate() {
+                if let Some(orig_v) = orig_arr.get(i) {
+                    unmask_in_place(v, orig_v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Deserialize)]
 pub struct WriteBody {
     config: Option<Value>,
@@ -86,7 +112,12 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
 
     // config.toml 写回：序列化后必须能解析回原结构；随后逐节热应用（仅对文件中实际存在的节）
     if let Some(cfg) = &body.config {
-        let toml_text = to_toml_text(cfg)?;
+        // G-hotfix：面板 GET /config 返回的是***掩码后的 config,前端原样回填会把真 token 覆写成 "***"。
+        // 规则:任何节里 value == "***" 的字段,从磁盘原文件里还原真值再写回;否则视为用户清空(显式清空应传空字符串)。
+        let mut cfg_clean = cfg.clone();
+        let orig = read_toml_as_json(&state.extras.config_path).unwrap_or_else(|| json!({}));
+        unmask_in_place(&mut cfg_clean, &orig);
+        let toml_text = to_toml_text(&cfg_clean)?;
         let back: toml::Value = toml::from_str(&toml_text)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("config TOML 回读解析失败: {e}") }))))?;
         std::fs::write(&state.extras.config_path, &toml_text)
@@ -134,6 +165,31 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
             if let Some(on) = mm.get("steal_enabled").and_then(|v| v.as_bool()) {
                 *state.extras.steal_slot.write().unwrap() = on;
                 applied.push("meme 偷表情包开关热应用".into());
+            }
+        }
+
+        // [pipeline] → Q52 单 chat 容量 + SelfMsgIds 容量热应用（G008 裁决）
+        if let Some(pp) = back.get("pipeline") {
+            let mut applied_any = false;
+            if let Some(cap) = pp.get("per_chat_queue_cap").and_then(|v| v.as_integer()) {
+                *state.extras.per_chat_cap.write().unwrap() = (cap.max(1)) as usize;
+                applied.push(format!("pipeline.per_chat_queue_cap 热应用为 {cap}(仅影响新 chat worker)"));
+                applied_any = true;
+            }
+            if let Some(cap) = pp.get("self_msg_ids_cap").and_then(|v| v.as_integer()) {
+                state.extras.self_ids.set_cap((cap.max(1)) as usize);
+                applied.push(format!("pipeline.self_msg_ids_cap 热应用为 {cap}"));
+                applied_any = true;
+            }
+            if let Some(cpm) = pp.get("decision_cost_per_min_init").and_then(|v| v.as_integer()) {
+                if let Some(gw) = state.extras.llm_slot.read().unwrap().as_ref() {
+                    gw.set_cost_per_min((cpm.max(1)) as usize);
+                    applied.push(format!("pipeline.decision_cost_per_min_init 热应用为 {cpm}"));
+                    applied_any = true;
+                }
+            }
+            if !applied_any {
+                applied.push("pipeline 段存在但无可热应用字段".into());
             }
         }
 
@@ -269,4 +325,42 @@ fn to_toml_text(v: &Value) -> Result<String, (StatusCode, Json<Value>)> {
 
 fn err(msg: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg })))
+}
+
+/// G007：面板「保存并重启」——spawn 新 yuantuan 进程接管（继承环境变量与 cwd），自己 exit(0)。
+/// 时序：先 202 响应 → 500ms 后 spawn 新进程 → 再 200ms 自己 exit；前端在此期间看到短暂连接中断属预期。
+/// 新进程起来后 NapCat 会自动重连，面板刷新即可。
+pub async fn restart(State(_state): State<AppState>) -> (StatusCode, Json<Value>) {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            return err(&format!("无法获取当前可执行路径: {e}"));
+        }
+    };
+    tokio::spawn(async move {
+        // 先让 HTTP 响应发出去
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tracing::info!(new_exe = %exe.display(), "面板触发重启：spawn 新进程");
+        // 新进程通过 YUANTUAN_DELAY_START_MS 延迟启动，给本进程留出释放端口的时间窗
+        // Stdio 全 null：继承旧进程的 stdout/stderr 会在旧进程退出后变成 broken pipe,
+        // 新进程第一次 println/tracing write 即 panic/exit(观察到的真实故障)。
+        // 代价:重启后终端不再看到新进程输出;诊断走 data/logs/ 文件或手动重启。
+        match std::process::Command::new(&exe)
+            .env("YUANTUAN_DELAY_START_MS", "1200")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                tracing::info!(pid = child.id(), "新进程已拉起（延迟 1200ms 启动），本进程即将退出");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "新进程拉起失败，本进程不退出（保持运行）");
+                return;
+            }
+        }
+        std::process::exit(0);
+    });
+    (StatusCode::ACCEPTED, Json(json!({ "ok": true, "msg": "重启中，500ms 后新进程接管" })))
 }

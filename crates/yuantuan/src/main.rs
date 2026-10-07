@@ -10,6 +10,16 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // G007 面板重启支持：新进程 spawn 时若带此环境变量则先 sleep（给旧进程释放端口的时间窗）
+    if let Ok(ms) = std::env::var("YUANTUAN_DELAY_START_MS") {
+        if let Ok(n) = ms.parse::<u64>() {
+            if n > 0 {
+                // 还没 init tracing（避免 banner 之前就输出），用 eprintln
+                eprintln!("[yuantuan] 延迟启动 {n}ms（面板重启握手）");
+                tokio::time::sleep(std::time::Duration::from_millis(n)).await;
+            }
+        }
+    }
     tracing_subscriber::fmt().with_target(false).init();
     info!("云团骨架启动");
 
@@ -71,7 +81,7 @@ async fn main() -> Result<()> {
     let llm = load_llm_gateway();
 
     // f. adapter-qq（[napcat].enabled=false 则跳过；token 走共享槽让 webui 热应用立刻生效）
-    let self_ids = yuantuan_core::prefilter::SelfMsgIds::default();
+    let self_ids = yuantuan_core::prefilter::SelfMsgIds::with_cap(cfg.pipeline.self_msg_ids_cap);
     let napcat_token_slot = yuantuan_adapter_qq::shared_token(&cfg.napcat.token);
     let adapter = if cfg.napcat.enabled {
         info!(listen_addr = %cfg.napcat.listen_addr, "adapter-qq 启动（反向 WS，等待 NapCat Websockets客户端连入）");
@@ -179,6 +189,16 @@ async fn main() -> Result<()> {
             decision_cost_per_min: cfg.prefilter.decision_cost_per_min,
         },
     ));
+    // G008 调优参数入槽
+    let per_chat_cap_slot: yuantuan_core::bot::SharedPerChatCap =
+        std::sync::Arc::new(std::sync::RwLock::new(cfg.pipeline.per_chat_queue_cap));
+    {
+        let init_cpm = cfg.pipeline.decision_cost_per_min_init.max(1);
+        if let Some(gw) = llm_slot.read().unwrap().as_ref() {
+            gw.set_cost_per_min(init_cpm);
+        }
+        // self_ids 已在 line 74 with_cap 构造完毕，这里不再重复 set_cap
+    }
     let self_qq = adapter
         .as_ref()
         .map(|h| h.self_qq_shared())
@@ -188,7 +208,7 @@ async fn main() -> Result<()> {
         db_path: db_path.clone(),
         llm: llm_slot.clone(),
         self_qq: self_qq.clone(),
-        self_ids,
+        self_ids: self_ids.clone(),
         mood: mood.clone(),
         prefilter: prefilter_slot.clone(),
         reply: Some(reply_engine.clone()),
@@ -213,6 +233,7 @@ async fn main() -> Result<()> {
             llm: llm_slot.clone(),
         }),
         skill_registry: Some(skill_registry.clone()),
+        per_chat_cap: per_chat_cap_slot.clone(),
     };
 
     // h''. Q55 恢复消费：把上次进程退出前来不及处理的 messages 回放进管线
@@ -347,6 +368,8 @@ async fn main() -> Result<()> {
         tools_registry: tools_registry.clone(),
         skill_registry: skill_registry.clone(),
         mcp_manager: Some(mcp_manager.clone()),
+        per_chat_cap: per_chat_cap_slot.clone(),
+        self_ids: self_ids.clone(),
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };

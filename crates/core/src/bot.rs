@@ -43,13 +43,17 @@ pub struct PipelineDeps {
     pub media_ctx: Option<crate::tools::media::command::MediaCtx>,
     /// Skill 注册表（Q-S02 Decision 自-driven 调用 Skill）；None 时 Decision 不提供 invoke_skill 选项
     pub skill_registry: Option<crate::skills::SkillRegistry>,
+    /// Q52 per-chat mpsc 容量热应用槽（G008）；新 worker spawn 时读
+    pub per_chat_cap: SharedPerChatCap,
 }
 
 /// Q52：按 chat 隔离的 dispatcher + worker 拓扑——
 /// dispatcher 订阅 broadcast，按 chat_id 派发到 per-chat mpsc；
 /// 每 chat 一个 worker 协程串行 handle（保序）；不同 chat 并发，互不堵塞。
-/// mpsc 容量 32：单 chat 瞬时洪峰超过则降级为同步 handle（保底不丢，仅阻塞 dispatcher 一拍）。
-const PER_CHAT_QUEUE_CAP: usize = 32;
+/// mpsc 容量来自共享槽（[pipeline].per_chat_queue_cap，默认 32，G008 热应用）；
+/// 单 chat 瞬时洪峰超过则降级为同步 handle（保底不丢，仅阻塞 dispatcher 一拍）。
+/// 热应用语义：改槽不影响已 spawn 的 worker（容量在 spawn 时定型），只影响新 worker。
+pub type SharedPerChatCap = Arc<RwLock<usize>>;
 
 /// Q55：扫描 messages 表中 processed_at IS NULL 的非 self 消息，按 ts 升序回放给 handle。
 /// 在 spawn_pipeline 之前调用；返回回放条数。
@@ -129,15 +133,17 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
                     let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
+                        // G008 热应用：新 worker 读槽当前值；旧 worker 容量定型不受影响
+                        let cap = *deps.per_chat_cap.read().unwrap();
                         let (tx, mut lane_rx) =
-                            tokio::sync::mpsc::channel::<MessageReceivedPayload>(PER_CHAT_QUEUE_CAP);
+                            tokio::sync::mpsc::channel::<MessageReceivedPayload>(cap.max(1));
                         let deps2 = Arc::clone(&deps);
                         let chat = m.chat_id.clone();
                         tokio::spawn(async move {
                             while let Some(mm) = lane_rx.recv().await {
                                 handle(&deps2, &mm).await;
                             }
-                            debug!(chat_id = %chat, "chat worker 退出（dispatcher 关闭）");
+                            debug!(chat_id = %chat, "chat worker 退出(dispatcher 关闭)");
                         });
                         tx
                     });
@@ -533,6 +539,7 @@ mod tests {
             memes_dir: std::path::PathBuf::from("data/memes"),
             media_ctx: None,
             skill_registry: None,
+            per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
         };
 
         let n = replay_pending(&deps).await.unwrap();

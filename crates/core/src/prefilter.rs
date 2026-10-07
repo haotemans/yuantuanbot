@@ -31,17 +31,45 @@ impl Default for Config {
 /// 自身已发消息的 NapCat message_id 集合（内存环形，容量 512）。
 /// R4「回复/引用我的消息」判定原料。TODO：随发送链路落地时在发送侧持久化该映射，
 /// 进程重启后重启前自己消息的引用回复将不被 R4 命中（降级为正常节流路径）。
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SelfMsgIds {
     inner: Arc<Mutex<VecDeque<i64>>>,
+    cap: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Default for SelfMsgIds {
+    fn default() -> Self {
+        Self::with_cap(512)
+    }
 }
 
 impl SelfMsgIds {
-    const CAP: usize = 512;
+    pub fn with_cap(cap: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(VecDeque::new())),
+            cap: Arc::new(std::sync::atomic::AtomicUsize::new(cap.max(1))),
+        }
+    }
+
+    /// G008 热应用：运行期调整容量（即刻生效，旧条目按新容量收敛）
+    pub fn set_cap(&self, cap: usize) {
+        let new = cap.max(1);
+        self.cap
+            .store(new, std::sync::atomic::Ordering::Relaxed);
+        let mut q = self.inner.lock().unwrap();
+        while q.len() > new {
+            q.pop_front();
+        }
+    }
+
+    pub fn cap(&self) -> usize {
+        self.cap.load(std::sync::atomic::Ordering::Relaxed)
+    }
 
     pub fn record(&self, msg_id: i64) {
+        let cap = self.cap();
         let mut q = self.inner.lock().unwrap();
-        if q.len() >= Self::CAP {
+        while q.len() >= cap {
             q.pop_front();
         }
         q.push_back(msg_id);
