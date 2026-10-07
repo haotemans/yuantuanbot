@@ -1,0 +1,72 @@
+name: yuantuan
+
+# yuantuan + napcat 同 compose 内网
+# 端口开放策略:
+#   - 8085 / 3001 / 6099 一律 127.0.0.1 绑定 → 用户走 SSH 隧道访问
+#   - 6199 不暴露公网,只在 yuantuan-net 内网给 napcat 拨入
+# G007 修正:restart: unless-stopped → docker 守护接管进程拉活,
+#           面板「保存并重启」按钮在容器内被禁用(后端检测 /.dockerenv)
+
+services:
+  yuantuan:
+    image: yuantuan:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: yuantuan
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - yuantuan-data:/app/data
+      - ./yuantuan-config.toml:/app/config.toml:ro
+      - ./yuantuan-providers.toml:/app/providers.toml:ro
+    ports:
+      - "127.0.0.1:8085:8085"    # 面板,仅 SSH 隧道
+    expose:
+      - "6199"                    # 内网给 napcat 拨
+    networks:
+      - yuantuan-net
+    depends_on: []
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "http://127.0.0.1:8085/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: unless-stopped
+    environment:
+      - NAPCAT_UID=10001
+      - NAPCAT_GID=10001
+    volumes:
+      - napcat-qq:/app/napcat/config
+      - napcat-cache:/app/.config/QQ
+    ports:
+      - "127.0.0.1:3001:3001"    # NapCat WebUI,仅 SSH 隧道
+      - "127.0.0.1:6099:6099"    # NapCat HTTP API,仅 SSH 隧道(备用)
+    networks:
+      - yuantuan-net
+    depends_on:
+      - yuantuan
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  yuantuan-net:
+    driver: bridge
+
+volumes:
+  yuantuan-data:
+  napcat-qq:
+  napcat-cache:

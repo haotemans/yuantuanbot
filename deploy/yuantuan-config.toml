@@ -1,0 +1,37 @@
+# yuantuan 服务器配置文件 —— 部署在 deploy/ 下,挂到容器 /app/config.toml
+# 与本地版区别:
+#   listen_addr / webui host 从 127.0.0.1 改为 0.0.0.0(容器对外暴露需要)
+#   容器外仍只绑 127.0.0.1:8085,公网不可达,SSH 隧道访问
+
+[consolidation]
+daily_time = "03:00"
+enabled = true
+run_on_startup = false
+
+[data]
+dir = "data"
+
+[log]
+level = "info"
+
+[meme]
+steal_enabled = true
+
+[napcat]
+enabled = true
+listen_addr = "0.0.0.0:6199"
+# ⚠ 生产部署时替换;保留与 NapCat WebUI 中配置一致
+token = "REPLACE_WITH_STRONG_TOKEN"
+
+[pipeline]
+decision_cost_per_min_init = 30
+per_chat_queue_cap = 32
+self_msg_ids_cap = 512
+
+[prefilter]
+self_msg_cap = 12
+window_secs = 60
+
+[webui]
+host = "0.0.0.0"
+port = 8085

@@ -200,10 +200,21 @@ async function save(andRestart = false) {
     if (andRestart) {
       restarting.value = true
       msg.value = '已保存,重启中…(页面会自动刷新)'
-      setTimeout(() => { window.location.reload() }, 3200)
+      const reloadTimer = setTimeout(() => { window.location.reload() }, 3200)
       try {
         await api.post('/config/restart')
-      } catch { /* 重启后旧连接会断,请求可能失败属预期 */ }
+      } catch (err) {
+        // 容器内返回 409:改提示「宿主机 docker compose restart」并取消自动刷新
+        if (err.response?.status === 409) {
+          clearTimeout(reloadTimer)
+          restarting.value = false
+          ok.value = false
+          msg.value = err.response?.data?.error || '容器内请用 docker compose restart'
+          saving.value = false
+          return
+        }
+        /* 其他场景:重启后旧连接断开请求失败属预期 */
+      }
       return
     }
     const restarts = (data.requires_restart || []).filter(r => r.includes('napcat'))

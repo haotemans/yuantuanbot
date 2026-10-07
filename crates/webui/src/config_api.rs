@@ -331,6 +331,18 @@ fn err(msg: &str) -> (StatusCode, Json<Value>) {
 /// 时序：先 202 响应 → 500ms 后 spawn 新进程 → 再 200ms 自己 exit；前端在此期间看到短暂连接中断属预期。
 /// 新进程起来后 NapCat 会自动重连，面板刷新即可。
 pub async fn restart(State(_state): State<AppState>) -> (StatusCode, Json<Value>) {
+    // 容器内不自拉 — `spawn+exit(0)` 后容器主进程终止,docker restart policy 会拉起新容器,
+    // 但若用户需要重启,正确做法是宿主机 `docker compose restart`,而非容器内自杀。
+    // 返回 409 + 提示,前端按钮禁用并显示引导文案。
+    if std::path::Path::new("/.dockerenv").exists() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "当前运行在容器内,无内重启语义。请在宿主机执行: cd deploy && docker compose restart"
+            })),
+        );
+    }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {

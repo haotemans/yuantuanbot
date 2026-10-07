@@ -1,0 +1,17 @@
+# yuantuan providers.toml —— 服务器模板,挂到容器 /app/providers.toml
+# ⚠ 部署时在 165 上替换实际 API key 后再启动
+# 三角色独立绑定同一个 OpenAI 兼容 provider 也行
+
+[provider]
+
+[roles]
+
+# 示例(填入实际 key 后取消注释):
+# [provider.deepseek]
+# base_url = "https://api.deepseek.com/v1"
+# api_key  = "sk-xxxxxxxx"
+#
+# [roles]
+# decision   = { provider = "deepseek", model = "deepseek-chat" }
+# bot_chat   = { provider = "deepseek", model = "deepseek-chat" }
+# agent_exec = { provider = "deepseek", model = "deepseek-reasoner" }

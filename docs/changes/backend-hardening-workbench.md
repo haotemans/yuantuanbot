@@ -220,4 +220,97 @@ INFO WebUI 开始监听 addr=127.0.0.1:8085
 - **Q2(原 G007 副作用)**:服务器环境(systemd/docker)下 `spawn+exit(0)` 不会拉起新进程,一键重启在服务器上会「自杀」。需要 grill:服务器部署形态 + 是否需要额外守护
 - Q54 10s 窗口聚合:为本管线设计的最后一块,Supervisor 稳定后启动
 
+---
+
+## 四轮(2026-10-08):Docker 部署 + G007 重写(Q2 frontier 收口)
+
+### 触发
+用户:「用什么部署好呢」→ 侦察两台 VPS:
+
+**panel(23.148.244.64)实测**:
+- Debian 12,469MB 总/176MB 可用,磁盘 7.7G 剩 4G,**docker 未装**
+- 已跑:new-api(:3000)、xray(:443)、cli-proxy-api、caddy、python×2
+- 装 1Panel+Docker 会撑爆
+
+**165(165.154.182.21)实测**:
+- Ubuntu 24.04 x86_64,**3.8G 内存/2.8G 可用**,磁盘 77G 剩 52G,2 核
+- **docker 已装好**(/usr/bin/docker)
+- 已跑:new-api、sub2api、cliproxy、postgres、redis(占用仅 1.0G)
+- 端口:80/3000/8080/8317/6379(内)/5432(内)/22 占用;**8085/6199/3001/6099 全空** ✓
+
+### 裁决
+
+**G013 部署形态**:165 当主战场,docker 但不装 1Panel(用户明确反对)
+- compose 双容器:yuantuan + napcat(`mlikiowa/napcat-docker:latest`),内网 yuantuan-net
+- 端口策略:**8085/3001/6099 只绑 127.0.0.1**(SSH 隧道访问);**6199 仅 expose 给内网 napcat**(不映射到宿主)
+- 云安全组:用户**无需开任何入站端口**给 yuantuan(SSH 22 已通;NapCat 同 compose 拨容器内网 6199)
+
+**G014 G007 重写**:容器内禁重启按钮
+- 后端 `/api/config/restart` 检测 `/.dockerenv` 存在 → 返回 `409 Conflict` + 提示「宿主机 `docker compose restart`」
+- 前端 Platform.vue「保存并重启」按钮在 409 时:
+  - `clearTimeout(reloadTimer)` 取消自动刷新
+  - 按钮 loading 关掉,显示后端提示文案
+- 裸机/Windows dev 场景保持原行为(spawn+exit 链路不变)
+- `restart: unless-stopped` 配合容器退出码语义 → 取代 spawn 自拉,docker 守护掌管
+
+**G015「保存并重启」在容器内的语义切换**:由「面板直接触发热重启」改为「面板提示用户在 SSH 跑 docker compose restart」。这是必要的退化——容器内 exit 等效自杀;`docker compose restart` 是 docker 守护做的干净重启。
+
+### MOD-B12 部署文件
+新增:
+- `Dockerfile` multi-stage:`rust:1.83-bookworm` builder → `debian:bookworm-slim` runtime
+  - cargo-chef 风格缓存层(先 copy manifest 跑 cargo fetch)
+  - 非 root `yuantuan:10001` 跑
+  - 无任何 libssl 依赖(全 workspace 用 rustls)
+  - EXPOSE 8085 6199
+- `.dockerignore`:target/node_modules/data/.git/docs 全剔
+- `deploy/compose.yml`:yuantuan(build→image `yuantuan:local`)+ napcat(mlikiowa 镜像)
+- `deploy/yuantuan-config.toml`:listen `0.0.0.0`(容器语义;宿主仅 127.0.0.1:8085 映射)
+- `deploy/yuantuan-providers.toml`:模板占位,部署时填实际 key
+
+数据挂载:
+- `yuantuan-data` volume → `/app/data`(SQLite + memes + logs)
+- `./yuantuan-config.toml` → `/app/config.toml` (ro)
+- `./yuantuan-providers.toml` → `/app/providers.toml` (ro)
+
+### MOD-B13 G007 代码改
+- `crates/webui/src/config_api.rs::restart` 头部加 `/.dockerenv` 检测返 409
+- `webui-frontend/src/views/Platform.vue` 409 catch:`clearTimeout(reloadTimer)` + 提示
+- 顺带修了一个 bug:原版 `setTimeout` 没保存 id,catch 里 `clearTimeout` 是裸标识符(no-op)
+
+### 验证命令
+- 本地 `cargo build -p yuantuan` ✓
+- 本地 `cargo test --workspace` 19 个 test result: ok 零 FAILED ✓(restart API 改动不影响其他测试)
+- 本地 `vite build` 544ms ✓
+- 165 服务器 `docker compose -f deploy/compose.yml build yuantuan`:
+  **第一次失败**:`rust:1.83` cargo 不支持 `edition2024`(hashbrown 0.17.1 要求)→ 改 `rust:1.92-bookworm` 重试
+
+### 踩坑 1: rust 镜像 tag 兜底
+**现象**:build 第 9 步 `cargo fetch` 失败 `feature edition2024 is required`
+**根因**:workspace 锁定 Cargo.lock 后 hashbrown 之类的 transitive dep 已用 2024 edition,而 `rust:1.83-bookworm` 的 cargo 1.83 不识别
+**修复**:Dockerfile FROM rust:1.83 → rust:1.92(跟本机 rustc 1.92.0 对齐)
+**教训**:锁镜像 tag 时以「当前本机能编过」为最低版本,不要靠经验猜
+
+### 踩坑 2: 如何避免 ssh 挂死
+**现象**:`docker compose build` 在后台 `( ... & )` + 输出重定向 nohup,但 ssh 不返回
+**根因**:stdout/stderr 已重定向但 stdin 没关,ssh 等 stdin EOF
+**修复**:加 `< /dev/null` 关 stdin;或 `ssh -f`(force background);或 `-n` 不重定向 stdin(跟 `< /dev/null` 等价)
+
+### SSH 隧道使用方式(部署完后用户操作)
+```powershell
+# 一条隧道同时看 yuantuan + napcat 面板
+ssh -L 8085:127.0.0.1:8085 -L 3001:127.0.0.1:3001 -L 6099:127.0.0.1:6099 ubuntu@165.154.182.21
+
+# 本地浏览器:
+#   http://127.0.0.1:8085/  → yuantuan 运维面板
+#   http://127.0.0.1:3001/  → NapCat WebUI(首次登录拿 token)
+#   http://127.0.0.1:6099/  → NapCat HTTP API(备)
+```
+
+### 遗留(下轮)
+- G007 spawn+exit 链路在 Windows dev 仍在用,**不动**;服务器场景切换为「用户 SSH 触发」
+- providers.toml 需要用户填实际 API key 才能跑决策/agent 链路
+- NapCat 容器首次启动要扫码登录 QQ(走 NapCat WebUI :3001)
+- 决策数据持久化:重启 NapCat 容器需要 QQ 会话保持 → `napcat-qq` volume(SQLite)解决
+- yuantuan G007 服务器语义将来的简化:若长期稳定,可考虑把 spawn+exit 链路也删掉,统一提示
+
 
