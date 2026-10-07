@@ -2435,6 +2435,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "serde_json",
+ "tokio",
+ "tracing",
  "yuantuan-core",
 ]
 

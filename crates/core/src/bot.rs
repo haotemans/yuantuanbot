@@ -41,6 +41,8 @@ pub struct PipelineDeps {
     pub memes_dir: PathBuf,
     /// 媒体命令上下文（MOD-022e /image 直派）；None 时命令忽略走原 Decision 管线
     pub media_ctx: Option<crate::tools::media::command::MediaCtx>,
+    /// Skill 注册表（Q-S02 Decision 自-driven 调用 Skill）；None 时 Decision 不提供 invoke_skill 选项
+    pub skill_registry: Option<crate::skills::SkillRegistry>,
 }
 
 /// 订阅 Event Bus 的 Decision 管线；主动插话与被动回复走同一条管线
@@ -106,7 +108,126 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
             };
             // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
             gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
-            let outcome = decision::decide(&deps.db_path, &gw, &deps.bus, &deps.mood, m).await;
+            let outcome = decision::decide(
+                &deps.db_path,
+                &gw,
+                &deps.bus,
+                &deps.mood,
+                m,
+                deps.skill_registry.as_ref(),
+            )
+            .await;
+
+            // action=invoke_skill：Skill 执行（Q-S02）。Skill 内部默认渲染模板；
+            // 插件可以 override invoke 自己调 chat LLM。Skill 输出经 bot_chat Bubbleizer 发送。
+            if outcome.output.action == DecisionAction::InvokeSkill {
+                let skill_name = outcome
+                    .output
+                    .skill_name
+                    .clone()
+                    .unwrap_or_default();
+                let reg = match deps.skill_registry.as_ref() {
+                    Some(r) => r,
+                    None => {
+                        warn!(chat_id = %m.chat_id, skill = %skill_name, "SkillRegistry 未注入，invoke_skill 跳过");
+                        return;
+                    }
+                };
+                let skill = match reg.get(&skill_name) {
+                    Some(s) => s,
+                    None => {
+                        warn!(chat_id = %m.chat_id, skill = %skill_name, "invoke_skill 所选 Skill 未注册（decision 已过滤，理论上到不了这）");
+                        return;
+                    }
+                };
+                let engine = match deps.reply.as_ref() {
+                    Some(e) => e,
+                    None => {
+                        debug!(chat_id = %m.chat_id, "回复引擎未接入，invoke_skill 跳过");
+                        return;
+                    }
+                };
+                let (chat_type, target) = match reply_engine_route(m) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(error = %e, chat_id = %m.chat_id, "invoke_skill 路由失败");
+                        return;
+                    }
+                };
+                let ctx = crate::tools::ToolCtx {
+                    chat_id: m.chat_id.clone(),
+                    chat_type: m.chat_type.clone(),
+                    sender_pid: m.sender_pid.clone(),
+                    locale: Some("zh-CN".into()),
+                };
+                let mut slots = outcome
+                    .output
+                    .skill_slots
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                // 把消息文本保底塞进 user_text 槽（Skill 模板最常用槽位）
+                if slots.get("user_text").is_none() {
+                    slots["user_text"] = serde_json::Value::String(m.text.clone());
+                }
+                // 把 sender 名字等拼进 context 槽
+                if slots.get("context").is_none() {
+                    slots["context"] = serde_json::json!(format!(
+                        "chat_id={} sender={} chat_type={}",
+                        m.chat_id, m.sender_pid, m.chat_type
+                    ));
+                }
+                match skill.invoke(&ctx, slots).await {
+                    Ok(out) => {
+                        info!(
+                            chat_id = %m.chat_id,
+                            skill = %skill_name,
+                            summary = %out.summary,
+                            "invoke_skill 执行完成"
+                        );
+                        // Skill 的 rendered 内容按普通回复发出（走 bot_chat 再走 Bubbleizer）
+                        // Phase 2 简化：直接发送 out.data.rendered，不再让 bot_chat 二次包装；
+                        // RoleHint 与 persona 化后续由 Bot Chat 自身处理
+                        let rendered = out
+                            .data
+                            .get("rendered")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| out.summary.clone());
+                        // Skill 输出包成单 Bubble（无 at/无 meme），走 Bubbles 路径享受打字延时与作废核对
+                        engine.enqueue(reply_engine::ReplyJob {
+                            chat_id: m.chat_id.clone(),
+                            chat_type,
+                            target,
+                            anchor_msg_id: 0,
+                            mention: false,
+                            mention_qq: None,
+                            kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
+                                text: rendered,
+                                at: false,
+                                meme: None,
+                            }]),
+                        });
+                        deps.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                            chat_id: m.chat_id.clone(),
+                            bubble_index: 0,
+                            total: 1,
+                            ok: true,
+                            note: Some(format!("skill {} 调用完成", skill_name)),
+                        }));
+                    }
+                    Err(e) => {
+                        warn!(chat_id = %m.chat_id, skill = %skill_name, error = %e, "invoke_skill 执行失败");
+                        deps.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                            chat_id: m.chat_id.clone(),
+                            bubble_index: 0,
+                            total: 0,
+                            ok: false,
+                            note: Some(format!("skill {skill_name} 失败: {e}")),
+                        }));
+                    }
+                }
+                return;
+            }
             if outcome.output.action == DecisionAction::SendMeme {
                 // send_meme：抽图→发送队列（直接发图，与普通回复同队列保序）；库空记事件不吵
                 let cat = outcome

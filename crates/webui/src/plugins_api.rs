@@ -109,6 +109,7 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
     let dir = plugins_dir_from_state(&state);
     let plugins = scan_plugins(&dir);
     let loaded = state.extras.tools_registry.names();
+    let skill_catalog = state.extras.skill_registry.describe_for_decision();
     Json(json!({
         "ok": true,
         "plugins": plugins.iter().map(|p| {
@@ -117,8 +118,24 @@ pub async fn list(State(state): State<AppState>) -> Json<Value> {
             if let Some(obj) = j.as_object_mut() {
                 let is_loaded = loaded.iter().any(|n| *n == p.name.as_str());
                 obj.insert("loaded".into(), json!(is_loaded));
+                // 已加载插件的 Skills 列表（Phase 2）。当前从全局 SkillRegistry 取，
+                // 之后多插件时代才需要做到"按插件区分 skill 归属"
+                if is_loaded {
+                    let skills: Vec<Value> = skill_catalog.iter().map(|(n, d)| {
+                        json!({ "name": n, "description": d })
+                    }).collect();
+                    obj.insert("skills".into(), json!(skills));
+                    let tools: Vec<Value> = loaded.iter().map(|t| {
+                        json!({ "name": t })
+                    }).collect();
+                    obj.insert("tools".into(), json!(tools));
+                }
             }
             j
+        }).collect::<Vec<_>>(),
+        // 全局 Skill 目录：Decision prompt 注入的也是这份
+        "skill_catalog": skill_catalog.iter().map(|(n, d)| {
+            json!({ "name": n, "description": d })
         }).collect::<Vec<_>>(),
     }))
 }

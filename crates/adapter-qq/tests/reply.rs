@@ -281,6 +281,7 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("reply-memes"),
         media_ctx: None,
+        skill_registry: None,
     });
     Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }
 }

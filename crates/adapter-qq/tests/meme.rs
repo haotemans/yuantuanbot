@@ -211,6 +211,7 @@ async fn decision_send_meme_sends_image() {
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: memes.clone(),
         media_ctx: None,
+        skill_registry: None,
     });
 
     // 等 1 次发送

@@ -1,10 +1,10 @@
 # Plugins 插件层 Workbench
 
 ## 状态
-- status: decided（裁决全 confirmed，进入分期实现）
+- status: verifying（Phase 2 Skills 抽象 completed + Phase 3 MCP stdio client core + 面板 completed，待群里端到端验证 /Decision 在群里选定 invoke_skill）
 - owner: hsb + kimi
-- last-grill: 2026-10-06
-- frontier: 分期拆分
+- last-grill: 2026-10-07
+- frontier: 群里真人发"帮我整理一下"看 Decision 是否返回 invoke_skill；Phase 4 备份范围扩大待定
 
 ## 已确认裁决
 
@@ -61,19 +61,88 @@
 - [ ] MOD-P06 面板后端 /api/plugins/list + /api/plugins/set_enabled
 - [ ] MOD-P07 文档：docs/modules/plugins.md 插件开发指南
 
-### Phase 2: Skills 抽象（下一期）
-- [ ] 定义 Skill = 预定义提示词模板 + LLM role，跟 Tool 一起被 Decision 调用
-- [ ] plugins/<name>/ 可同时提供多 Skill（声明式 YAML/TOML）
-- [ ] Skills.vue 面板（同 Plugins 模板）
+### Phase 2: Skills 抽象（本期，2026-10-07）
 
-### Phase 3: MCP 客户端（再下一期）
-- [ ] 实现 MCP client（stdio），yuantuan 调外部 MCP server
-- [ ] plugins/<name>/mcp-server/ 目录的 binary 被识别并 spawn
-- [ ] MCPs.vue 面板
+**本期裁决（Q-S01/S02/S03/S04，全 confirmed）**
 
-### Phase 4: 备份范围扩大
+| Q | 裁决 | 理由 |
+|---|---|---|
+| Q-S01 Skill 形态 | **Rust 代码 trait**（非 Markdown） | crates/core/src/skills.rs 定义 Skill trait；插件可用 Rust 代码挂钩子，能带状态 |
+| Q-S02 Skill 调用 | **Decision 模型自-driven** | Decision JSON 加 `action=invoke_skill + skill_name + slots`；小脑权衡是否触发 |
+| Q-S03 长文何时用 Skill | Decision 根据消息语义（"会议纪要"、"翻译"等关键词）匹配 Skill.description | 不做 vector search，先靠 description 字符串匹配 |
+| Q-S04 Skill 返回 | Skill 返回 `ToolOutput`（复用）；由 Bot 决定怎么发 | 避免再发明一套输出协议 |
+
+**工程任务**
+
+- [x] MOD-S01 `crates/core/src/skills.rs`：Skill trait + SkillDef + SkillRegistry（9 单测通过）
+- [x] MOD-S02 `crates/core/src/decision.rs`：DecisionAction::InvokeSkill + skill_name + skill_slots + build_system_prompt(catalog)；Decision 选未知 skill 自动退 reply
+- [x] MOD-S03 `crates/core/src/bot.rs`：识别 invoke_skill → 查 SkillRegistry → skill.invoke(ctx, slots) → 渲染结果包 Bubble 走 reply_engine 队列
+- [x] MOD-S04 示范 skill：`plugins/hello/` 提供 `meeting_notes` + `translate_zh_en`；内置 `llm_assisted_invoke`：LLM_SLOT 装配则 BotChat 加工，未装配则退为模板渲染（向下兼容）
+- [x] MOD-S05 Plugins.vue 显示 skills（chip + 描述）；/api/plugins/list 返回 skills + tools + skill_catalog
+- [x] MOD-S06 main.rs 装配顺序：plugin load → LlmGateway → yuantuan_plugin_hello::set_llm(gw) → PipelineDeps.skill_registry；Extras.skill_registry 暴露给 webui
+- [x] TEST-S01 单测（parse_decision invoke_skill + missing fields）+ 集成（assemble_then_decide_then_invoke 走完整 4 步链路）全部通过
+
+**公开接口、不变量**
+
+```rust
+pub struct SkillDef {
+    pub name: &'static str,         // "meeting_notes"
+    pub description: &'static str,  // 中文一句：注入 Decision prompt，让模型知道何时用
+    pub prompt_template: String,    // {user_text} {context} 槽
+    pub tools: Vec<&'static str>,   // 可选联动 Tool 名
+    pub role_hint: Option<&'static str>, // 提示注入 chat role 的 system；默认 None
+}
+
+#[async_trait]
+pub trait Skill: Send + Sync {
+    fn def(&self) -> SkillDef;
+    /// Bot 调用，把 Decision 裁决的 slots 填进 prompt_template，调 chat LLM
+    async fn invoke(&self, ctx: &ToolCtx, slots: Value) -> Result<ToolOutput>;
+}
+
+pub struct SkillRegistry { /* 类似 tools::Registry，RwLock<HashMap> */ }
+```
+
+**Decision 侧改动**（关键 import:MOD-S02）
+```json
+{
+  "action": "invoke_skill",
+  "skill_name": "meeting_notes",
+  "skill_slots": { "user_text": "..." },
+  ...其余字段同前
+}
+```
+
+### Phase 3: MCP stdio client（本期 completed）
+
+**裁决（Q-M01 confirmed）**：stdio client 调外部 MCP server。配置在 panel 填 `command + args + env`；yuantuan 启动时 spawn 子进程 + JSON-RPC over stdio（Content-Length 头 + JSON frame）。插件 crates 只写"配置评分器"不内嵌 server binary。
+
+**工程任务**
+
+- [x] MOD-M01 `crates/core/src/mcp.rs`：McpServerConfig + McpConfig + McpClient（spawn + initialize handshake + notifications/initialized + tools/list + tools/call）；Content-Length 帧 read_loop 后台任务；pending oneshot 表
+- [x] MOD-M02 `crates/webui/src/mcp_api.rs`：GET /api/mcp/list（合并磁盘 cfg + 运行时 clients）；POST /api/mcp/save（整体回写 config.toml 的 [mcp] 段，先备份 .bak）；POST /api/mcp/call（debug 直通）
+- [x] MOD-M03 McpToolAdapter：每个 server.tools[i] 暴露为本地 Tool（stable_name = `mcp:<server>:<tool>`）；Decision/Skill 看到的还是统一 Tool，MCP 细节封装在 adapter 里（isError=true 时作为 Err 上抛）
+- [x] MOD-M04 main.rs 装配：McpManager::spawn_all → 失败 warn 不阻塞；register_tools 注入 ToolRegistry；Extras.mcp_manager 暴露给 webui
+- [x] MOD-M05 `webui-frontend/src/views/Mcp.vue`：server 列表卡片（name/command/args/env 编辑 + enabled 开关 + tools 展示）+ 新增/删除 + 保存全部按钮（dirty 状态突出）
+- [x] 集成测试：4 单测（config roundtrip / default_enabled / summarize text/non-text）全过；浏览器后端连通验证通过（保存链路写回 config.toml OK）
+
+### Phase 4: 备份范围扩大（下一期）
 - [ ] backup.rs 动态扫描 data/plugins/*/ → 加入 tar（替换硬编码 "plugins" 占位）
 - [ ] 集成测试
+
+### Phase 5: Skills ↔ MCP 联动（待 grill）
+- [ ] SkillDef.tools 字段当前只是声明，未被 invoke 链路自动调用；Phase 5 再 grill 是否要做"Skill 执行完后自动 chain 调声明的 tools"
+- [ ] chain_with_tools helper 已预留（skills.rs 末尾）
+
+## 代码反馈
+
+### 2026-10-07 装配时发现的事
+- **plugins/hello 的 Skills 想调 LLM 但 Skill trait 不该依赖 LlmGateway**：通过 OnceLock + set_llm() 后置注入解耦；Skill trait 本身保持纯净（只返回 SkillDef + accept slots）。LLM 未装配时退化为模板渲染。
+- **Decision 返回 invoke_skill 但 skill 不存在时**：决策侧 defer 失败 = 自动 fallback 到 reply + reason 注解；避免黑盒。
+- **Skill 输出 → 发送链路**：包 Bubble 走 reply_engine.JobKind::Bubbles，享受打字延时与作废核对，而不是裸调 send_fn。**铁律不破**：core 不碰协议端。
+- **MCP spawn_and_init tools 字段**：初版用 Vec 不可变导致无法 handshake 后填充；改 RwLock<Vec<...>> 就顺了。
+- **MCP stdio 在 Windows**：需要 CREATE_NO_WINDOW 标志避免 npx 弹黑窗；但不用 use std::os::windows::process::CommandExt（tokio::process::Command 自己也暴露 .creation_flags()）。
+- **WeUI Extras.mcp_manager 是 Option<Arc<...>>**：测试 for_test 给 None，生产 Some；调用方需 None-check。
 
 ## 代码反馈
 

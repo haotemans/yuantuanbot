@@ -287,7 +287,7 @@ onUnmounted(() => { clearInterval(timer); off && off() })
   color: var(--yt-ink-1);
   line-height: 1;
 }
-.stat-num.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* .mono, .stat-num 已由 styles.css 全局提供 */
 .stat-hint {
   margin-top: 6px;
   font-size: 11.5px;
@@ -300,8 +300,6 @@ onUnmounted(() => { clearInterval(timer); off && off() })
   border-radius: 3px;
   font-size: 11px;
 }
-
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .form-hint {
   margin-left: 10px;
   font-size: 12px;

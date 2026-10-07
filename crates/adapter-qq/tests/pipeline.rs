@@ -230,6 +230,7 @@ async fn decision_pipeline_end_to_end() {
         ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
         memes_dir: temp_dir("pipeline-memes"),
         media_ctx: None,
+        skill_registry: None,
     });
 
     // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）

@@ -18,6 +18,7 @@ pub struct Config {
     pub log: LogConfig,
     pub media: MediaSection,
     pub backup: yuantuan_core::backup::BackupCfg,
+    pub mcp: yuantuan_core::mcp::McpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +65,7 @@ impl Default for Config {
             log: LogConfig::default(),
             media: MediaSection::default(),
             backup: yuantuan_core::backup::BackupCfg::default(),
+            mcp: yuantuan_core::mcp::McpConfig::default(),
         }
     }
 }

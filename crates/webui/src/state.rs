@@ -35,6 +35,10 @@ pub struct Extras {
     pub backup_cfg: yuantuan_core::backup::SharedBackupCfg,
     /// 工具注册表（Plugins 面板列出哪些插件被实际加载）
     pub tools_registry: yuantuan_core::tools::Registry,
+    /// Skill 注册表（Plugins 面板列出每个插件提供哪些 Skills；Decision 模型看到这些描述）
+    pub skill_registry: yuantuan_core::skills::SkillRegistry,
+    /// MCP 客户端管理器（Phase 3）：面板查询 server 列表与状态
+    pub mcp_manager: Option<std::sync::Arc<yuantuan_core::mcp::McpManager>>,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
     pub config_path: PathBuf,
@@ -57,6 +61,8 @@ impl Extras {
             napcat_token_slot: None,
             backup_cfg: yuantuan_core::backup::shared_backup_cfg(),
             tools_registry: yuantuan_core::tools::Registry::new(),
+            skill_registry: yuantuan_core::skills::SkillRegistry::new(),
+            mcp_manager: None,
             mood: yuantuan_core::state::MoodState::default(),
             config_path,
             providers_path,
