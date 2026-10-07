@@ -215,6 +215,15 @@ async fn main() -> Result<()> {
         skill_registry: Some(skill_registry.clone()),
     });
 
+    // h'''. Task runner（Q-A01 同步工具循环）：订阅 TaskCreated → 每任务一个执行协程
+    //       工具范围 = ToolRegistry 全部已注册工具（Q-A02）；静默不发群（Q-A03）
+    let _task_runner = yuantuan_core::agent::spawn_runner(yuantuan_core::agent::TaskRunnerDeps {
+        db_path: db_path.clone(),
+        llm: llm_slot.clone(),
+        tools: tools_registry.clone(),
+        bus: bus.clone(),
+    });
+
     // 装配完 LlmGateway 后让插件的 Skill 能调 BotChat LLM
     // （Skill trait 不依赖 LLM；插件用 OnceLock 槽在装配时被注入；未注入时退回模板渲染）
     {

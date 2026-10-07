@@ -263,8 +263,29 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                 }
                 return;
             }
+            // action=start_task：建 tasks 行 + TaskCreated 事件（agent::create_task 落两笔）；
+            // spawn_runner 订阅事件后立即起执行协程。静默：不发群消息（Q-A03）
+            if outcome.output.action == DecisionAction::StartTask {
+                let goal = outcome
+                    .output
+                    .task_goal
+                    .clone()
+                    .unwrap_or_else(|| m.text.chars().take(120).collect());
+                if let Err(e) = crate::agent::create_task(
+                    &deps.db_path,
+                    &deps.bus,
+                    &m.chat_id,
+                    &m.sender_pid,
+                    &goal,
+                ) {
+                    warn!(chat_id = %m.chat_id, error = %e, "start_task 落地失败");
+                } else {
+                    info!(chat_id = %m.chat_id, goal = %goal, "start_task 已建仓");
+                }
+                return;
+            }
             if outcome.output.action != DecisionAction::Reply {
-                return; // ignore / start_task(后续单) 仅由 DecisionMade 事件记录
+                return; // ignore 仅由 DecisionMade 事件记录
             }
             // action=reply → bot_chat → Bubbleizer → 发送队列
             let bot_chat_ready = gw.role(Role::BotChat).is_some();

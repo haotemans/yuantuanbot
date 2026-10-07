@@ -73,6 +73,17 @@ pub struct ConsolidationDonePayload {
     pub elapsed_ms: u64,
 }
 
+/// 任务生命周期载荷（TaskCreated / TaskFinished 共用；面板 Tasks 页与 runner 都用 task_id 索引）
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskLifecyclePayload {
+    pub task_id: String,
+    pub chat_id: String,
+    pub goal: String,
+    /// TaskFinished 时的最终状态：finished | failed
+    pub final_state: Option<String>,
+    pub error: Option<String>,
+}
+
 /// 事件清单（架构十一章终稿）；本阶段实装 MessageReceived / DecisionMade / BubbleSent /
 /// ReplyInterrupted / ConsolidationDone，其余为变体占位
 #[derive(Debug, Clone, Serialize)]
@@ -83,9 +94,9 @@ pub enum Event {
     BubbleSent(BubbleSentPayload),
     ReplyInterrupted,
     DecisionMade(DecisionMadePayload),
-    TaskCreated,
+    TaskCreated(TaskLifecyclePayload),
     TaskStepDone,
-    TaskFinished,
+    TaskFinished(TaskLifecyclePayload),
     MemoryWritten,
     RelationshipEventAppended,
     MoodChanged,
@@ -104,9 +115,9 @@ impl Event {
             Event::BubbleSent(_) => "BubbleSent",
             Event::ReplyInterrupted => "ReplyInterrupted",
             Event::DecisionMade(_) => "DecisionMade",
-            Event::TaskCreated => "TaskCreated",
+            Event::TaskCreated(_) => "TaskCreated",
             Event::TaskStepDone => "TaskStepDone",
-            Event::TaskFinished => "TaskFinished",
+            Event::TaskFinished(_) => "TaskFinished",
             Event::MemoryWritten => "MemoryWritten",
             Event::RelationshipEventAppended => "RelationshipEventAppended",
             Event::MoodChanged => "MoodChanged",
