@@ -12,6 +12,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+
+/// Q53：全局 LLM 并发上限（runtime-design 三章「全局 LLM 请求并发上限固定为 4」）
+pub const DEFAULT_LLM_CONCURRENCY: usize = 4;
 
 /// 三模型角色（架构十五章表格）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -155,6 +159,8 @@ pub struct LlmGateway {
     providers: HashMap<String, ProviderRuntime>,
     http: reqwest::Client,
     gate: CostGate,
+    /// Q53 全局 LLM 并发上限（三角色共享；与成本闸正交）
+    concurrency: Arc<Semaphore>,
     /// 可选：每次成功 chat 后回调。None = 不统计（测试/未装配）
     usage_sink: Option<UsageSink>,
 }
@@ -236,6 +242,7 @@ impl LlmGateway {
             providers,
             http,
             gate: CostGate::new(30),
+            concurrency: Arc::new(Semaphore::new(DEFAULT_LLM_CONCURRENCY)),
             usage_sink: None,
         })
     }
@@ -254,6 +261,16 @@ impl LlmGateway {
         self.gate.set_per_min(n);
     }
 
+    /// Q53：全局并发许可上限（固定值，观测/测试用）
+    pub fn concurrency_limit(&self) -> usize {
+        DEFAULT_LLM_CONCURRENCY
+    }
+
+    /// 当前可用并发许可数（观测/调试用）
+    pub fn concurrency_available(&self) -> usize {
+        self.concurrency.available_permits()
+    }
+
     /// 连通性测试（WebUI /api/llm/test）：发一次最短 chat，不过成本闸；
     /// 返回 (model, latency_ms)。请求/响应体不入日志（防泄 key 路径上的中间日志）。
     pub async fn test_chat(&self, role: Role) -> Result<(String, u64)> {
@@ -262,6 +279,12 @@ impl LlmGateway {
             .get(&role)
             .ok_or_else(|| anyhow!("角色 {role} 未配置或不可用"))?
             .clone();
+        // 连通性测试同样占并发槽（Q53）：避免面板手动测试绕过全局上限
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("LLM 并发信号量已关闭"))?;
         let body = json!({
             "model": r.model,
             "messages": [{"role": "user", "content": "ping"}],
@@ -320,7 +343,7 @@ impl LlmGateway {
         Ok(out)
     }
 
-    /// chat/completions 调用：先过成本闸；json_mode 时带 response_format=json_object
+    /// chat/completions 调用：先过成本闸，再占全局并发槽（Q53）；json_mode 时带 response_format=json_object
     pub async fn chat(&self, role: Role, system: &str, user: &str, json_mode: bool) -> Result<String> {
         let r = self
             .roles
@@ -328,6 +351,12 @@ impl LlmGateway {
             .ok_or_else(|| anyhow!("角色 {role} 未配置或不可用"))?
             .clone();
         self.gate.acquire().await;
+        // Q53：全局并发上限——三角色共享 4 许可，超出排队等待
+        let _permit = self
+            .concurrency
+            .acquire()
+            .await
+            .map_err(|_| anyhow!("LLM 并发信号量已关闭"))?;
 
         let mut body = json!({
             "model": r.model,

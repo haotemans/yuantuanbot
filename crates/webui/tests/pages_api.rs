@@ -10,11 +10,14 @@ use yuantuan_core::db;
 use yuantuan_webui::{serve, Extras};
 
 fn temp_dir(prefix: &str) -> PathBuf {
+    // nanos + 进程 id + 原子序号：Windows 上 SystemTime 精度只到 ~100ns，同进程两测试并发起 start 可能撞值
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
+    let dir = std::env::temp_dir().join(format!("yt-{prefix}-{}-{seq}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

@@ -183,7 +183,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|h| h.self_qq_shared())
         .unwrap_or_default();
-    let _pipeline = yuantuan_core::bot::spawn_pipeline(yuantuan_core::bot::PipelineDeps {
+    let pipeline_deps = yuantuan_core::bot::PipelineDeps {
         bus: bus.clone(),
         db_path: db_path.clone(),
         llm: llm_slot.clone(),
@@ -213,7 +213,16 @@ async fn main() -> Result<()> {
             llm: llm_slot.clone(),
         }),
         skill_registry: Some(skill_registry.clone()),
-    });
+    };
+
+    // h''. Q55 恢复消费：把上次进程退出前来不及处理的 messages 回放进管线
+    //      （跳过 /image 直派命令；自身消息 ingest 时已标记不扫入）
+    match yuantuan_core::bot::replay_pending(&pipeline_deps).await {
+        Ok(n) if n > 0 => info!(count = n, "Q55 重启回放完成"),
+        Ok(_) => {}
+        Err(e) => warn!(error = %e, "Q55 回放扫描失败（不阻断启动）"),
+    }
+    let _pipeline = yuantuan_core::bot::spawn_pipeline(pipeline_deps);
 
     // h'''. Task runner（Q-A01 同步工具循环）：订阅 TaskCreated → 每任务一个执行协程
     //       工具范围 = ToolRegistry 全部已注册工具（Q-A02）；静默不发群（Q-A03）

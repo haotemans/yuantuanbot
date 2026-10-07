@@ -259,11 +259,18 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_role_ts ON llm_usage(role, ts);
 "#;
 
+/// V4：Q55 消息流水持久化——pipeline 消费标记；重启扫 NULL 行回放进管线。
+/// ALTER 不幂等：真正的列添加走 add_column_if_missing（多测试/多进程竞态下安全）。
+const V4_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE processed_at IS NULL;
+"#;
+
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     ("V0.2 媒体生成：media_providers/models/tasks/credits 4 张表", V2_SQL),
     ("V0.3 LLM 用量：llm_usage 表（仪表盘 token 统计）", V3_SQL),
+    ("V0.4 消息消费标记（Q55 恢复消费）：messages.processed_at", V4_SQL),
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
@@ -279,6 +286,11 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         if current >= version {
             continue;
         }
+        // V4 前置：ALTER TABLE ADD COLUMN 非幂等，且对未提交事务间的竞态敏感——
+        // 先查 PRAGMA table_info 再决定 ALTER；列已存在则仅刷索引+推进版本
+        if version == 4 {
+            add_column_if_missing(conn, "messages", "processed_at", "INTEGER")?;
+        }
         let tx = conn.transaction().context("开启迁移事务失败")?;
         tx.execute_batch(sql)
             .with_context(|| format!("执行迁移 v{version} 失败"))?;
@@ -287,6 +299,20 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         tx.commit().with_context(|| format!("提交迁移 v{version} 失败"))?;
         tracing::info!(user_version = version, desc, "迁移已应用");
     }
+    Ok(())
+}
+
+/// 幂等加列：列不存在才 ALTER；存在则静默（供 V4 等多进程/竞态场景）
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if cols.iter().any(|c| c == column) {
+        return Ok(());
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))
+        .with_context(|| format!("ALTER {table} ADD {column} 失败"))?;
     Ok(())
 }
 

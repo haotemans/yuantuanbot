@@ -61,9 +61,11 @@ Event::MessageReceived
 
 10. **Decision 是分类器不是对话者**：输出严格 JSON schema（action/mood/mention/reply_len/...），两次解析失败兜底 ignore。
 
-11. **Decision 并发**：当前所有 chat 共享同一 broadcast 通道，Decision 顺序处理（无窗口无并发隔离）。⚠️ Q52/Q54 设计裁决待实现。
+11. **Decision 并发（Q52 ✅）**：dispatcher + per-chat worker 拓扑——dispatcher 订阅 broadcast 按 chat_id 派发到 mpsc（cap 32)，每 chat 一个 worker 串行 handle；不同 chat 并发互不堵塞；单 chat 瞬时洪峰超过 32 时降级同步 handle 保底不丢。Q54 窗口聚合仍待实现。
 
-12. **成本闸**：`LlmGateway::chat` 内置令牌桶（decision 30/min 可调），超限排队等待，不丢请求。
+12. **成本闸 + 全局并发（Q53 ✅）**：`LlmGateway::chat` 两道闸——① `CostGate` 滑动窗口（decision 30/min 可调，超限排队）;② 全局 `tokio::Semaphore` 4 许可，三角色共享，超出排队。正交不替代。
+
+12a. **消息流水持久化（Q55 ✅）**:`messages` 表加 `processed_at INTEGER NULL`(V4 迁移）。ingest 落库时 NULL;`bot::handle` 包装层在 handle_inner 返回后无条件回写当前 ts（含 Prefilter Drop 分支——「处理过」不等于「回复过」)。启动时 `bot::replay_pending` 在 spawn_pipeline 之前扫 `processed_at IS NULL AND sender_pid != 'self'`，按 ts 升序作为回放消息进入管线（跳过 `/image` 直派命令，避免重启刷图；回放消息信任当时 ingest 判定，不再重判 R2)。
 
 ## 四、回复发送（reply_engine）
 
@@ -143,10 +145,10 @@ Decision.memory_write → long_memories 表（explicit）
 
 | 裁决 | 内容 | 状态 |
 |---|---|---|
-| Q52 | 按 chat 隔离受限并发 | ❌ 未实现 |
-| Q53 | 全局 LLM 并发 ≤4 | ❌ 未实现（仅有 Decision 成本闸） |
+| Q52 | 按 chat 隔离受限并发 | ✅ 已落地（dispatcher + per-chat mpsc worker) |
+| Q53 | 全局 LLM 并发 ≤4 | ✅ 已落地（`LlmGateway` Semaphore 4，三角色共享） |
 | Q54 | 10s 窗口聚合 | ❌ 未实现 |
-| Q55 | 消息流水持久化恢复 | ❌ 未实现 |
+| Q55 | 消息流水持久化恢复 | ✅ 已落地（messages.processed_at V4 + 启动回放管线；回放跳过 /image 命令） |
 | Q56-Q62 | anchor 锚定 + window_messages 有界 | ❌ 未实现 |
 | Q64 | 同 chat 按窗口顺序进发送队列 | ✅ 已落地（per-chat 队列保序） |
 | Q65 | Decision 走 MCP decide 服务 | ❌ 未实现 |

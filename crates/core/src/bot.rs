@@ -45,17 +45,108 @@ pub struct PipelineDeps {
     pub skill_registry: Option<crate::skills::SkillRegistry>,
 }
 
-/// 订阅 Event Bus 的 Decision 管线；主动插话与被动回复走同一条管线
+/// Q52：按 chat 隔离的 dispatcher + worker 拓扑——
+/// dispatcher 订阅 broadcast，按 chat_id 派发到 per-chat mpsc；
+/// 每 chat 一个 worker 协程串行 handle（保序）；不同 chat 并发，互不堵塞。
+/// mpsc 容量 32：单 chat 瞬时洪峰超过则降级为同步 handle（保底不丢，仅阻塞 dispatcher 一拍）。
+const PER_CHAT_QUEUE_CAP: usize = 32;
+
+/// Q55：扫描 messages 表中 processed_at IS NULL 的非 self 消息，按 ts 升序回放给 handle。
+/// 在 spawn_pipeline 之前调用；返回回放条数。
+/// 跳过 /image 命令——media 副作用大且用户当时已得到响应（避免重启刷图）。
+pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
+    use rusqlite::params;
+    let conn = crate::db::connect(&deps.db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts
+         FROM messages
+         WHERE processed_at IS NULL AND sender_pid != 'self'
+         ORDER BY ts ASC, msg_id ASC",
+    )?;
+    let rows = stmt.query_map(params![], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, Option<i64>>(7)?,
+            r.get::<_, i64>(8)?,
+        ))
+    })?;
+    let mut count = 0usize;
+    for row in rows {
+        let (msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts) =
+            match row {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!(error = %e, "回放读取行失败，跳过");
+                    continue;
+                }
+            };
+        let text = text.unwrap_or_default();
+        // Q55 裁决：回放跳过 /image 直派命令（media 副作用大）
+        if crate::tools::media::command::match_image_command(&text).is_some() {
+            mark_processed(&deps.db_path, msg_id);
+            debug!(msg_id, "回放跳过 /image 命令（直接标记已处理）");
+            continue;
+        }
+        let payload = MessageReceivedPayload {
+            msg_id,
+            chat_id,
+            chat_type,
+            sender_pid,
+            text,
+            at_me: at_me != 0,
+            has_image: has_image != 0,
+            reply_to,
+            sender_bot: false, // 已落库的非 self 消息不再重判 R2（回放即信任当时 ingest 判定）
+            image_urls: Vec::new(), // 不回放偷图流程（image_urls 不落 messages）
+            ts,
+        };
+        handle(deps, &payload).await;
+        count += 1;
+    }
+    if count > 0 {
+        info!(count, "Q55 恢复消费完成");
+    }
+    Ok(count)
+}
+
 pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = deps.bus.subscribe();
         if !decision_ready(&deps.llm) {
             warn!("Decision 角色未配置（providers.toml）：配置前消息过 Prefilter 后直接 ignore，管线照常运行");
         }
-        info!("Decision 管线已启动");
+        info!("Decision 管线已启动（Q52 per-chat 并发）");
+        let deps = Arc::new(deps);
+        let mut lanes: std::collections::HashMap<String, tokio::sync::mpsc::Sender<MessageReceivedPayload>> =
+            std::collections::HashMap::new();
         loop {
             match rx.recv().await {
-                Ok(Event::MessageReceived(m)) => handle(&deps, &m).await,
+                Ok(Event::MessageReceived(m)) => {
+                    let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
+                        let (tx, mut lane_rx) =
+                            tokio::sync::mpsc::channel::<MessageReceivedPayload>(PER_CHAT_QUEUE_CAP);
+                        let deps2 = Arc::clone(&deps);
+                        let chat = m.chat_id.clone();
+                        tokio::spawn(async move {
+                            while let Some(mm) = lane_rx.recv().await {
+                                handle(&deps2, &mm).await;
+                            }
+                            debug!(chat_id = %chat, "chat worker 退出（dispatcher 关闭）");
+                        });
+                        tx
+                    });
+                    // try_send 保底：channel 满（单 chat 洪峰）→ 同步 handle，不丢消息
+                    if let Err(e) = lane.try_send(m.clone()) {
+                        debug!(chat_id = %m.chat_id, error = %e, "per-chat 队列满，同步处理保底");
+                        handle(&deps, &m).await;
+                    }
+                }
                 Ok(_) => {} // 其余事件类型本管线不消费
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     warn!(skipped = n, "管线消费滞后，跳过旧事件");
@@ -82,7 +173,34 @@ fn reply_engine_route(m: &MessageReceivedPayload) -> anyhow::Result<(reply_engin
     crate::reply_engine::route_of(m).map(|(ct, target, _)| (ct, target))
 }
 
+/// Q55 包装层：处理完毕无条件回写 messages.processed_at（含 Prefilter Drop 分支——
+/// 「处理过」不等于「回复过」；重启回放只扫进程崩溃前来不及进 handle 的消息）。
 async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
+    handle_inner(deps, m).await;
+    mark_processed(&deps.db_path, m.msg_id);
+}
+
+fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
+    if msg_id <= 0 {
+        return; // 回放路径构造的合成消息没有正 msg_id
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let res = crate::db::connect(db_path).and_then(|c| {
+        c.execute(
+            "UPDATE messages SET processed_at = ?1 WHERE msg_id = ?2",
+            rusqlite::params![now, msg_id],
+        )
+        .map_err(anyhow::Error::from)
+    });
+    if let Err(e) = res {
+        debug!(msg_id, error = %e, "processed_at 回写失败（下轮重启会回放该条，幂等）");
+    }
+}
+
+async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
     // Q008=C：/image /画 显式命令直派，先于 Prefilter 与 Decision（Command deterministic path）。
     // 显式命令不参与节流与成本闸，且独立于 LLM 角色可用性——用户在配 LLM 之前也能用 media。
     if let (Some(media_ctx), Some(body)) = (
@@ -320,5 +438,121 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn temp_db() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+            + (std::process::id() as u128) << 16;
+        let dir = std::env::temp_dir().join(format!("yt-bot-test-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("yuantuan.db");
+        let mut conn = crate::db::connect(&db).unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        db
+    }
+
+    /// Q55：processed_at 回写——任意 msg_id 调用后该行不再 NULL
+    #[test]
+    fn mark_processed_writes_ts() {
+        let db = temp_db();
+        let conn = crate::db::connect(&db).unwrap();
+        let now = 1000i64;
+        conn.execute(
+            "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('p_1','甲',?1,?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','hi',?1)",
+            params![now],
+        ).unwrap();
+        let msg_id = conn.last_insert_rowid();
+        drop(conn);
+
+        mark_processed(&db, msg_id);
+
+        let conn = crate::db::connect(&db).unwrap();
+        let processed: Option<i64> = conn
+            .query_row("SELECT processed_at FROM messages WHERE msg_id = ?1", params![msg_id], |r| r.get(0))
+            .unwrap();
+        assert!(processed.is_some(), "processed_at 应被回写");
+    }
+
+    /// Q55：回放扫描——self 消息不进回放集；/image 命令跳过并标记
+    #[tokio::test]
+    async fn replay_skips_self_and_image_command() {
+        let db = temp_db();
+        let now = 1000i64;
+        {
+            let conn = crate::db::connect(&db).unwrap();
+            conn.execute(
+                "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1),('p_1','甲',?1,?1)",
+                params![now],
+            ).unwrap();
+            // self 消息（应被回放扫描排除）
+            conn.execute(
+                "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','self','我自己说的',?1)",
+                params![now],
+            ).unwrap();
+            // /image 直派命令（回放应跳过且直接标记已处理）
+            conn.execute(
+                "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','/image 一只猫',?1)",
+                params![now + 1],
+            ).unwrap();
+        }
+
+        // 构造最简 PipelineDeps：无 LLM、无 reply、无 media_ctx、无 skills
+        let bus = crate::event::EventBus::default();
+        let llm_slot: SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let prefilter_slot: SharedPrefilter = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::prefilter::Config::default(),
+        ));
+        let reply_slot: crate::reply_engine::SharedReplyCfg = std::sync::Arc::new(
+            std::sync::RwLock::new(crate::reply_engine::ReplyCfg::default()),
+        );
+        let ctx_slot: crate::context_builder::SharedContextCfg = std::sync::Arc::new(
+            std::sync::RwLock::new(crate::context_builder::ContextCfg::default()),
+        );
+        let deps = PipelineDeps {
+            bus: bus.clone(),
+            db_path: db.clone(),
+            llm: llm_slot,
+            self_qq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            self_ids: crate::prefilter::SelfMsgIds::default(),
+            mood: crate::state::MoodState::default(),
+            prefilter: prefilter_slot,
+            reply: None,
+            reply_cfg: reply_slot,
+            ctx_cfg: ctx_slot,
+            memes_dir: std::path::PathBuf::from("data/memes"),
+            media_ctx: None,
+            skill_registry: None,
+        };
+
+        let n = replay_pending(&deps).await.unwrap();
+        assert_eq!(n, 0, "self 与 /image 都不应回放（回放计数为 0）");
+
+        // /image 那条也应被标记为已处理
+        let conn = crate::db::connect(&db).unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL AND sender_pid != 'self'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0, "回放后不应剩余未处理非 self 消息");
+    }
+
+    /// Q52 信号量上限常量为 4（runtime-design 裁决值）
+    #[test]
+    fn q53_concurrency_limit_is_four() {
+        assert_eq!(crate::llm::DEFAULT_LLM_CONCURRENCY, 4);
     }
 }
