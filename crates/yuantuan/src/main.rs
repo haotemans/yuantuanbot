@@ -73,9 +73,14 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!(error = %e, "meme 库扫描失败（不阻断启动）"),
     }
 
-    // d. Event Bus + tracer（全事件落 events 表）
+    // d. Event Bus + tracer（全事件落 events 表）；supervisor 接管：panic 自动拉起
     let bus = yuantuan_core::event::EventBus::default();
-    let _tracer = yuantuan_core::event::spawn_tracer(&bus, db_path.clone());
+    let supervisor = yuantuan_core::supervisor::Supervisor::new();
+    {
+        let bus2 = bus.clone();
+        let db2 = db_path.clone();
+        supervisor.spawn("tracer", move || yuantuan_core::event::spawn_tracer(&bus2, db2.clone()));
+    }
 
     // e. LLM Provider（providers.toml 缺失则生成模板；角色未配置则管线降级 ignore，不崩）
     let llm = load_llm_gateway();
@@ -243,16 +248,24 @@ async fn main() -> Result<()> {
         Ok(_) => {}
         Err(e) => warn!(error = %e, "Q55 回放扫描失败（不阻断启动）"),
     }
-    let _pipeline = yuantuan_core::bot::spawn_pipeline(pipeline_deps);
+    {
+        let deps = pipeline_deps.clone();
+        supervisor.spawn("pipeline", move || yuantuan_core::bot::spawn_pipeline(deps.clone()));
+    }
 
     // h'''. Task runner（Q-A01 同步工具循环）：订阅 TaskCreated → 每任务一个执行协程
     //       工具范围 = ToolRegistry 全部已注册工具（Q-A02）；静默不发群（Q-A03）
-    let _task_runner = yuantuan_core::agent::spawn_runner(yuantuan_core::agent::TaskRunnerDeps {
-        db_path: db_path.clone(),
-        llm: llm_slot.clone(),
-        tools: tools_registry.clone(),
-        bus: bus.clone(),
-    });
+    {
+        let deps = yuantuan_core::agent::TaskRunnerDeps {
+            db_path: db_path.clone(),
+            llm: llm_slot.clone(),
+            tools: tools_registry.clone(),
+            bus: bus.clone(),
+        };
+        supervisor.spawn("task_runner", move || {
+            yuantuan_core::agent::spawn_runner(deps.clone())
+        });
+    }
 
     // 装配完 LlmGateway 后让插件的 Skill 能调 BotChat LLM
     // （Skill trait 不依赖 LLM；插件用 OnceLock 槽在装配时被注入；未注入时退回模板渲染）
@@ -267,12 +280,20 @@ async fn main() -> Result<()> {
     // h2. 偷表情包监听（开关走热应用槽，进程内常驻）
     let steal_slot: yuantuan_core::meme::SharedSteal =
         std::sync::Arc::new(std::sync::RwLock::new(cfg.meme.steal_enabled));
-    let _steal = yuantuan_core::meme::spawn_steal_listener(
-        &bus,
-        db_path.clone(),
-        memes_dir.clone(),
-        steal_slot.clone(),
-    );
+    {
+        let bus2 = bus.clone();
+        let db2 = db_path.clone();
+        let memes2 = memes_dir.clone();
+        let slot = steal_slot.clone();
+        supervisor.spawn("steal_listener", move || {
+            yuantuan_core::meme::spawn_steal_listener(
+                &bus2,
+                db2.clone(),
+                memes2.clone(),
+                slot.clone(),
+            )
+        });
+    }
 
     // i. 夜间归纳调度器（句柄注册：WebUI 改 [consolidation] 后取消旧定时器按新配置重建）
     let consolidation_handle: std::sync::Arc<
@@ -373,7 +394,38 @@ async fn main() -> Result<()> {
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };
-    yuantuan_webui::serve(db_path, &cfg.webui.host, cfg.webui.port, extras).await
+    let webui_serve = yuantuan_webui::serve(db_path.clone(), &cfg.webui.host, cfg.webui.port, extras);
+
+    // MOD-B11 优雅停机(runtime-design 三章「SIGTERM → 停止接收 → 排空 → checkpoint → 退出」)
+    // Windows 无 SIGTERM,用 Ctrl+C(tokio::signal::ctrl_c 跨平台):
+    //   ① 停 adapter(不再接受新消息) → ② 等 5s 让在飞消息发完 → ③ WAL checkpoint → ④ exit(0)
+    tokio::select! {
+        res = webui_serve => {
+            info!(result = ?res, "WebUI 退出(服务自然结束)");
+            res
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("收到 Ctrl+C,启动优雅停机序列");
+            // ① adapter: drop handle 触发其内部关闭(若实现);这里只记日志——真正停止接消息靠进程退出
+            info!("① 停止接收消息(adapter 将随进程退出)");
+            // ② 等 5s 让回复引擎把在飞泡发完(目前没有暴露 drain API,用固定窗口)
+            info!("② 等待 5s 发送队列排空");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // ③ WAL checkpoint:把 -wal 合并回主 db 文件,避免下次启动恢复慢
+            info!("③ SQLite WAL checkpoint");
+            match yuantuan_core::db::connect(&db_path) {
+                Ok(conn) => {
+                    match conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
+                        Ok(_) => info!("WAL checkpoint 完成"),
+                        Err(e) => warn!(error = %e, "WAL checkpoint 失败(不影响退出)"),
+                    }
+                }
+                Err(e) => warn!(error = %e, "打开 db 做 checkpoint 失败"),
+            }
+            info!("④ 优雅停机完成,退出");
+            Ok(())
+        }
+    }
 }
 
 /// 扫描 plugins/<name>/enabled 标记：启用的插件调用其 register() 把 Tool 注册进 Registry

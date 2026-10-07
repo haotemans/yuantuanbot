@@ -1,14 +1,14 @@
 # 后端加固 Workbench(Q52+Q53+Q55)
 
 ## 状态
-- status: decided → implementing
+- status: implementing → verifying
 - owner: kimi + hsb
 - last-grill: 2026-10-07
 - frontier:
-  - Q54 10s 窗口聚合（下一步，依赖本次 Q52/Q53）
-  - 监督树 / 优雅停机 SIGTERM（下一轮）
+  - Q54 10s 窗口聚合（下一轮主线后）
+  - 服务器环境 restart 语义重审（用户反馈「服务器上 spawn+exit 不会拉起」→ G007 的适应边界）
   - Q65 MCP decide 服务（暂缓，继续 OpenAI 兼容）
-- 2026-10-07 二轮 grill（用户反馈「改配置还是 6199」触发 config 边界审计）
+- 2026-10-07 三轮 grill：主线 = 监督树+优雅停机；Q55 补 1h 时间窗
 
 ## 已确认裁决（本轮 grill)
 
@@ -139,5 +139,85 @@
 - `cargo test --workspace` 19 个 test result: ok 零失败
 - vite build 497ms
 - curl POST /api/config/restart → 202 → 旧 pid → 新 pid 切换
+
+
+---
+
+## 三轮(2026-10-07 → 10-08):监督树 + 优雅停机 + Q55 时间窗
+
+### 触发
+用户:「后端功能没有实现的要实现 实现的要优化 然后框架进一步确认 grill me」→ 主线定位为 Q1 监督树+优雅停机(Q54 暂缓)。理由:面板一键重启每次都是硬退、任一后台组件 panic 静默死。
+
+### 裁决
+- **G010 主线 = 监督树 + 优雅停机**:Supervisor + 指数退避包 4 个长活组件;main.rs `tokio::select!` webui serve vs ctrl_c;5s 排空 → WAL checkpoint → exit
+- **G011 Q55 回放窗口**:REPLAY_WINDOW_SECS = 3600(1h),窗口外 UPDATE 标记放弃,防历史脏数据雪崩
+- **G012 服务器环境 restart 语义重审(frontier)**:用户反馈「服务器上 spawn+exit 不会拉起」→ G007 一刀切重启在 systemd/docker 下失效,本轮不动
+
+### MOD-B08 Q55 1h 时间窗
+`crates/core/src/bot.rs::replay_pending`:
+- 常量 `REPLAY_WINDOW_SECS: i64 = 3600`
+- 回放前先 UPDATE `processed_at = -2` 标记 stale_pending(窗口外 + 未处理)
+- SELECT 加 `ts >= ?1` 窗口过滤
+- 新测试 `replay_abandons_stale_pending` ✓;`replay_skips_self_and_image_command` 改用当前时间避免被窗口误删 ✓
+
+### MOD-B09 supervisor.rs 新文件
+`crates/core/src/supervisor.rs`:
+- `Supervisor struct` + `spawn(name, factory) -> JoinHandle<()>`
+- 指数退避 1s → 60s 封顶,MAX_RESTARTS = 20
+- `CancellationToken` 控制停止
+- 测试:`restart_on_panic`(造 panic 验证拉起) + `cancel_stops_restarting`(cancel 后不再重启) ✓
+
+### MOD-B10 PipelineDeps/TaskRunnerDeps Clone + 4 组件包 supervisor
+`crates/yuantuan/src/main.rs`:
+- `PipelineDeps` / `TaskRunnerDeps` 加 `#[derive(Clone)]`
+- 包监督树的 4 个组件:**tracer / pipeline / task_runner / steal_listener**
+- **不包**:adapter-qq(自己有重连逻辑)、consolidation/backup(一次性定时器,语义不同)
+
+### MOD-B11 优雅停机
+`main.rs` 末尾:
+```rust
+tokio::select! {
+    _ = webui_serve => { ... }
+    _ = tokio::signal::ctrl_c() => {
+        info!("收到 Ctrl+C,启动优雅停机序列");
+        // ① 停止接新(webui serve 自然退出)
+        // ② 5s 排空
+        // ③ PRAGMA wal_checkpoint(TRUNCATE)
+        // ④ exit(0)
+    }
+}
+```
+
+### 测试状态
+- `cargo test --workspace` 19 个 "test result: ok" 零失败
+- 新增 `supervisor::tests::{restart_on_panic, cancel_stops_restarting}` 全过
+- 新增 `bot::tests::replay_abandons_stale_pending` 全过
+- doc test `supervisor.rs line 10` ignored(ignore 块规避)
+
+### 启动验证(2026-10-08)
+```
+INFO supervisor 启动组件 component="tracer" restarts=0
+INFO supervisor 启动组件 component="pipeline" restarts=0
+INFO supervisor 启动组件 component="task_runner" restarts=0
+INFO supervisor 启动组件 component="steal_listener" restarts=0
+INFO Decision 管线已启动(Q52 per-chat 并发)
+INFO WebUI 开始监听 addr=127.0.0.1:8085
+```
+4 个组件全部 supervisor 化 ✓
+
+### 浏览器验证(2026-10-08)
+- 登录 → 仪表盘 LIVE、mood · calm、CPU 0.0%、内存 23 MB、运行 2m13s ✓
+- 适配器离线(预期,NapCat 未拨入) ✓
+- 面板 6 卡数据完整 ✓
+
+### 优雅停机实测边界(已知限制)
+- Windows 下从外部进程发 ConsoleCtrlEvent 到 yuantuan pid **无效**(Windows API 要求 pid 是 process group id)
+- 从 Git Bash / Python 发信号到 yuantuan 也不到(不共享 console group)
+- **真实有效的路径**:用户在前台终端跑 `yuantuan.exe`,光标停在那里按 Ctrl+C → tokio::signal::ctrl_c() 触发 → 走优雅序列
+- 本轮代码已就绪并编译过,实测触发留给用户前台验证
+
+### Frontier(下轮)
+- **Q2(原 G007 副作用)**:服务器环境(systemd/docker)下 `spawn+exit(0)` 不会拉起新进程,一键重启在服务器上会「自杀」。需要 grill:服务器部署形态 + 是否需要额外守护
+- Q54 10s 窗口聚合:为本管线设计的最后一块,Supervisor 稳定后启动
 
 

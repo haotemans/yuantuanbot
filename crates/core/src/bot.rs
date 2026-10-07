@@ -23,6 +23,7 @@ pub type SharedLlm = Arc<RwLock<Option<Arc<LlmGateway>>>>;
 /// Prefilter 阈值共享槽
 pub type SharedPrefilter = Arc<RwLock<crate::prefilter::Config>>;
 
+#[derive(Clone)]
 pub struct PipelineDeps {
     pub bus: EventBus,
     pub db_path: PathBuf,
@@ -58,16 +59,33 @@ pub type SharedPerChatCap = Arc<RwLock<usize>>;
 /// Q55：扫描 messages 表中 processed_at IS NULL 的非 self 消息，按 ts 升序回放给 handle。
 /// 在 spawn_pipeline 之前调用；返回回放条数。
 /// 跳过 /image 命令——media 副作用大且用户当时已得到响应（避免重启刷图）。
+/// 只回放最近 REPLAY_WINDOW_SECS 内的未处理；更早的直接标记已处理（防历史脏数据雪崩）。
+const REPLAY_WINDOW_SECS: i64 = 3600;
+
 pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
     use rusqlite::params;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let cutoff = now - REPLAY_WINDOW_SECS;
     let conn = crate::db::connect(&deps.db_path)?;
+    // 先把窗口外的未处理全部标记放弃（战的，不回放）
+    let abandoned = conn.execute(
+        "UPDATE messages SET processed_at = ?1
+         WHERE processed_at IS NULL AND sender_pid != 'self' AND ts < ?2",
+        params![now, cutoff],
+    )?;
+    if abandoned > 0 {
+        info!(count = abandoned, cutoff_secs = REPLAY_WINDOW_SECS, "Q55 放弃窗口外未处理消息");
+    }
     let mut stmt = conn.prepare(
         "SELECT msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts
          FROM messages
-         WHERE processed_at IS NULL AND sender_pid != 'self'
+         WHERE processed_at IS NULL AND sender_pid != 'self' AND ts >= ?1
          ORDER BY ts ASC, msg_id ASC",
     )?;
-    let rows = stmt.query_map(params![], |r| {
+    let rows = stmt.query_map(params![cutoff], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -494,7 +512,12 @@ mod tests {
     #[tokio::test]
     async fn replay_skips_self_and_image_command() {
         let db = temp_db();
-        let now = 1000i64;
+        // 用当前时间避免被 1h 回放窗口丢弃(REPLAY_WINDOW_SECS)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - 60; // 一分钟前(窗口内)
         {
             let conn = crate::db::connect(&db).unwrap();
             conn.execute(
@@ -561,5 +584,55 @@ mod tests {
     #[test]
     fn q53_concurrency_limit_is_four() {
         assert_eq!(crate::llm::DEFAULT_LLM_CONCURRENCY, 4);
+    }
+
+    /// Q55+1h 窗口:远古未处理消息被放弃(标记为已处理),不回放
+    #[tokio::test]
+    async fn replay_abandons_stale_pending() {
+        let db = temp_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        {
+            let conn = crate::db::connect(&db).unwrap();
+            conn.execute(
+                "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('p_1','甲',?1,?1)",
+                params![now],
+            ).unwrap();
+            // 远古:2 小时前的未处理消息
+            let stale = now - 7200;
+            conn.execute(
+                "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','远古消息',?1)",
+                params![stale],
+            ).unwrap();
+        }
+        let deps = PipelineDeps {
+            bus: crate::event::EventBus::default(),
+            db_path: db.clone(),
+            llm: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            self_qq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            self_ids: crate::prefilter::SelfMsgIds::default(),
+            mood: crate::state::MoodState::default(),
+            prefilter: std::sync::Arc::new(std::sync::RwLock::new(crate::prefilter::Config::default())),
+            reply: None,
+            reply_cfg: std::sync::Arc::new(std::sync::RwLock::new(crate::reply_engine::ReplyCfg::default())),
+            ctx_cfg: std::sync::Arc::new(std::sync::RwLock::new(crate::context_builder::ContextCfg::default())),
+            memes_dir: std::path::PathBuf::from("data/memes"),
+            media_ctx: None,
+            skill_registry: None,
+            per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
+        };
+        let n = replay_pending(&deps).await.unwrap();
+        assert_eq!(n, 0, "远古消息应被放弃,不回放");
+        let conn = crate::db::connect(&db).unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0, "远古未处理应被 UPDATE 标记已处理");
     }
 }

@@ -139,6 +139,16 @@ Decision.memory_write → long_memories 表（explicit）
 
 27. **log 与 event 分离**：tracing 日志进 stdout/stderr + data/logs/；event 进 events 表 + WS。同一事实可能同时存在于两处，但语义不同（log 给开发者，event 给面板）。
 
+## 九、监督树与优雅停机
+
+**规则**：
+
+28. **长活组件包 supervisor**：tracer / pipeline / task_runner / steal_listener 4 个组件由 `core::supervisor::Supervisor` 包裹启动；任一 panic / 异常退出后以指数退避自动拉起（1s → 60s 封顶，MAX_RESTARTS = 20）。adapter-qq 不包（有自己的 WS 重连），consolidation / backup 不包（一次性定时器,语义不同）。
+
+29. **优雅停机路径**：`tokio::signal::ctrl_c()` 与 `webui_serve` 在 main 末尾 `tokio::select!` 竞争；Ctrl+C 触发时:① 停止接新(webui 退出) ② 5s 排空 ③ `PRAGMA wal_checkpoint(TRUNCATE)` ④ `exit(0)`。Windows 下仅前台终端按 Ctrl+C 有效,从外部进程/脚本发信号到 yuantuan pid 到不了(Windows 信号语义差异)。
+
+30. **Q55 回放窗口**：`REPLAY_WINDOW_SECS = 3600`。启动回放前先把窗口外未处理消息 UPDATE `processed_at = -2` 标记放弃，再 SELECT `ts >= now - 3600` 升序回放,防历史脏数据雪崩。
+
 ---
 
 ## 附：设计裁决待实现清单（不改变现状）

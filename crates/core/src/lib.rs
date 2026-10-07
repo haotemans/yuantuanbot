@@ -18,4 +18,5 @@ pub mod prefilter;
 pub mod reply_engine;
 pub mod skills;
 pub mod state;
+pub mod supervisor;
 pub mod tools;

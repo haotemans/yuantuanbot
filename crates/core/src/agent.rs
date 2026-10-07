@@ -36,6 +36,7 @@ const MAX_PARSE_FAILURES: u32 = 2;
 /// tool 连续抛错上限
 const MAX_TOOL_FAILURES: u32 = 3;
 
+#[derive(Clone)]
 pub struct TaskRunnerDeps {
     pub db_path: PathBuf,
     pub llm: SharedLlm,
