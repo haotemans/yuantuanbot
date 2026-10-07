@@ -11,11 +11,14 @@
         适配器 · {{ d.adapter_connected ? '已连接' : '离线' }}
       </n-tag>
       <n-tag round size="small">mood · {{ d.mood ?? '—' }}</n-tag>
+      <n-tag round size="small" class="mono" :type="cpuType">
+        CPU · {{ fmtCpu(d.cpu_percent) }}
+      </n-tag>
       <n-tag round size="small" class="mono">运行 · {{ fmtUptime(d.uptime_secs) }}</n-tag>
       <n-button size="tiny" secondary @click="load">刷新</n-button>
     </div>
 
-    <n-grid cols="1 s:2 l:4" :x-gap="14" :y-gap="14" responsive="screen">
+    <n-grid cols="1 s:2 l:3 xl:6" :x-gap="14" :y-gap="14" responsive="screen">
       <n-gi v-for="s in statCards" :key="s.label">
         <n-card class="stat-card" size="small">
           <div class="stat-label">
@@ -24,10 +27,11 @@
           </div>
           <div class="stat-foot">
             <span class="stat-num">
-              <CountUp :value="s.value" />
+              <CountUp :value="s.value" />{{ s.suffix ?? '' }}
             </span>
             <Sparkline :points="s.points" :color="s.color" />
           </div>
+          <div class="stat-sub" v-if="s.hint">{{ s.hint }}</div>
         </n-card>
       </n-gi>
     </n-grid>
@@ -74,7 +78,7 @@
 <script>
 // 会话级采样历史（模块作用域，切页不丢）：四个指标的近实时走势，30s 一个点
 const TREND_CAP = 40
-const trend = { inToday: [], outToday: [], decision: [], tasks: [] }
+const trend = { inToday: [], outToday: [], decision: [], tasks: [], tokens: [], mem: [] }
 </script>
 
 <script setup>
@@ -112,7 +116,28 @@ const statCards = computed(() => [
   { label: '今日发', value: d.value.messages_out_today, color: '#4f46e5', points: trend.outToday },
   { label: '今日 Decision 调用', value: d.value.decision_calls_today, color: '#d97706', points: trend.decision },
   { label: '活跃任务', value: d.value.active_tasks, color: '#7c3aed', points: trend.tasks },
+  { label: '今日 token', value: d.value.tokens_today, color: '#0891b2', points: trend.tokens,
+    hint: `入 ${fmtNum(d.value.tokens_in_today)} · 出 ${fmtNum(d.value.tokens_out_today)} · ${d.value.llm_calls_today ?? 0} 次` },
+  { label: '进程内存', value: memMb.value, color: '#16a34a', points: trend.mem, suffix: ' MB',
+    hint: `系统 ${fmtNum(Math.round((d.value.mem_total_bytes ?? 0) / 1048576))} MB` },
 ])
+
+const memMb = computed(() => Math.round((d.value.mem_rss_bytes ?? 0) / 1048576))
+const cpuType = computed(() => {
+  const c = d.value.cpu_percent ?? 0
+  if (c >= 80) return 'error'
+  if (c >= 50) return 'warning'
+  return 'default'
+})
+function fmtNum(n) {
+  if (n == null) return '0'
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k'
+  return String(n)
+}
+function fmtCpu(c) {
+  return (c ?? 0).toFixed(1) + '%'
+}
 
 // 前端聚合：拉最近事件样本，按今天 0 点起分小时桶（收=MessageReceived，发=BubbleSent）
 function aggregateHours(events) {
@@ -139,6 +164,8 @@ async function load() {
     sample('outToday', data.messages_out_today)
     sample('decision', data.decision_calls_today)
     sample('tasks', data.active_tasks)
+    sample('tokens', data.tokens_today)
+    sample('mem', Math.round((data.mem_rss_bytes ?? 0) / 1048576))
   } catch { /* 401 由拦截器处理 */ }
   try {
     const { data } = await api.get('/events?limit=500')

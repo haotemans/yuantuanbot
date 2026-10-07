@@ -130,12 +130,33 @@ impl CostGate {
     }
 }
 
+/// 一次 LLM 调用的 token 用量（OpenAI 兼容端点 usage 字段；缺失时全 0）
+#[derive(Debug, Clone, Default)]
+pub struct LlmUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// 用量记录（交给 sink 落库/统计）
+#[derive(Debug, Clone)]
+pub struct LlmUsageRecord {
+    pub role: Role,
+    pub model: String,
+    pub usage: LlmUsage,
+}
+
+/// 用量汇聚回调：装配侧注入（一般写 llm_usage 表）；LLM 网关不依赖 db（core 纯净性）
+pub type UsageSink = std::sync::Arc<dyn Fn(LlmUsageRecord) + Send + Sync>;
+
 pub struct LlmGateway {
     roles: HashMap<Role, ResolvedRole>,
     /// 原始 provider 配置（base_url + api_key），用于 WebUI 的「获取可用模型」功能
     providers: HashMap<String, ProviderRuntime>,
     http: reqwest::Client,
     gate: CostGate,
+    /// 可选：每次成功 chat 后回调。None = 不统计（测试/未装配）
+    usage_sink: Option<UsageSink>,
 }
 
 /// 运行时的 provider 凭据（解析后），用于按名查询
@@ -215,7 +236,13 @@ impl LlmGateway {
             providers,
             http,
             gate: CostGate::new(30),
+            usage_sink: None,
         })
+    }
+
+    /// 装配侧注入 usage sink（main 里写 llm_usage 表）
+    pub fn set_usage_sink(&mut self, sink: UsageSink) {
+        self.usage_sink = Some(sink);
     }
 
     pub fn role(&self, role: Role) -> Option<&ResolvedRole> {
@@ -327,10 +354,23 @@ impl LlmGateway {
             bail!("角色 {role} HTTP {status}: {}", &text[..text.len().min(300)]);
         }
         let v: Value = serde_json::from_str(&text).context("LLM 响应非 JSON")?;
-        v.pointer("/choices/0/message/content")
+        let content = v
+            .pointer("/choices/0/message/content")
             .and_then(|c| c.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("LLM 响应缺 choices[0].message.content"))
+            .ok_or_else(|| anyhow!("LLM 响应缺 choices[0].message.content"))?;
+        // 用量统计：有 sink 就上报；没 sink 或响应不带 usage 都静默
+        if let Some(sink) = &self.usage_sink {
+            let usage = v.get("usage").map(|u| LlmUsage {
+                prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                completion_tokens: u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+            }).unwrap_or_default();
+            if usage.total_tokens > 0 {
+                sink(LlmUsageRecord { role, model: r.model.clone(), usage });
+            }
+        }
+        Ok(content)
     }
 }
 

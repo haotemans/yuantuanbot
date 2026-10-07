@@ -465,7 +465,38 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
         return None;
     }
     match yuantuan_core::llm::LlmGateway::load(path) {
-        Ok(g) => Some(std::sync::Arc::new(g)),
+        Ok(mut g) => {
+            // token 用量落库：llm_usage 表（仪表盘"今日 token"卡）
+            let db = std::path::PathBuf::from("data/yuantuan.db");
+            g.set_usage_sink(std::sync::Arc::new(move |rec: yuantuan_core::llm::LlmUsageRecord| {
+                let db = db.clone();
+                tokio::spawn(async move {
+                    let res = tokio::task::spawn_blocking(move || {
+                        let conn = yuantuan_core::db::connect(&db).ok()?;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        conn.execute(
+                            "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            rusqlite::params![
+                                now,
+                                rec.role.to_string(),
+                                rec.model,
+                                rec.usage.prompt_tokens as i64,
+                                rec.usage.completion_tokens as i64,
+                                rec.usage.total_tokens as i64,
+                            ],
+                        ).ok()
+                    }).await;
+                    if let Err(e) = res {
+                        tracing::debug!(error = %e, "llm_usage 落库任务失败");
+                    }
+                });
+            }));
+            Some(std::sync::Arc::new(g))
+        }
         Err(e) => {
             tracing::warn!(error = %e, "providers.toml 解析失败，LLM 角色全部不可用");
             None

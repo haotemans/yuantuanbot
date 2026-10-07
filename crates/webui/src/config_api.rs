@@ -216,9 +216,33 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         std::fs::write(&tmp, &toml_text).map_err(|e| err(&format!("写临时文件失败: {e}")))?;
         let check = yuantuan_core::llm::LlmGateway::load(&tmp);
         let _ = std::fs::remove_file(&tmp);
-        let gateway = check.map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("providers.toml 校验失败: {e}") }))))?;
+        let mut gateway = check.map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("providers.toml 校验失败: {e}") }))))?;
         std::fs::write(&state.extras.providers_path, &toml_text)
             .map_err(|e| err(&format!("写 providers.toml 失败: {e}")))?;
+        // 热重建也要带 usage sink，否则换槽后 token 统计断掉
+        let db = state.db_path.clone();
+        gateway.set_usage_sink(std::sync::Arc::new(move |rec: yuantuan_core::llm::LlmUsageRecord| {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let conn = yuantuan_core::db::connect(&db).ok()?;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    conn.execute(
+                        "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            now, rec.role.to_string(), rec.model,
+                            rec.usage.prompt_tokens as i64,
+                            rec.usage.completion_tokens as i64,
+                            rec.usage.total_tokens as i64,
+                        ],
+                    ).ok()
+                }).await;
+            });
+        }));
         *state.extras.llm_slot.write().unwrap() = Some(std::sync::Arc::new(gateway));
         applied.push("LLM Provider 重建热应用".into());
     }

@@ -244,10 +244,26 @@ CREATE TABLE IF NOT EXISTS media_credits (
 -- 选 state_kv 而非新表，因为键值型写多读少，且不需 schema 变更
 "#;
 
+/// V3：LLM token 用量统计（仪表盘"今日 token"卡数据源）
+const V3_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,                 -- unix 秒
+    role TEXT NOT NULL,                  -- decision / bot_chat / agent_exec / optimizer / ...
+    model TEXT NOT NULL,
+    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_role_ts ON llm_usage(role, ts);
+"#;
+
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 2] = [
+const MIGRATIONS: [(&str, &str); 3] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     ("V0.2 媒体生成：media_providers/models/tasks/credits 4 张表", V2_SQL),
+    ("V0.3 LLM 用量：llm_usage 表（仪表盘 token 统计）", V3_SQL),
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {

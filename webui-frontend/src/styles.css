@@ -651,6 +651,15 @@ code {
   justify-content: space-between;
   gap: 8px;
 }
+.stat-sub {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--yt-ink-3);
+  font-family: var(--yt-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .stat-hint {
   font-size: 11.5px;
   color: var(--yt-text-dim);
