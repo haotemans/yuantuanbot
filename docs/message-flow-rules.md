@@ -61,7 +61,9 @@ Event::MessageReceived
 
 10. **Decision 是分类器不是对话者**：输出严格 JSON schema（action/mood/mention/reply_len/...），两次解析失败兜底 ignore。
 
-11. **Decision 并发（Q52 ✅）**：dispatcher + per-chat worker 拓扑——dispatcher 订阅 broadcast 按 chat_id 派发到 mpsc（cap 32)，每 chat 一个 worker 串行 handle；不同 chat 并发互不堵塞；单 chat 瞬时洪峰超过 32 时降级同步 handle 保底不丢。Q54 窗口聚合仍待实现。
+11. **Decision 并发（Q52 ✅）**：dispatcher + per-chat worker 拓扑——dispatcher 订阅 broadcast 按 chat_id 派发到 mpsc（cap 32)，每 chat 一个 worker 串行 handle；不同 chat 并发互不堵塞；单 chat 瞬时洪峰超过 32 时降级同步 handle 保底不丢。
+
+11a. **10s 窗口聚合（Q54 ✅）**:dispatcher→`WindowAggregator`→worker 三段。Anchor = 触发开窗的第一条;others = 窗口持续期间追加的同 chat 普通消息;窗口固定 10s 不延长,到期 fire 时 others 立刻 mark_processed(防 Q55 重启雪崩),anchor 入 worker 触发一次 decide。decide 内部 `build_context` 从 db 拉最近消息(others 早已被 ingest 落库)自然进入上下文,**decide 不需要为 Q54 改签名**。/image 等 media 命令绕过聚合直派 worker(命令要立刻响应,延迟 10s 不合理)。高优先级 @/引用独立窗口本期未做,挂在 Q56-62 一起做。
 
 12. **成本闸 + 全局并发（Q53 ✅）**：`LlmGateway::chat` 两道闸——① `CostGate` 滑动窗口（decision 30/min 可调，超限排队）;② 全局 `tokio::Semaphore` 4 许可，三角色共享，超出排队。正交不替代。
 
@@ -157,7 +159,7 @@ Decision.memory_write → long_memories 表（explicit）
 |---|---|---|
 | Q52 | 按 chat 隔离受限并发 | ✅ 已落地（dispatcher + per-chat mpsc worker) |
 | Q53 | 全局 LLM 并发 ≤4 | ✅ 已落地（`LlmGateway` Semaphore 4，三角色共享） |
-| Q54 | 10s 窗口聚合 | ❌ 未实现 |
+| Q54 | 10s 窗口聚合 | ✅ 已落地(`core::window::WindowAggregator`;dispatcher→聚合器→per-chat worker;/image 等 media 命令绕过窗口直派;anchor=首条;others 立即 mark_processed;高优先级 @/引用独立窗口待 Q56-62) |
 | Q55 | 消息流水持久化恢复 | ✅ 已落地（messages.processed_at V4 + 启动回放管线；回放跳过 /image 命令） |
 | Q56-Q62 | anchor 锚定 + window_messages 有界 | ❌ 未实现 |
 | Q64 | 同 chat 按窗口顺序进发送队列 | ✅ 已落地（per-chat 队列保序） |

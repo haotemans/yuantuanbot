@@ -222,6 +222,81 @@ INFO WebUI 开始监听 addr=127.0.0.1:8085
 
 ---
 
+## 五轮(2026-10-08):Q54 10s 窗口聚合(管线最后一块落地)
+
+### 触发
+用户:「继续修后端」→ frontier 仅剩 Q54 是真正影响成本的管线裁决。
+
+### 核心设计(全部自行裁决,授权内可逆)
+
+**Q005 实现形态**:dispatcher→窗口聚合器→per-chat worker 三段
+- 新增 `core::window` 模块,`WindowAggregator` 按 chat 隔离 lane
+- **不**在 worker 内 `sleep(10s)`:会饿死 worker / mpsc 满导致同步保底卡死 dispatcher
+
+**Q006 anchor 选择**:固定为触发开窗的第一条(Q54 明确「回复锚点固定为 A」)
+- others = 窗口持续期间追加的同 chat 消息(紧凑,不延长窗口)
+
+**Q007 高优先级 @/引用独立窗口本期不做**(下轮跟 Q56-62 上下文窗口控制一起做)
+- 理由:Q54 的主收益是降本(N 条消息 → 1 次 LLM),90% 价值已拿到;独立窗口是正确性补丁,跟上下文控制耦合
+
+**Q008 失败处理**:沿用 decide 现有事件分发,不动
+
+**Q009 窗口消息上限**:本模块不设上限,由 context_builder 取最后 30 条那里统一卡
+
+**Q54 关键洞察**:`decide → build_context` 已经从 db 拉最近消息(且 ingest 早把 others 写库),所以 **decide 不需要改**——窗口 fire 后 anchor handle 跑 decide,自然看到窗口期间所有消息。
+
+### MOD-B14 WindowAggregator 模块
+`crates/core/src/window.rs`:
+- `feed(m, on_fire)` 按 chat 分 lane,每 chat 一个 tokio 协程管固定窗口
+- `WindowBatch { chat_id, anchor, others }` 作为 fire 载荷
+- `OnFire = Arc<dyn Fn(WindowBatch) -> Future>` 用户自定义消费
+- cancel 信号 `Arc<AtomicBool>` 轮询 100ms(不引 tokio-util 依赖)
+- 默认 `DEFAULT_WINDOW_SECS = 10` Q54 定稿
+- lane 满 64 条瞬时洪峰 → debug log,本 batch 不丢(lane 满等下次 fire 自然重开)
+- 3 单测全过:基本 fire / 多 chat 独立窗口 / cancel 停止
+
+### MOD-B15 bot.rs dispatcher 接入
+- `spawn_pipeline` 内部加 aggregator 中间层
+- /image 等 media 命令绕过聚合,直派 worker(命令要「立刻」响应,延迟 10s 不合理)
+- 非命令消息走 aggregator 聚合
+- on_fire 回调:others 先 `mark_processed` 防 Q55 雪崩;anchor try_send 给 per-chat worker;channel 满同步 handle 保底
+- buffer lanes 在 RwLock<HashMap> 中共享给 on_fire 闭包(否则闭包拿不到 lanes ref)
+
+### MOD-B16 集成测试重写(Q54 语义适配)
+原 `decision_pipeline_end_to_end` 断言「3 条消息 → 3 次 DecisionMade」在 Q54 下不再成立。拆成两个:
+
+1. `decision_pipeline_q54_window_aggregation`:
+   - 同 chat 3 条紧密连发(每 120ms 一条)
+   - 期望 **恰好 1 次 DecisionMade**(且不会冒出第二次)
+   - 期望 `messages.processed_at` 全部非空(Q54 others 立即回写)
+   - mock LLM 只喂 1 个响应
+   - 跑 13s(窗 10s + 收发 + LLM 调用)
+
+2. `decision_pipeline_fallback_retries`:
+   - 独立 chat 触发 fallback → retries=1
+   - mock LLM 喂 2 个垃圾输出
+   - 断言 fallback=true retries=1
+
+3. `wait_until` 超时从 10s → 25s(Q54 单窗本身要 10s)
+
+### 测试状态
+- `cargo test --workspace` 19 ok 零 FAILED
+- 新增 window.rs 3 单测 + 集成测试 2 个全过
+- vite build 468ms ✓
+
+### 验证命令
+- `cargo test -p yuantuan-core --lib window` → 3 ok
+- `cargo test -p yuantuan-adapter-qq --test pipeline` → 2 ok
+- `cargo test --workspace` → 19 ok
+
+### Frontier(下轮)
+- Q56-Q62 anchor 上下文窗口控制(state 8000 字符 / window_messages 30 条 / 8192 tokens 硬卡 / bot_chat 40000 字符预算)—— 需要新实现,tokenizer 接入是重头
+- @/引用独立高优先级窗口(挂在 Q56-62 实现时一起做)
+- Q65 MCP decide(继续 OpenAI 兼容,已 G002 暂缓)
+- prefilter 120 行 TODO 口径不一致:文档说「60s 4 个回复回合」代码不是 — 小清理,跟 Q56 一起收口
+
+---
+
 ## 四轮(2026-10-08):Docker 部署 + G007 重写(Q2 frontier 收口)
 
 ### 触发

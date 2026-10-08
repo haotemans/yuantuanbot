@@ -143,15 +143,82 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         if !decision_ready(&deps.llm) {
             warn!("Decision 角色未配置（providers.toml）：配置前消息过 Prefilter 后直接 ignore，管线照常运行");
         }
-        info!("Decision 管线已启动（Q52 per-chat 并发）");
+        info!("Decision 管线已启动（Q52 per-chat 并发 + Q54 10s 窗口聚合）");
         let deps = Arc::new(deps);
         let mut lanes: std::collections::HashMap<String, tokio::sync::mpsc::Sender<MessageReceivedPayload>> =
             std::collections::HashMap::new();
+
+        // Q54 窗口聚合器:
+        //   固定 10s 窗口,同 chat 普通消息追加,不重复开窗;anchor 固定为第一条;
+        //   窗口到期 fire → anchor 进 per-chat worker 触发一次 decide;
+        //   others(Q54 窗口内累积的 N 条)在 decide 中通过 build_context 的最近消息
+        //   SQL 拉取自然进入上下文(消息早被 ingest 落库在本进程,时机窗口内已写入);
+        //   others 需立刻 mark_processed,Q55 重启不再回放(窗口 fire 后 anchor 替身已代表整个 batch)。
+        let deps_for_fire = Arc::clone(&deps);
+        let lanes_for_fire: Arc<
+            RwLock<std::collections::HashMap<String, tokio::sync::mpsc::Sender<MessageReceivedPayload>>>,
+        > = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let lanes_for_fire_clone = Arc::clone(&lanes_for_fire);
+        let on_fire: crate::window::OnFire = Arc::new(move |batch: crate::window::WindowBatch| {
+            let deps = Arc::clone(&deps_for_fire);
+            let lanes_clone = Arc::clone(&lanes_for_fire_clone);
+            Box::pin(async move {
+                // others 立刻回写 processed_at(否则 Q55 重启会把它们当未处理回放,雪崩)
+                for om in &batch.others {
+                    mark_processed(&deps.db_path, om.msg_id);
+                }
+
+                // anchor 进 per-chat worker(保序不丢);worker 拿不到 lane 则同步保底
+                let chat_id = batch.anchor.chat_id.clone();
+                let tx_opt = lanes_clone.read().unwrap().get(&chat_id).cloned();
+                match tx_opt {
+                    Some(tx) => {
+                        if let Err(e) = tx.try_send(batch.anchor.clone()) {
+                            debug!(chat_id = %chat_id, error = %e, "Q54 anchor 入队失败,同步保底");
+                            handle(&deps, &batch.anchor).await;
+                        }
+                    }
+                    None => {
+                        debug!(chat_id = %chat_id, "Q54 anchor 找不到 lane(不该发生),同步保底");
+                        handle(&deps, &batch.anchor).await;
+                    }
+                }
+            })
+        });
+        let mut aggregator = crate::window::WindowAggregator::new(crate::window::DEFAULT_WINDOW_SECS);
+
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
+                    // /image 等命令走原 dispatcher→worker 直派,不进窗口(特效速报)
+                    let is_media_cmd = deps.media_ctx.is_some()
+                        && crate::tools::media::command::match_image_command(&m.text).is_some();
+
+                    if is_media_cmd {
+                        let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
+                            let cap = *deps.per_chat_cap.read().unwrap();
+                            let (tx, mut lane_rx) =
+                                tokio::sync::mpsc::channel::<MessageReceivedPayload>(cap.max(1));
+                            let deps2 = Arc::clone(&deps);
+                            let chat = m.chat_id.clone();
+                            tokio::spawn(async move {
+                                while let Some(mm) = lane_rx.recv().await {
+                                    handle(&deps2, &mm).await;
+                                }
+                                debug!(chat_id = %chat, "chat worker 退出(dispatcher 关闭)");
+                            });
+                            tx
+                        });
+                        lanes_for_fire.write().unwrap().insert(m.chat_id.clone(), lane.clone());
+                        if let Err(e) = lane.try_send(m.clone()) {
+                            debug!(chat_id = %m.chat_id, error = %e, "per-chat 队列满,同步处理保底");
+                            handle(&deps, &m).await;
+                        }
+                        continue;
+                    }
+
+                    // 非命令路径:对该 chat 首条建立 lane 并 record map
                     let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
-                        // G008 热应用：新 worker 读槽当前值；旧 worker 容量定型不受影响
                         let cap = *deps.per_chat_cap.read().unwrap();
                         let (tx, mut lane_rx) =
                             tokio::sync::mpsc::channel::<MessageReceivedPayload>(cap.max(1));
@@ -165,11 +232,10 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                         });
                         tx
                     });
-                    // try_send 保底：channel 满（单 chat 洪峰）→ 同步 handle，不丢消息
-                    if let Err(e) = lane.try_send(m.clone()) {
-                        debug!(chat_id = %m.chat_id, error = %e, "per-chat 队列满，同步处理保底");
-                        handle(&deps, &m).await;
-                    }
+                    lanes_for_fire.write().unwrap().insert(m.chat_id.clone(), lane.clone());
+
+                    // 进 Q54 聚合器,窗口到期由 on_fire 把 anchor 推给 worker(见上)
+                    aggregator.feed(m, on_fire.clone());
                 }
                 Ok(_) => {} // 其余事件类型本管线不消费
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

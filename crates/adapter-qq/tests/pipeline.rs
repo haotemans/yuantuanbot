@@ -151,39 +151,33 @@ fn at_message(id: u64, uid: u64, text: &str) -> Value {
 }
 
 fn wait_until<F: FnMut() -> bool>(mut cond: F, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(25); // Q54 窗口 10s,加 buffer
     while !cond() {
         assert!(Instant::now() < deadline, "超时未完成：{what}");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
+/// Q54 语义:同 chat 窗口内 N 条消息聚合 1 次 Decide。
+/// 三条消息 @bot 同 chat 紧凑发送 → 1 次窗口 → 1 次 DecisionMade(回复锚定 A)。
+/// mock LLM 只喂一次响应,验证 memory_write / 落库在 Q54 语义下仍成立。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn decision_pipeline_end_to_end() {
+async fn decision_pipeline_q54_window_aggregation() {
     let db_path = temp_db();
 
-    // mock LLM：三次调用的 content（按请求顺序出队）
-    let good_reply = json!({
-        "action": "reply", "mood": "happy", "mention": false, "reply_len": "short",
-        "meme_type": null, "task_goal": null, "memory_write": null, "reason": "他@我打招呼"
-    })
-    .to_string();
-    let good_memory = json!({
+    // Q54 下 3 条同 chat 消息 = 1 次 Decide;只喂一个 content
+    let good = json!({
         "action": "ignore", "mood": "calm", "mention": false, "reply_len": "short",
-        "meme_type": null, "task_goal": null, "memory_write": "小明是 Rust 爱好者", "reason": "记下技术偏好"
+        "meme_type": null, "task_goal": null,
+        "memory_write": "小明是 Rust 爱好者",
+        "reason": "Q54 窗口聚合一次 Decide"
     })
     .to_string();
-    let responses = Arc::new(Mutex::new(VecDeque::from(vec![
-        good_reply,
-        good_memory,
-        "这不是 JSON".to_string(),
-        "{\"action\": 123}".to_string(),
-    ])));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![good])));
     let llm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let llm_port = llm_listener.local_addr().unwrap().port();
     tokio::spawn(mock_llm(llm_listener, responses.clone()));
 
-    // providers.toml → LlmGateway
     let dir = temp_dir("pipeline-cfg");
     let providers_path = dir.join("providers.toml");
     std::fs::write(
@@ -194,10 +188,7 @@ async fn decision_pipeline_end_to_end() {
     )
     .unwrap();
     let gateway = LlmGateway::load(&providers_path).unwrap();
-    assert!(gateway.role(yuantuan_core::llm::Role::Decision).is_some());
 
-    // bus + tracer + adapter + 管线
-    // bus + tracer + adapter + 管线
     let bus = EventBus::new(128);
     let _tracer = spawn_tracer(&bus, db_path.clone());
     let self_ids = SelfMsgIds::default();
@@ -205,7 +196,7 @@ async fn decision_pipeline_end_to_end() {
     let nap_events = vec![
         at_message(201, 2001, "云团在吗"),
         at_message(202, 2001, "我很喜欢 Rust"),
-        at_message(203, 2001, "测试兜底"),
+        at_message(203, 2001, "Q54 同窗口追加"),
     ];
     tokio::spawn(mock_napcat(nap_port, nap_events));
     let handle = spawn(
@@ -234,40 +225,36 @@ async fn decision_pipeline_end_to_end() {
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
 
-    // 断言 1：三条消息各产出一条 DecisionMade（reply / ignore+memory / fallback ignore）
+    // Q54 断言:同 chat 3 条 → 恰好 1 次 DecisionMade(窗口到期才发)
     wait_until(
         || {
             let conn = db::connect(&db_path).unwrap();
             let n: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
                 .unwrap();
-            n == 3
+            n == 1
         },
-        "三条 DecisionMade 事件",
+        "Q54 同 chat 3 条 → 1 次 DecisionMade(10s 窗口到期)",
     );
+    // 再多等一段时间,确认不会突然冒出第二次(即不会 leak 二窗)
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let conn = db::connect(&db_path).unwrap();
-    let mut stmt = conn
-        .prepare("SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id")
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
         .unwrap();
-    let payloads: Vec<Value> = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .unwrap()
-        .map(|r| serde_json::from_str(&r.unwrap()).unwrap())
-        .collect();
+    assert_eq!(n, 1, "Q54 窗口聚合恰好 1 次 Decide");
 
-    let p0 = &payloads[0];
-    assert_eq!(p0["action"], "reply");
-    assert_eq!(p0["fallback"], false);
-    assert_eq!(p0["mood"], "happy");
-    assert_eq!(p0["chat_id"], "555666");
-    assert!(p0["elapsed_ms"].is_u64());
+    let payload_str: String = conn
+        .query_row("SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let p: Value = serde_json::from_str(&payload_str).unwrap();
+    // 回复锚定第一条(Q54 设计:anchor 固定为 A)
+    assert_eq!(p["chat_id"], "555666");
+    assert_eq!(p["sender_pid"], "p_2001");
+    assert_eq!(p["fallback"], false);
+    assert_eq!(p["action"], "ignore");
 
-    let p2 = &payloads[2];
-    assert_eq!(p2["action"], "ignore");
-    assert_eq!(p2["fallback"], true);
-    assert_eq!(p2["retries"], 1);
-
-    // 断言 2：memory_write 落 long_memories（owner=person，source=explicit）
+    // memory_write 落 long_memories(Q54 单 decide 也应该写)
     let (content, source): (String, String) = conn
         .query_row(
             "SELECT content, source FROM long_memories WHERE owner_type = 'person' AND owner_id = 'p_2001'",
@@ -278,7 +265,88 @@ async fn decision_pipeline_end_to_end() {
     assert_eq!(content, "小明是 Rust 爱好者");
     assert_eq!(source, "explicit");
 
-    // messages 3 条全部落库（摄取未受管线影响）
+    // messages 3 条全部落库(摄取未受影响)且 processed_at 全标记(Q54 others 立即回写)
     let mcount: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
     assert_eq!(mcount, 3);
+    let unprocessed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages WHERE processed_at IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(unprocessed, 0, "Q54 others 也要立刻 processed_at 回写");
+}
+
+/// 垃圾输出 fallback 兜底:第一次返回非 JSON → 重试一次仍是非法 → fallback ignore,retries=1。
+/// 需要独立窗口(独立 chat_id)避免与 Q54 主流程事件混在一起。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn decision_pipeline_fallback_retries() {
+    let db_path = temp_db();
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![
+        "这不是 JSON".to_string(),
+        "{\"action\": 123}".to_string(),
+    ])));
+    let llm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let llm_port = llm_listener.local_addr().unwrap().port();
+    tokio::spawn(mock_llm(llm_listener, responses.clone()));
+
+    let dir = temp_dir("pipeline-cfg");
+    let providers_path = dir.join("providers.toml");
+    std::fs::write(
+        &providers_path,
+        format!(
+            "[provider.mock]\nbase_url = \"http://127.0.0.1:{llm_port}/v1\"\napi_key_env = \"\"\n\n[roles]\ndecision = {{ provider = \"mock\", model = \"m\" }}\n"
+        ),
+    )
+    .unwrap();
+    let gateway = LlmGateway::load(&providers_path).unwrap();
+
+    let bus = EventBus::new(128);
+    let _tracer = spawn_tracer(&bus, db_path.clone());
+    let self_ids = SelfMsgIds::default();
+    let nap_port = free_port();
+    let nap_events = vec![at_message(301, 2009, "独立 chat 触发 fallback")];
+    tokio::spawn(mock_napcat(nap_port, nap_events));
+    let handle = spawn(
+        bus.clone(),
+        db_path.clone(),
+        NapcatConfig {
+            listen_addr: format!("127.0.0.1:{nap_port}"),
+            token: yuantuan_adapter_qq::shared_token(""),
+        },
+        self_ids.clone(),
+    );
+    let _pipeline = spawn_pipeline(PipelineDeps {
+        bus: bus.clone(),
+        db_path: db_path.clone(),
+        llm: Arc::new(std::sync::RwLock::new(Some(Arc::new(gateway)))),
+        self_qq: handle.self_qq_shared(),
+        self_ids,
+        mood: MoodState::default(),
+        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        reply: None,
+        reply_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+        memes_dir: temp_dir("pipeline-memes"),
+        media_ctx: None,
+        skill_registry: None,
+        per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
+    });
+
+    wait_until(
+        || {
+            let conn = db::connect(&db_path).unwrap();
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
+                .unwrap();
+            n >= 1
+        },
+        "fallback 触发 DecisionMade",
+    );
+
+    let conn = db::connect(&db_path).unwrap();
+    let payload_str: String = conn
+        .query_row("SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    let p: Value = serde_json::from_str(&payload_str).unwrap();
+    assert_eq!(p["action"], "ignore");
+    assert_eq!(p["fallback"], true);
+    assert_eq!(p["retries"], 1);
 }
