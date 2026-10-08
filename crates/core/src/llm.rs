@@ -88,6 +88,27 @@ pub struct ResolvedRole {
     api_key: Option<String>,
 }
 
+/// 判断 api_key_env 字段值是「直接密钥」还是「环境变量名」。
+/// 规则:以 sk- 开头(主流 LLM 密钥前缀)或包含环境变量名禁用字符(- / 空格 等)→ 直接密钥;
+/// 否则视为环境变量名。
+pub fn looks_like_direct_key(value: &str) -> bool {
+    value.starts_with("sk-")
+        || value.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// 解析 api_key_env 字段 → 实际的 key。空 → None;直接密钥 → 自身;
+/// 环境变量名 → process env 查找,缺失/为空 → None(调用方自行告警)
+pub fn resolve_api_key(api_key_env: &str) -> Option<String> {
+    let v = api_key_env.trim();
+    if v.is_empty() {
+        return None;
+    }
+    if looks_like_direct_key(v) {
+        return Some(v.to_string());
+    }
+    std::env::var(v).ok().filter(|s| !s.is_empty())
+}
+
 /// 全局成本闸：滑动窗口计数，超限排队延迟不丢弃；per_min 运行时可调（节流热应用）
 #[derive(Debug, Clone)]
 pub struct CostGate {
@@ -195,22 +216,11 @@ impl LlmGateway {
                     let api_key = if p.api_key_env.is_empty() {
                         None
                     } else {
-                        // 兼容直填密钥:
-                        //   值以 sk- 开头(主流 LLM 密钥前缀)或包含环境变量名禁用字符(- / 空格 等),
-                        //   直接当密钥本身使用;否则当环境变量名查找。
-                        // 这样运维既可写 api_key_env = "RINKO_API_KEY"(正统),也可写
-                        //   api_key_env = "sk-WUmh..."(直接粘密钥,面板 UX 直观)。
-                        let looks_like_key = p.api_key_env.starts_with("sk-")
-                            || p.api_key_env.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-                        if looks_like_key {
-                            Some(p.api_key_env.clone())
-                        } else {
-                            match std::env::var(&p.api_key_env) {
-                                Ok(k) if !k.is_empty() => Some(k),
-                                _ => {
-                                    tracing::warn!(role = %role, env = %p.api_key_env, "API key 环境变量缺失，该角色不可用");
-                                    continue;
-                                }
+                        match resolve_api_key(&p.api_key_env) {
+                            Some(k) => Some(k),
+                            None => {
+                                tracing::warn!(role = %role, env = %p.api_key_env, "API key 缺失或环境变量未设,该角色不可用(可直粘 sk- 或 export 环境名)");
+                                continue;
                             }
                         }
                     };
@@ -233,14 +243,7 @@ impl LlmGateway {
             let api_key = if p.api_key_env.is_empty() {
                 None
             } else {
-                // 同 ResolvedRole 逻辑:sk- 前缀或含非标识符字符时直接当密钥
-                let looks_like_key = p.api_key_env.starts_with("sk-")
-                    || p.api_key_env.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-                if looks_like_key {
-                    Some(p.api_key_env.clone())
-                } else {
-                    std::env::var(&p.api_key_env).ok().filter(|s| !s.is_empty())
-                }
+                resolve_api_key(&p.api_key_env)
             };
             providers.insert(
                 name.clone(),

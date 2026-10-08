@@ -34,9 +34,11 @@ pub async fn test(State(state): State<AppState>, Json(body): Json<TestBody>) -> 
         return Err(bad(&format!("角色 {role} 绑定的 provider「{provider}」在 providers.toml 中不存在")));
     };
     let env_name = prov.get("api_key_env").and_then(|e| e.as_str()).unwrap_or("");
-    if !env_name.is_empty() && std::env::var(env_name).map(|v| v.is_empty()).unwrap_or(true) {
+    let env_name = env_name.trim();
+    // sk- 直填 vs 环境变量名:resolve_api_key 给出 None 时报错
+    if !env_name.is_empty() && yuantuan_core::llm::resolve_api_key(env_name).is_none() {
         return Err(bad(&format!(
-            "provider「{provider}」的 API key 环境变量 {env_name} 未设置或为空——密钥不走面板，配到服务器环境后重试"
+            "provider「{provider}」的 API key 未就绪——值为 `{env_name}`,既非 sk- 开头的密钥也不是已设置的环境变量名"
         )));
     }
 
@@ -104,9 +106,11 @@ pub async fn probe_models(Json(body): Json<ProbeBody>) -> Result<Json<Value>, (S
     }
     let api_key = match body.api_key_env.as_deref().unwrap_or("").trim() {
         "" => None,
-        env_name => match std::env::var(env_name) {
-            Ok(k) if !k.is_empty() => Some(k),
-            _ => return Err(bad(&format!("环境变量 {env_name} 未设置或为空"))),
+        v => match yuantuan_core::llm::resolve_api_key(v) {
+            Some(k) => Some(k),
+            None => return Err(bad(&format!(
+                "API key 未就绪——值 `{v}` 既非 sk- 开头的密钥也不是已设置的环境变量名"
+            ))),
         },
     };
     let http = match reqwest::Client::builder()
