@@ -50,8 +50,8 @@ services:
       - napcat-qq:/app/napcat/config
       - napcat-cache:/app/.config/QQ
     ports:
-      - "127.0.0.1:3001:3001"    # NapCat WebUI,仅 SSH 隧道
-      - "127.0.0.1:6099:6099"    # NapCat HTTP API,仅 SSH 隧道(备用)
+      - "127.0.0.1:6099:6099"    # NapCat WebUI(/webui)+ HTTP API,仅 SSH 隧道
+      # 注:NapCat 的 WebUI 实际监听 6099 不是 3001;3001 是模板文档里的旧默认
     networks:
       - yuantuan-net
     depends_on:
