@@ -118,7 +118,7 @@
                        :usage="providerUsage(item.name)" @delete="delProvider(item.name)" />
       </div>
       <empty-state v-else title="还没有 Provider"
-                   hint="添加一个 OpenAI 兼容端点（base_url + 环境变量名）；密钥放服务器环境变量里" />
+                   hint="添加 OpenAI 兼容端点(base_url + 密钥);密钥可直接粘 sk- 或填环境变量名" />
     </n-card>
   </div>
 </template>

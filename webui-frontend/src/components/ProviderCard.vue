@@ -48,9 +48,9 @@
             <div class="field-hint">OpenAI 兼容端点，末尾不带斜杠</div>
           </div>
           <div class="field-block field-span-2">
-            <label class="field-label">API 密钥环境变量</label>
-            <n-input v-model:value="p.api_key_env" placeholder="OPENAI_API_KEY" size="medium" />
-            <div class="field-hint">密钥放服务器环境变量里，不写入配置；留空 = 无需密钥（本地 mock）</div>
+            <label class="field-label">API 密钥</label>
+            <n-input v-model:value="p.api_key_env" placeholder="sk-xxxx 直接粘密钥;或环境变量名如 OPENAI_API_KEY" size="medium" />
+            <div class="field-hint">直接粘 sk-xxxx 密钥;或填环境变量名(服务器端 export);留空 = 无需密钥(本地 mock)</div>
           </div>
         </div>
 

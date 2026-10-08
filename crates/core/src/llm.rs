@@ -195,11 +195,22 @@ impl LlmGateway {
                     let api_key = if p.api_key_env.is_empty() {
                         None
                     } else {
-                        match std::env::var(&p.api_key_env) {
-                            Ok(k) if !k.is_empty() => Some(k),
-                            _ => {
-                                tracing::warn!(role = %role, env = %p.api_key_env, "API key 环境变量缺失，该角色不可用");
-                                continue;
+                        // 兼容直填密钥:
+                        //   值以 sk- 开头(主流 LLM 密钥前缀)或包含环境变量名禁用字符(- / 空格 等),
+                        //   直接当密钥本身使用;否则当环境变量名查找。
+                        // 这样运维既可写 api_key_env = "RINKO_API_KEY"(正统),也可写
+                        //   api_key_env = "sk-WUmh..."(直接粘密钥,面板 UX 直观)。
+                        let looks_like_key = p.api_key_env.starts_with("sk-")
+                            || p.api_key_env.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+                        if looks_like_key {
+                            Some(p.api_key_env.clone())
+                        } else {
+                            match std::env::var(&p.api_key_env) {
+                                Ok(k) if !k.is_empty() => Some(k),
+                                _ => {
+                                    tracing::warn!(role = %role, env = %p.api_key_env, "API key 环境变量缺失，该角色不可用");
+                                    continue;
+                                }
                             }
                         }
                     };
@@ -222,7 +233,14 @@ impl LlmGateway {
             let api_key = if p.api_key_env.is_empty() {
                 None
             } else {
-                std::env::var(&p.api_key_env).ok().filter(|s| !s.is_empty())
+                // 同 ResolvedRole 逻辑:sk- 前缀或含非标识符字符时直接当密钥
+                let looks_like_key = p.api_key_env.starts_with("sk-")
+                    || p.api_key_env.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+                if looks_like_key {
+                    Some(p.api_key_env.clone())
+                } else {
+                    std::env::var(&p.api_key_env).ok().filter(|s| !s.is_empty())
+                }
             };
             providers.insert(
                 name.clone(),
