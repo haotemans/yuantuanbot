@@ -88,6 +88,20 @@ pub struct ResolvedRole {
     api_key: Option<String>,
 }
 
+impl ResolvedRole {
+    /// 诊断用：脱敏描述（base_url + key 长度 + key 前 12 位）
+    pub fn debug_descriptor(&self) -> String {
+        let key_info = match &self.api_key {
+            None => "None".to_string(),
+            Some(k) => format!("len={} prefix={:?}", k.len(), &k[..k.len().min(12)]),
+        };
+        format!(
+            "provider={} model={} base_url={} api_key={}",
+            self.provider, self.model, self.base_url, key_info
+        )
+    }
+}
+
 /// 判断 api_key_env 字段值是「直接密钥」还是「环境变量名」。
 /// 规则:以 sk- 开头(主流 LLM 密钥前缀)或包含环境变量名禁用字符(- / 空格 等)→ 直接密钥;
 /// 否则视为环境变量名。
@@ -258,6 +272,10 @@ impl LlmGateway {
             .timeout(Duration::from_secs(60))
             .build()
             .context("构建 LLM HTTP client 失败")?;
+        // 启动诊断：把每个角色解析结果（脱敏）打出来，方便定位「toml 写的 ≠ 内存跑的」
+        for (role, r) in &roles {
+            tracing::info!(role = %role, resolved = %r.debug_descriptor(), "LlmGateway 角色已绑定");
+        }
         Ok(Self {
             roles,
             providers,
