@@ -9,8 +9,8 @@ use std::path::Path;
 /// WAL 是读路径与多连接写入（adapter / tracer / webui 各自持连接）的基础；
 /// busy_timeout 兜底单写者队列落地前的偶发 BUSY。
 pub fn connect(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path)
-        .with_context(|| format!("打开数据库失败: {}", path.display()))?;
+    let conn =
+        Connection::open(path).with_context(|| format!("打开数据库失败: {}", path.display()))?;
     conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
         .context("设置 WAL 模式失败")?;
     conn.pragma_update(None, "foreign_keys", "ON")
@@ -260,17 +260,30 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_role_ts ON llm_usage(role, ts);
 "#;
 
 /// V4：Q55 消息流水持久化——pipeline 消费标记；重启扫 NULL 行回放进管线。
-/// ALTER 不幂等：真正的列添加走 add_column_if_missing（多测试/多进程竞态下安全）。
+/// ALTER 和列存在性检查必须在同一个 IMMEDIATE 迁移事务内。
 const V4_SQL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE processed_at IS NULL;
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 4] = [
+const MIGRATIONS: [(&str, &str); 5] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
-    ("V0.2 媒体生成：media_providers/models/tasks/credits 4 张表", V2_SQL),
+    (
+        "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
+        V2_SQL,
+    ),
     ("V0.3 LLM 用量：llm_usage 表（仪表盘 token 统计）", V3_SQL),
-    ("V0.4 消息消费标记（Q55 恢复消费）：messages.processed_at", V4_SQL),
+    (
+        "V0.4 消息消费标记（Q55 恢复消费）：messages.processed_at",
+        V4_SQL,
+    ),
+    (
+        "V0.5 任务调度与列表索引",
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_tasks_state_created ON tasks(state, created_at, task_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+    "#,
+    ),
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
@@ -286,23 +299,30 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         if current >= version {
             continue;
         }
-        // V4 前置：ALTER TABLE ADD COLUMN 非幂等，且对未提交事务间的竞态敏感——
-        // 先查 PRAGMA table_info 再决定 ALTER；列已存在则仅刷索引+推进版本
-        if version == 4 {
-            add_column_if_missing(conn, "messages", "processed_at", "INTEGER")?;
+        // 先持有写锁再检查版本和表结构，避免多个连接同时检查缺列后重复 ALTER，
+        // 也避免使用启动时的旧版本覆盖另一个连接刚提交的 user_version。
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("开启迁移事务失败")?;
+        let locked_version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if locked_version >= version {
+            continue;
         }
-        let tx = conn.transaction().context("开启迁移事务失败")?;
+        if version == 4 {
+            add_column_if_missing(&tx, "messages", "processed_at", "INTEGER")?;
+        }
         tx.execute_batch(sql)
             .with_context(|| format!("执行迁移 v{version} 失败"))?;
         tx.pragma_update(None, "user_version", version)
             .context("推进 user_version 失败")?;
-        tx.commit().with_context(|| format!("提交迁移 v{version} 失败"))?;
+        tx.commit()
+            .with_context(|| format!("提交迁移 v{version} 失败"))?;
         tracing::info!(user_version = version, desc, "迁移已应用");
     }
     Ok(())
 }
 
-/// 幂等加列：列不存在才 ALTER；存在则静默（供 V4 等多进程/竞态场景）
+/// 在调用方持有迁移写事务的前提下幂等加列。
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let cols: Vec<String> = stmt
@@ -325,4 +345,113 @@ pub fn list_tables(conn: &Connection) -> Result<Vec<String>> {
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<Vec<String>, _>>()?;
     Ok(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v3_database(conn: &Connection) {
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch("INSERT INTO persons VALUES ('p_test', 'test', 1, 1, NULL);
+            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('g_test','group','p_test','旧消息',1);
+            INSERT INTO tasks(task_id,goal,state,budget_max_calls,created_by_pid,chat_id,created_at)
+            VALUES ('t_test','旧任务','running',10,'p_test','g_test',1);").unwrap();
+    }
+
+    #[test]
+    fn migration_preserves_v3_rows_and_indexes_scheduler_and_lists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v3_database(&conn);
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        let row: (String, Option<i64>) = conn
+            .query_row("SELECT text, processed_at FROM messages", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("旧消息".into(), None));
+        assert_eq!(
+            conn.query_row("SELECT goal FROM tasks", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "旧任务"
+        );
+        for (query, index) in [
+            ("SELECT task_id, chat_id, goal, used_calls FROM tasks WHERE state='running' ORDER BY created_at,task_id LIMIT 6", "idx_tasks_state_created"),
+            ("SELECT * FROM tasks ORDER BY created_at DESC LIMIT 50", "idx_tasks_created"),
+        ] {
+            let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
+                .query_map([], |r| r.get::<_, String>(3)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
+            assert!(plan.contains(index), "{plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        }
+    }
+
+    #[test]
+    fn concurrent_migrations_serialize_schema_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "yuantuan-migrate-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut conn = connect(&path).unwrap();
+        v3_database(&conn);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut conn = connect(&path).unwrap();
+                    barrier.wait();
+                    migrate(&mut conn).unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        migrate(&mut conn).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0))
+                .unwrap(),
+            MIGRATIONS.len()
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_v4_migration_rolls_back_added_column_and_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v3_database(&conn);
+        // Index/table name collision fails after V4's ALTER TABLE.
+        conn.execute_batch("CREATE TABLE idx_msg_pending(dummy INTEGER)")
+            .unwrap();
+        assert!(migrate(&mut conn).is_err());
+        let columns = conn
+            .prepare("PRAGMA table_info(messages)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.iter().any(|name| name == "processed_at"));
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        conn.execute_batch("DROP TABLE idx_msg_pending").unwrap();
+        migrate(&mut conn).unwrap();
+    }
 }

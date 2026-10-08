@@ -28,6 +28,7 @@ struct Rig {
     token: String,
     /// mock provider 收到的请求体（断言 ping / max_tokens）
     llm_seen: Arc<Mutex<Vec<Value>>>,
+    mock_base: String,
 }
 
 async fn start() -> Rig {
@@ -50,7 +51,9 @@ async fn start() -> Rig {
                 Json(json!({"choices": [{"message": {"content": "pong"}}]}))
             }
         }),
-    );
+    ).route("/v1/models", axum::routing::get(|| async {
+        (axum::http::StatusCode::BAD_GATEWAY, format!("a{}", "中".repeat(120)))
+    }));
     let mock_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_port = mock_listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(mock_listener, mock).await.unwrap() });
@@ -68,7 +71,7 @@ async fn start() -> Rig {
     )
     .unwrap();
 
-    let mut extras = Extras::for_test(dir.join("config.toml"), prov_path.clone());
+    let extras = Extras::for_test(dir.join("config.toml"), prov_path.clone());
     let gateway = yuantuan_core::llm::LlmGateway::load(&prov_path).unwrap();
     *extras.llm_slot.write().unwrap() = Some(Arc::new(gateway));
 
@@ -98,7 +101,8 @@ async fn start() -> Rig {
         .json()
         .await
         .unwrap();
-    Rig { http, base, token: login["token"].as_str().unwrap().to_string(), llm_seen: seen }
+    Rig { http, base, token: login["token"].as_str().unwrap().to_string(), llm_seen: seen,
+        mock_base: format!("http://127.0.0.1:{mock_port}/v1") }
 }
 
 impl Rig {
@@ -159,4 +163,15 @@ async fn llm_test_three_states() {
         .await
         .unwrap();
     assert_eq!(r.status().as_u16(), 401);
+
+    // 中文错误响应跨过第 200 字节时仍按 API 契约返回 JSON，不 panic/断开连接。
+    let response = rig.http.post(format!("{}/api/llm/models/probe", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"base_url": rig.mock_base, "api_key_env": ""}))
+        .send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().contains("502"));
+    assert!(body["error"].as_str().unwrap().contains(&"中".repeat(60)));
 }

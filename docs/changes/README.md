@@ -6,7 +6,7 @@
 
 | 工作记录 | 原记录状态 | 继续前需要核对 | 正式资料与实现来源 |
 | --- | --- | --- | --- |
-| [后端加固](backend-hardening-workbench.md) | `implementing → verifying`，包含多轮落地记录 | 顶部待办与后续反馈不同步；核对窗口连续处理、优先级、回复锚点及停机边界 | [运行时设计](../design/runtime-design.md)、[信息流参考](../reference/message-flow-rules.md) |
+| [后端加固](backend-hardening-workbench.md) | `implementing → verifying`，包含多轮落地记录 | 连续窗口与 Agent 加固已补回归；继续核对窗口优先级、回复锚点、资源上限及停机边界 | [运行时设计](../design/runtime-design.md)、[信息流参考](../reference/message-flow-rules.md) |
 | [备份页](backup-page-workbench.md) | `decided` | 已有备份实现，但原记录缺少收口反馈；需要核对范围和验收证据 | [备份实现](../../crates/core/src/backup.rs)、[管理 API](../../crates/webui/src/backup_api.rs)、[数据模型](../reference/data-model.md) |
 | [前端设计](frontend-design-workbench.md) | `implementing` | 页面验收、多媒体后续阶段与旧待办是否仍适用 | [运行时设计第四章](../design/runtime-design.md)、[前端代码](../../webui-frontend) |
 | [插件层](plugins-layer-workbench.md) | `verifying` | 群聊端到端验证、插件数据备份、Skill 与 MCP 联动；开发指南仍在待办中 | [插件示例](../../plugins/hello)、[Skill 契约](../../crates/core/src/skills.rs)、[MCP 客户端](../../crates/core/src/mcp.rs) |

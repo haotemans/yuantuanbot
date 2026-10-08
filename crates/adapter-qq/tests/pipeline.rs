@@ -86,17 +86,12 @@ async fn read_request(s: &mut tokio::net::TcpStream) -> std::io::Result<()> {
                     content_len = v.trim().parse().unwrap_or(0);
                 }
             }
-            let have = buf.len() - (pos + 4);
-            while have < content_len {
+            while buf.len() - (pos + 4) < content_len {
                 let n = s.read(&mut chunk).await?;
                 if n == 0 {
                     break;
                 }
                 buf.extend_from_slice(&chunk[..n]);
-                let have = buf.len() - (pos + 4);
-                if have >= content_len {
-                    break;
-                }
             }
             return Ok(());
         }

@@ -283,7 +283,7 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
         .context("git 命令启动失败")?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {:?} 失败：{}", args, &stderr[..stderr.len().min(200)]);
+        bail!("git {:?} 失败：{}", args, &stderr[..stderr.floor_char_boundary(200)]);
     }
     Ok(())
 }

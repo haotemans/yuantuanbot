@@ -1,7 +1,7 @@
 //! Agent 系统：Task 工具循环执行器（Q-A01 同步工具循环裁决）。
 //!
-//! 链路：Decision(start_task + task_goal) → bot.rs INSERT tasks + TaskCreated 事件 →
-//!       本模块 spawn_runner 订阅 TaskCreated → 每任务一协程跑 run_task 循环：
+//! 链路：Decision(start_task + task_goal) → tasks + TaskCreated 唤醒 →
+//!       spawn_runner 从数据库领取待办，最多三协程跑 run_task 循环：
 //!
 //! 每轮：agent_exec LLM 返回 JSON `{ action: tool_call | reply | done, ... }`
 //!   - tool_call → 查 ToolRegistry → tool.call() → 结果拼回上下文 → 继续
@@ -10,20 +10,22 @@
 //!
 //! 终止条件（任一命中）：done / budget 用完（Q-A04 固定 10 轮）/ 连续 2 次 JSON 解析失败 /
 //!   tool 连续 3 次抛错 / agent_exec 角色未配置
+//!   工具 120 秒未返回 / worker panic；收尾持久化失败则保留结果重试。
 //!
 //! 铁律：core 不依赖协议端；任务状态不发群消息（Q-A03 静默），只走 tasks/task_events 表 + 事件。
 
 use crate::event::{Event, EventBus, TaskLifecyclePayload};
 use crate::llm::{LlmGateway, Role};
 use crate::tools::{Registry, ToolCtx};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::task::JoinHandle;
+use tokio::task::{Id, JoinHandle, JoinSet};
 use tracing::{info, warn};
 
 /// agent_exec 角色共享槽（与 bot.rs 同一形态：WebUI 热应用换槽即生效）
@@ -35,6 +37,9 @@ pub const TASK_BUDGET_MAX_CALLS: i64 = 10;
 const MAX_PARSE_FAILURES: u32 = 2;
 /// tool 连续抛错上限
 const MAX_TOOL_FAILURES: u32 = 3;
+/// runtime-design：最多三个执行中的任务，其余保留在数据库等待。
+const MAX_CONCURRENT_TASKS: usize = 3;
+const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct TaskRunnerDeps {
@@ -44,41 +49,136 @@ pub struct TaskRunnerDeps {
     pub bus: EventBus,
 }
 
-/// 订阅 TaskCreated → 每个新 task spawn 一个执行协程
+/// 数据库是待执行任务的权威来源，事件只唤醒扫描。
+/// JoinSet 监控 panic，并在 runner 被取消时取消其拥有的任务。
 pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()> {
+    // 在返回前订阅，避免调用方立即 create_task 丢失唤醒。
+    let mut rx = deps.bus.subscribe();
     tokio::spawn(async move {
         let deps = Arc::new(deps);
-        let mut rx = deps.bus.subscribe();
-        info!("Task runner 已启动（等 TaskCreated 事件）");
+        let mut jobs = JoinSet::new();
+        let mut active: HashMap<Id, TaskLifecyclePayload> = HashMap::new();
+        let mut finishing: HashMap<String, (TaskLifecyclePayload, Result<String>)> = HashMap::new();
+        let mut retry = tokio::time::interval(std::time::Duration::from_secs(1));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        info!("Task runner 已启动（数据库待办 + 最多 3 个并发任务）");
         loop {
-            match rx.recv().await {
-                Ok(Event::TaskCreated(p)) => {
-                    let deps = deps.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = run_task(&deps, &p).await {
-                            warn!(task_id = %p.task_id, error = %e, "任务执行异常");
-                            finish_task(
-                                &deps.db_path,
-                                &deps.bus,
-                                &p,
-                                TaskState::Failed,
-                                None,
-                                Some(format!("runner 异常: {e:#}")),
-                            );
-                        }
-                    });
+            tokio::select! {
+                result = jobs.join_next_with_id(), if !jobs.is_empty() => {
+                    let (id, result) = match result.expect("nonempty task set") {
+                        Ok((id, result)) => (id, result),
+                        Err(error) => (error.id(), Err(anyhow::anyhow!("runner panic/取消: {error}"))),
+                    };
+                    if let Some(p) = active.remove(&id) {
+                        finishing.insert(p.task_id.clone(), (p, result));
+                    }
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "Task runner 消费滞后，跳过旧事件");
+                event = rx.recv() => match event {
+                    Ok(Event::TaskCreated(_)) => {},
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "Task runner 消费滞后，从数据库恢复待办");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = retry.tick() => {},
+            }
+            // 落库失败保留结果重试，不能宣称完成，也不能重放已执行的工具。
+            for id in finishing.keys().cloned().collect::<Vec<_>>() {
+                let (p, result) = &finishing[&id];
+                let (state, text, error) = match result {
+                    Ok(text) => (TaskState::Finished, Some(text.clone()), None),
+                    Err(error) => (TaskState::Failed, None, Some(format!("{error:#}"))),
+                };
+                let payload = p.clone();
+                let finish_deps = deps.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    finish_task(
+                        &finish_deps.db_path,
+                        &finish_deps.bus,
+                        &payload,
+                        state,
+                        text,
+                        error,
+                    )
+                })
+                .await
+                .context("任务收尾工作线程失败")
+                .and_then(|r| r);
+                match result {
+                    Ok(()) => {
+                        finishing.remove(&id);
+                    }
+                    Err(error) => warn!(task_id = %id, %error, "任务终态写入失败，将重试"),
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    info!("Task runner 退出：事件总线已关闭");
+            }
+            // 收尾失败也占槽，防止数据库不可写时无限堆积内存结果。
+            let available = MAX_CONCURRENT_TASKS.saturating_sub(active.len() + finishing.len());
+            if available == 0 {
+                continue;
+            }
+            let db_path = deps.db_path.clone();
+            let candidates = match tokio::task::spawn_blocking(move || pending_tasks(&db_path))
+                .await
+                .context("待办查询工作线程失败")
+                .and_then(|r| r)
+            {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    warn!(%error, "读取待执行任务失败，将重试");
+                    continue;
+                }
+            };
+            let mut admitted = 0;
+            for (p, used_calls) in candidates {
+                if active.values().any(|a| a.task_id == p.task_id)
+                    || finishing.contains_key(&p.task_id)
+                {
+                    continue;
+                }
+                if used_calls > 0 {
+                    // 重启/取消后不重放已开始的工具，避免重复副作用。
+                    finishing.insert(
+                        p.task_id.clone(),
+                        (p, Err(anyhow::anyhow!("任务执行被中断，未自动重放工具"))),
+                    );
+                } else {
+                    let task_deps = Arc::clone(&deps);
+                    let payload = p.clone();
+                    let handle = jobs.spawn(async move { run_task(&task_deps, &payload).await });
+                    active.insert(handle.id(), p);
+                }
+                admitted += 1;
+                if admitted == available {
                     break;
                 }
             }
         }
     })
+}
+
+fn pending_tasks(db_path: &std::path::Path) -> Result<Vec<(TaskLifecyclePayload, i64)>> {
+    let conn = crate::db::connect(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT task_id, chat_id, goal, used_calls FROM tasks WHERE state='running'
+         ORDER BY created_at, task_id LIMIT ?1",
+    )?;
+    // 最多三个活跃/收尾行 + 三个新待办，避免把整个历史加载进内存。
+    let rows = stmt
+        .query_map([2 * MAX_CONCURRENT_TASKS as i64], |r| {
+            Ok((
+                TaskLifecyclePayload {
+                    task_id: r.get(0)?,
+                    chat_id: r.get(1)?,
+                    goal: r.get(2)?,
+                    final_state: None,
+                    error: None,
+                },
+                r.get(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +207,7 @@ pub struct RoundOutput {
 }
 
 /// 执行单个任务到终态
-async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()> {
+async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<String> {
     let task_id = p.task_id.clone();
     let gw = deps
         .llm
@@ -117,14 +217,14 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
         .filter(|g| g.role(Role::AgentExec).is_some());
     let Some(gw) = gw else {
         warn!(task_id = %task_id, "agent_exec 角色未配置，任务直接 failed");
-        finish_task(&deps.db_path, &deps.bus, p, TaskState::Failed, None, Some("agent_exec 角色未配置".into()));
-        return Ok(());
+        bail!("agent_exec 角色未配置");
     };
 
     let tools_catalog = build_tools_catalog(&deps.tools);
     let system = build_system_prompt(&tools_catalog);
     // 对话历史：user0 = goal；此后每轮把 assistant 输出 + tool 结果拼回
-    let mut history: Vec<Value> = vec![json!({"role": "user", "content": format!("任务目标：{}", p.goal)})];
+    let mut history: Vec<Value> =
+        vec![json!({"role": "user", "content": format!("任务目标：{}", p.goal)})];
 
     let mut used_calls: i64 = 0;
     let mut parse_failures = 0u32;
@@ -133,26 +233,28 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
     loop {
         if used_calls >= TASK_BUDGET_MAX_CALLS {
             info!(task_id = %task_id, used_calls, "budget 用完，任务 failed");
-            finish_task(&deps.db_path, &deps.bus, p, TaskState::Failed, None,
-                Some(format!("budget 用完（{TASK_BUDGET_MAX_CALLS} 轮）")));
-            return Ok(());
+            bail!("budget 用完（{TASK_BUDGET_MAX_CALLS} 轮）");
         }
 
         let user = render_history(&history);
         let t0 = std::time::Instant::now();
-        let raw = gw.chat(Role::AgentExec, &system, &user, true).await;
         used_calls += 1;
-        bump_used_calls(&deps.db_path, &task_id, used_calls);
+        // 请求之前持久化，重启时可识别已经开始执行、不能安全重放的任务。
+        bump_used_calls(&deps.db_path, &task_id, used_calls).await?;
+        let raw = gw.chat(Role::AgentExec, &system, &user, true).await;
 
         let content = match raw {
             Ok(c) => c,
             Err(e) => {
                 warn!(task_id = %task_id, error = %e, "agent_exec 调用失败");
-                record_event(&deps.db_path, &task_id, "llm_error",
-                    json!({"error": e.to_string(), "round": used_calls}));
-                finish_task(&deps.db_path, &deps.bus, p, TaskState::Failed, None,
-                    Some(format!("LLM 调用失败: {e}")));
-                return Ok(());
+                record_event(
+                    &deps.db_path,
+                    &task_id,
+                    "llm_error",
+                    json!({"error": e.to_string(), "round": used_calls}),
+                )
+                .await?;
+                return Err(e).context("LLM 调用失败");
             }
         };
 
@@ -164,11 +266,9 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
             Err(err) => {
                 parse_failures += 1;
                 record_event(&deps.db_path, &task_id, "parse_error",
-                    json!({"round": used_calls, "error": err, "raw_preview": &content[..content.len().min(200)]}));
+                    json!({"round": used_calls, "error": err, "raw_preview": &content[..content.floor_char_boundary(200)]})).await?;
                 if parse_failures >= MAX_PARSE_FAILURES {
-                    finish_task(&deps.db_path, &deps.bus, p, TaskState::Failed, None,
-                        Some(format!("连续 {MAX_PARSE_FAILURES} 轮输出非法 JSON")));
-                    return Ok(());
+                    bail!("连续 {MAX_PARSE_FAILURES} 轮输出非法 JSON");
                 }
                 // 把错误反馈给 LLM 让它下一轮修正
                 history.push(json!({"role": "user", "content": format!(
@@ -177,27 +277,35 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
             }
         };
 
-        record_event(&deps.db_path, &task_id, "llm_round", json!({
-            "round": used_calls,
-            "action": round.action,
-            "tool_name": round.tool_name,
-            "reason": round.reason,
-            "elapsed_ms": t0.elapsed().as_millis() as u64,
-        }));
+        record_event(
+            &deps.db_path,
+            &task_id,
+            "llm_round",
+            json!({
+                "round": used_calls,
+                "action": round.action,
+                "tool_name": round.tool_name,
+                "reason": round.reason,
+                "elapsed_ms": t0.elapsed().as_millis() as u64,
+            }),
+        )
+        .await?;
 
         match round.action.as_str() {
             "done" => {
                 let final_text = round.text.unwrap_or_else(|| "(未给出最终答案)".into());
-                record_event(&deps.db_path, &task_id, "finished",
-                    json!({"round": used_calls, "final_text": final_text}));
-                finish_task(&deps.db_path, &deps.bus, p, TaskState::Finished, Some(final_text), None);
                 info!(task_id = %task_id, used_calls, "任务 done");
-                return Ok(());
+                return Ok(final_text);
             }
             "reply" => {
                 let text = round.text.clone().unwrap_or_default();
-                record_event(&deps.db_path, &task_id, "reply",
-                    json!({"round": used_calls, "text": text}));
+                record_event(
+                    &deps.db_path,
+                    &task_id,
+                    "reply",
+                    json!({"round": used_calls, "text": text}),
+                )
+                .await?;
                 history.push(json!({"role": "assistant", "content": content}));
                 history.push(json!({"role": "user", "content":
                     "已记录你的中间思考。继续：调用工具或返回 done。"}));
@@ -221,13 +329,25 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
                     locale: Some("zh-CN".into()),
                 };
                 history.push(json!({"role": "assistant", "content": content}));
-                match tool.call(&ctx, args).await {
+                // 超时直接失败，不自动重试可能已在外部生效的工具副作用。
+                let output = tokio::time::timeout(TOOL_TIMEOUT, tool.call(&ctx, args))
+                    .await
+                    .with_context(|| {
+                        format!("工具 {name} 超时（{} 秒）", TOOL_TIMEOUT.as_secs())
+                    })?;
+                match output {
                     Ok(out) => {
                         tool_failures = 0;
-                        record_event(&deps.db_path, &task_id, "tool_result", json!({
-                            "round": used_calls, "tool": name, "ok": true,
-                            "summary": out.summary,
-                        }));
+                        record_event(
+                            &deps.db_path,
+                            &task_id,
+                            "tool_result",
+                            json!({
+                                "round": used_calls, "tool": name, "ok": true,
+                                "summary": out.summary,
+                            }),
+                        )
+                        .await?;
                         history.push(json!({"role": "user", "content": format!(
                             "工具 `{name}` 返回：\n{}\n数据：{}",
                             out.summary,
@@ -236,14 +356,18 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<()>
                     }
                     Err(e) => {
                         tool_failures += 1;
-                        record_event(&deps.db_path, &task_id, "tool_result", json!({
-                            "round": used_calls, "tool": name, "ok": false,
-                            "error": e.to_string(),
-                        }));
+                        record_event(
+                            &deps.db_path,
+                            &task_id,
+                            "tool_result",
+                            json!({
+                                "round": used_calls, "tool": name, "ok": false,
+                                "error": e.to_string(),
+                            }),
+                        )
+                        .await?;
                         if tool_failures >= MAX_TOOL_FAILURES {
-                            finish_task(&deps.db_path, &deps.bus, p, TaskState::Failed, None,
-                                Some(format!("连续 {MAX_TOOL_FAILURES} 次工具调用失败（最后: {name}: {e}）")));
-                            return Ok(());
+                            bail!("连续 {MAX_TOOL_FAILURES} 次工具调用失败（最后: {name}: {e}）");
                         }
                         history.push(json!({"role": "user", "content": format!(
                             "工具 `{name}` 抛错：{e}。可换工具或直接 done。")}));
@@ -265,22 +389,28 @@ fn finish_task(
     state: TaskState,
     final_text: Option<String>,
     error: Option<String>,
-) {
+) -> Result<()> {
     let now = now_secs();
-    if let Ok(conn) = crate::db::connect(db_path) {
-        let _ = conn.execute(
-            "UPDATE tasks SET state = ?1, finished_at = ?2 WHERE task_id = ?3",
-            params![state.as_str(), now, p.task_id],
-        );
-        let kind = match state {
-            TaskState::Finished => "finished",
-            TaskState::Failed => "failed",
-        };
-        record_event(db_path, &p.task_id, kind, json!({
+    let mut conn = crate::db::connect(db_path)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let changed = tx.execute(
+        "UPDATE tasks SET state = ?1, finished_at = ?2 WHERE task_id = ?3 AND state='running'",
+        params![state.as_str(), now, p.task_id],
+    )?;
+    if changed == 0 {
+        return Ok(());
+    }
+    record_event_static(
+        &tx,
+        &p.task_id,
+        state.as_str(),
+        json!({
             "final_text": final_text,
             "error": error,
-        }));
-    }
+        }),
+    )?;
+    tx.commit()?;
+    // 仅在状态和流水一起提交之后广播，面板不会先看到虚假的成功。
     bus.publish(Event::TaskFinished(TaskLifecyclePayload {
         task_id: p.task_id.clone(),
         chat_id: p.chat_id.clone(),
@@ -288,32 +418,43 @@ fn finish_task(
         final_state: Some(state.as_str().into()),
         error,
     }));
+    Ok(())
 }
 
-/// 用完即更新 used_calls（面板进度条数据源）
-fn bump_used_calls(db_path: &std::path::Path, task_id: &str, used: i64) {
-    if let Ok(conn) = crate::db::connect(db_path) {
-        let _ = conn.execute(
-            "UPDATE tasks SET used_calls = ?1 WHERE task_id = ?2",
+/// 调用前登记 used_calls（面板进度及重启后的中断识别依据）。
+async fn bump_used_calls(db_path: &std::path::Path, task_id: &str, used: i64) -> Result<()> {
+    let db_path = db_path.to_owned();
+    let task_id = task_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::db::connect(&db_path)?;
+        let changed = conn.execute(
+            "UPDATE tasks SET used_calls = ?1 WHERE task_id = ?2 AND state='running'",
             params![used, task_id],
-        );
-    }
+        )?;
+        if changed != 1 {
+            bail!("任务 {task_id} 已不存在或已结束");
+        }
+        Ok(())
+    })
+    .await
+    .context("任务进度写入工作线程失败")?
 }
 
 /// task_events seq 自增：取当前 max(seq)+1
-fn record_event(db_path: &std::path::Path, task_id: &str, kind: &str, payload: Value) {
-    let Ok(conn) = crate::db::connect(db_path) else { return };
-    let next_seq: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1",
-            params![task_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(1);
-    let _ = conn.execute(
-        "INSERT INTO task_events(task_id, seq, kind, payload, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![task_id, next_seq, kind, payload.to_string(), now_secs()],
-    );
+async fn record_event(
+    db_path: &std::path::Path,
+    task_id: &str,
+    kind: &'static str,
+    payload: Value,
+) -> Result<()> {
+    let db_path = db_path.to_owned();
+    let task_id = task_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::db::connect(&db_path)?;
+        record_event_static(&conn, &task_id, kind, payload)
+    })
+    .await
+    .context("任务流水写入工作线程失败")?
 }
 
 /// 把对话历史塞回单个 user prompt（agent_exec 无多轮 messages 接口限制——chat() 只接受 system+user）
@@ -369,7 +510,9 @@ pub fn parse_round(content: &str) -> std::result::Result<RoundOutput, String> {
     let s = content.trim();
     let s = if let Some(rest) = s.strip_prefix("```") {
         let rest = rest.strip_prefix("json").unwrap_or(rest);
-        rest.strip_suffix("```").map(|x| x.trim()).unwrap_or(rest.trim())
+        rest.strip_suffix("```")
+            .map(|x| x.trim())
+            .unwrap_or(rest.trim())
     } else {
         s
     };
@@ -387,17 +530,24 @@ pub fn create_task(
 ) -> Result<String> {
     let task_id = new_task_id();
     let now = now_secs();
-    let conn = crate::db::connect(db_path).context("打开数据库失败")?;
-    conn.execute(
+    let mut conn = crate::db::connect(db_path).context("打开数据库失败")?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute(
         "INSERT INTO tasks(task_id, goal, state, budget_max_calls, used_calls, created_by_pid, chat_id, created_at)
          VALUES (?1, ?2, 'running', ?3, 0, ?4, ?5, ?6)",
         params![task_id, goal, TASK_BUDGET_MAX_CALLS, created_by_pid, chat_id, now],
     ).context("插入 tasks 失败")?;
-    record_event_static(&conn, &task_id, "created", json!({
-        "goal": goal,
-        "budget_max_calls": TASK_BUDGET_MAX_CALLS,
-        "created_by_pid": created_by_pid,
-    }));
+    record_event_static(
+        &tx,
+        &task_id,
+        "created",
+        json!({
+            "goal": goal,
+            "budget_max_calls": TASK_BUDGET_MAX_CALLS,
+            "created_by_pid": created_by_pid,
+        }),
+    )?;
+    tx.commit()?;
     let payload = TaskLifecyclePayload {
         task_id: task_id.clone(),
         chat_id: chat_id.to_string(),
@@ -410,18 +560,19 @@ pub fn create_task(
     Ok(task_id)
 }
 
-fn record_event_static(conn: &rusqlite::Connection, task_id: &str, kind: &str, payload: Value) {
-    let next_seq: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?1",
-            params![task_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(1);
-    let _ = conn.execute(
-        "INSERT INTO task_events(task_id, seq, kind, payload, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![task_id, next_seq, kind, payload.to_string(), now_secs()],
-    );
+fn record_event_static(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<()> {
+    // 一条写语句完成序号分配和插入，消除 SELECT/INSERT 之间的并发窗口。
+    conn.execute(
+        "INSERT INTO task_events(task_id, seq, kind, payload, ts)
+         SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4 FROM task_events WHERE task_id=?1",
+        params![task_id, kind, payload.to_string(), now_secs()],
+    )?;
+    Ok(())
 }
 
 fn new_task_id() -> String {

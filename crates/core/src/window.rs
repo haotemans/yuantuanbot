@@ -15,11 +15,12 @@
 //!   - 本模块不与 broadcast 互动,纯「消息进 / 批次出」。
 
 use crate::event::MessageReceivedPayload;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::{debug, trace};
+use std::sync::{Arc, Mutex};
+use tokio::task::JoinSet;
+use tokio::time::{Duration, Instant};
+use tracing::{debug, trace, warn};
 
 /// 默认窗口时长(Q54 定稿:固定 10s,不延长)
 pub const DEFAULT_WINDOW_SECS: u64 = 10;
@@ -45,12 +46,20 @@ impl WindowBatch {
 /// 窗口聚合器。按 chat 隔离,每 chat 一个内部 lane。
 pub struct WindowAggregator {
     window_secs: u64,
-    /// chat_id → per-chat 聚合并发槽;同一时间每 chat 最多一个等待窗口
-    lanes: HashMap<String, mpsc::Sender<MessageReceivedPayload>>,
+    /// 消息直接进入批次，避免中转 channel 满时静默丢消息。
+    lanes: Arc<Mutex<HashMap<String, VecDeque<PendingWindow>>>>,
+    /// 聚合器拥有全部计时/回调任务；drop 时取消，交给 Q55 回放。
+    workers: JoinSet<()>,
     cancel: Arc<AtomicBool>,
 }
 
-/// 触发窗口后的回调。返回 JoinHandle 由调用方决定是否 await(一般不 await 防火)
+struct PendingWindow {
+    deadline: Instant,
+    batch: WindowBatch,
+    on_fire: OnFire,
+}
+
+/// 同 chat 回调按窗口创建顺序 await，不影响其他 chat。
 pub type OnFire = Arc<
     dyn Fn(WindowBatch) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
@@ -61,7 +70,8 @@ impl WindowAggregator {
     pub fn new(window_secs: u64) -> Self {
         Self {
             window_secs: window_secs.max(1),
-            lanes: HashMap::new(),
+            lanes: Arc::new(Mutex::new(HashMap::new())),
+            workers: JoinSet::new(),
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -69,7 +79,8 @@ impl WindowAggregator {
     pub fn with_cancel(window_secs: u64, cancel: Arc<AtomicBool>) -> Self {
         Self {
             window_secs: window_secs.max(1),
-            lanes: HashMap::new(),
+            lanes: Arc::new(Mutex::new(HashMap::new())),
+            workers: JoinSet::new(),
             cancel,
         }
     }
@@ -82,96 +93,101 @@ impl WindowAggregator {
     /// 喂一条消息进聚合器。若该 chat 无等待窗口 → 开窗;有 → 追加。
     /// on_fire 在窗口到期时被调用,每窗口恰好一次。
     pub fn feed(&mut self, m: MessageReceivedPayload, on_fire: OnFire) {
+        while let Some(result) = self.workers.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "Q54 窗口任务异常，未处理消息由 Q55 回放");
+            }
+        }
+        if self.cancel.load(AtomicOrdering::Relaxed) {
+            return;
+        }
         let chat_id = m.chat_id.clone();
-        let lane_tx = match self.lanes.get(&chat_id) {
-            Some(tx) => tx.clone(),
-            None => {
-                // 窗口聚合 lane:每 chat 最多并发 64 条瞬时洪峰保序追加
-                let (tx, mut rx) = mpsc::channel::<MessageReceivedPayload>(64);
-                self.lanes.insert(chat_id.clone(), tx.clone());
-
-                let window_secs = self.window_secs;
-                let cancel = self.cancel.clone();
-                let chat_id_clone = chat_id.clone();
-                tokio::spawn(async move {
-                    // 第一条消息 = anchor,开窗
-                    let anchor = match rx.recv().await {
-                        Some(v) => v,
-                        None => return, // channel 已关闭
-                    };
-                    let mut others: Vec<MessageReceivedPayload> = Vec::new();
-                    trace!(chat_id = %chat_id_clone, anchor_msg = anchor.msg_id, "Q54 开窗");
-
-                    let sleep = tokio::time::sleep(std::time::Duration::from_secs(window_secs));
-                    tokio::pin!(sleep);
-                    loop {
-                        tokio::select! {
-                            _ = &mut sleep => {
-                                // 窗口到期 — 触发回调
-                                let batch = WindowBatch {
-                                    chat_id: chat_id_clone.clone(),
-                                    anchor: anchor.clone(),
-                                    others: others.clone(),
-                                };
-                                trace!(
-                                    chat_id = %chat_id_clone,
-                                    total = 1 + others.len(),
-                                    "Q54 窗口到期,触发 Decide"
-                                );
-                                (on_fire)(batch).await;
-                                break;
-                            }
-                            maybe = rx.recv() => {
-                                match maybe {
-                                    Some(next) => {
-                                        others.push(next);
-                                    }
-                                    None => {
-                                        // sender 全部 drop,直接 fire 现有 batch 退出
-                                        let batch = WindowBatch {
-                                            chat_id: chat_id_clone.clone(),
-                                            anchor,
-                                            others,
-                                        };
-                                        (on_fire)(batch).await;
-                                        return;
-                                    }
-                                }
-                            }
-                            _ = async {
-                                // 优雅停机轮询:AtomicBool 每 100ms 看一次
-                                while !cancel.load(AtomicOrdering::Relaxed) {
-                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                }
-                            } => {
-                                // 优雅停机:静默丢弃窗口,由 Q55 重启后回放兜底
-                                debug!(chat_id = %chat_id_clone, "Q54 窗口被取消(停机),消息由 Q55 回放兜底");
-                                return;
-                            }
-                        }
-                    }
-                });
-                // 把 anchor 送入 lane,启动窗口循环
-                if let Err(e) = tx.try_send(m) {
-                    // 这分支几乎不会到达(lane 刚创建就满 64 不可能),保底防 try_send 失败
-                    debug!(chat_id = %chat_id, error = %e, "Q54 lane 首次 try_send 失败(不该发生)");
-                }
+        let now = Instant::now();
+        let mut lanes = self.lanes.lock().unwrap();
+        let needs_worker = !lanes.contains_key(&chat_id);
+        let queue = lanes.entry(chat_id.clone()).or_default();
+        if let Some(window) = queue.back_mut() {
+            if now < window.deadline {
+                window.batch.others.push(m);
                 return;
             }
-        };
-
-        // 已有等待窗口:追加
-        if let Err(e) = lane_tx.try_send(m) {
-            // lane 满(瞬时洪峰 >64)→ 逐条 fire 不丢
-            // 策略:让现有窗口立刻 fire,新建一个窗口容纳当前消息
-            // 由于是保序窗口,简单方案是丢弃该 lane 让下次开窗 —— 但会丢当前 m;
-            // 妥协:洪峰 <=64 时永不进入此分支;超过时记录 warning,等待下一轮 fire 后自然重开
-            trace!(chat_id = %chat_id, error = %e, "Q54 lane 满,tips 该 chat 瞬时洪峰 >64,本条等下一窗口");
         }
+        trace!(%chat_id, anchor_msg = m.msg_id, "Q54 开窗");
+        queue.push_back(PendingWindow {
+            // 从 feed 收到 anchor 计时；调度或上一窗口回调耗时不延长窗口。
+            deadline: now + Duration::from_secs(self.window_secs),
+            batch: WindowBatch {
+                chat_id: chat_id.clone(),
+                anchor: m,
+                others: Vec::new(),
+            },
+            on_fire,
+        });
+        drop(lanes);
+        if !needs_worker {
+            return;
+        }
+        let lanes = Arc::clone(&self.lanes);
+        let cancel = Arc::clone(&self.cancel);
+        self.workers.spawn(async move {
+            // 回调 panic/取消也移除 lane，下一条消息能重新开窗。
+            let mut cleanup = LaneCleanup { lanes, chat_id, armed: true };
+            loop {
+                let deadline = {
+                    let mut lanes = cleanup.lanes.lock().unwrap();
+                    let queue = lanes.get(&cleanup.chat_id).unwrap();
+                    match queue.front() {
+                        Some(window) => window.deadline,
+                        None => {
+                            lanes.remove(&cleanup.chat_id);
+                            cleanup.armed = false;
+                            return;
+                        }
+                    }
+                };
+                // 保留 AtomicBool 关闭接口；每窗口只创建一次取消 future。
+                let cancelled = async {
+                    while !cancel.load(AtomicOrdering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                };
+                tokio::pin!(cancelled);
+                tokio::select! {
+                    biased;
+                    _ = &mut cancelled => {
+                        debug!(chat_id = %cleanup.chat_id, "Q54 窗口取消，消息由 Q55 回放");
+                        return;
+                    }
+                    _ = tokio::time::sleep_until(deadline) => {}
+                }
+                let window = cleanup.lanes.lock().unwrap()
+                    .get_mut(&cleanup.chat_id).unwrap().pop_front().unwrap();
+                trace!(chat_id = %cleanup.chat_id, total = 1 + window.batch.others.len(), "Q54 窗口到期");
+                tokio::select! {
+                    biased;
+                    _ = &mut cancelled => return,
+                    _ = (window.on_fire)(window.batch) => {}
+                }
+            }
+        });
     }
 
     pub fn lane_count(&self) -> usize {
-        self.lanes.len()
+        self.lanes.lock().unwrap().len()
+    }
+}
+
+struct LaneCleanup {
+    lanes: Arc<Mutex<HashMap<String, VecDeque<PendingWindow>>>>,
+    chat_id: String,
+    armed: bool,
+}
+
+impl Drop for LaneCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lanes.lock().unwrap().remove(&self.chat_id);
+        }
     }
 }
 
@@ -293,5 +309,117 @@ mod tests {
 
         // 取消后不 fire,Q55 重启兜底
         assert_eq!(fired.load(Ordering::SeqCst), 0);
+    }
+
+    fn capture_batches() -> (OnFire, Arc<std::sync::Mutex<Vec<WindowBatch>>>) {
+        let batches = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = Arc::clone(&batches);
+        let callback: OnFire = Arc::new(move |batch| {
+            output.lock().unwrap().push(batch);
+            Box::pin(async {})
+        });
+        (callback, batches)
+    }
+
+    async fn settle() {
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_chat_opens_consecutive_windows_and_releases_idle_lane() {
+        let (on_fire, batches) = capture_batches();
+        let mut agg = WindowAggregator::new(5);
+        for id in 1..=3 {
+            agg.feed(msg("c1", id), on_fire.clone());
+            settle().await;
+            tokio::time::advance(std::time::Duration::from_secs(6)).await;
+            settle().await;
+            assert_eq!(batches.lock().unwrap().len(), id as usize);
+        }
+        assert_eq!(agg.lane_count(), 0, "idle chats must release their lane");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_keeps_every_message_in_order() {
+        let (on_fire, batches) = capture_batches();
+        let mut agg = WindowAggregator::new(5);
+        // No yield between feeds: exceed the old 64-message channel capacity.
+        for id in 1..=200 {
+            agg.feed(msg("c1", id), on_fire.clone());
+        }
+        settle().await;
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        settle().await;
+        let batches = batches.lock().unwrap();
+        assert_eq!(batches.len(), 1);
+        let ids: Vec<_> = batches[0].all().iter().map(|m| m.msg_id).collect();
+        assert_eq!(ids, (1..=200).collect::<Vec<_>>());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_aggregator_does_not_fire_pending_windows() {
+        let (on_fire, batches) = capture_batches();
+        let mut agg = WindowAggregator::new(5);
+        agg.feed(msg("c1", 1), on_fire);
+        settle().await;
+        drop(agg);
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        settle().await;
+        assert!(batches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_callback_preserves_deadlines_and_serial_order() {
+        let (capture, batches) = capture_batches();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let callback_gate = gate.clone();
+        let on_fire: OnFire = Arc::new(move |batch| {
+            let id = batch.anchor.msg_id;
+            let captured = capture(batch);
+            let gate = callback_gate.clone();
+            Box::pin(async move {
+                captured.await;
+                if id == 1 {
+                    gate.acquire().await.unwrap().forget();
+                }
+            })
+        });
+        let mut agg = WindowAggregator::new(5);
+        agg.feed(msg("c1", 1), on_fire.clone());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        agg.feed(msg("c1", 2), on_fire.clone());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        agg.feed(msg("c1", 3), on_fire);
+        assert_eq!(batches.lock().unwrap().len(), 1);
+        gate.add_permits(1);
+        settle().await;
+        assert_eq!(batches.lock().unwrap().len(), 2);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        let batches = batches.lock().unwrap();
+        assert_eq!(
+            batches.iter().map(|b| b.anchor.msg_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(batches.iter().all(|b| b.others.is_empty()));
+        assert_eq!(agg.lane_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn callback_panic_releases_lane_for_next_window() {
+        let mut agg = WindowAggregator::new(5);
+        agg.feed(msg("c1", 1), Arc::new(|_| panic!("callback panic")));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        assert_eq!(agg.lane_count(), 0);
+        let (on_fire, batches) = capture_batches();
+        agg.feed(msg("c1", 2), on_fire);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        settle().await;
+        assert_eq!(batches.lock().unwrap()[0].anchor.msg_id, 2);
     }
 }

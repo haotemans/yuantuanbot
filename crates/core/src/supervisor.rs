@@ -61,6 +61,7 @@ impl Supervisor {
             let mut backoff = Duration::from_millis(BACKOFF_BASE_MS);
             loop {
                 let handle = factory();
+                let _cancel_child = AbortOnDrop(handle.abort_handle());
                 info!(component = name, restarts, "supervisor 启动组件");
                 match handle.await {
                     Ok(()) => {
@@ -82,13 +83,25 @@ impl Supervisor {
                 restarts += 1;
                 sup.inner.total_restarts.fetch_add(1, Ordering::Relaxed);
                 if restarts > MAX_RESTARTS {
-                    error!(component = name, restarts, "组件超过最大重启次数,放弃拉起(需人工介入)");
+                    error!(
+                        component = name,
+                        restarts, "组件超过最大重启次数,放弃拉起(需人工介入)"
+                    );
                     return;
                 }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_millis(BACKOFF_CAP_MS));
             }
         })
+    }
+}
+
+/// drop JoinHandle 只会 detach；取消 supervisor 时必须显式取消被监督组件。
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -124,13 +137,30 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_stops_restarting() {
         let sup = Supervisor::new();
-        let h = sup.spawn("cancel_test", || {
-            tokio::spawn(async {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let mut channels = Some((started_tx, dropped_tx));
+        struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let h = sup.spawn("cancel_test", move || {
+            let (started, dropped) = channels.take().expect("must not restart");
+            tokio::spawn(async move {
+                let _guard = OnDrop(Some(dropped));
+                let _ = started.send(());
+                std::future::pending::<()>().await;
             })
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        started_rx.await.unwrap();
         h.abort();
-        // abort supervisor 协程自身,不再有观测手段;只要 abort 不 panic 即过
+        let _ = h.await;
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("component must be cancelled with supervisor")
+            .unwrap();
+        assert_eq!(sup.total_restarts(), 0);
     }
 }

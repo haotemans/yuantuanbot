@@ -89,11 +89,11 @@ pub struct ResolvedRole {
 }
 
 impl ResolvedRole {
-    /// 诊断用：脱敏描述（base_url + key 长度 + key 前 12 位）
+    /// 诊断只报告密钥是否配置及长度，不输出任何密钥片段。
     pub fn debug_descriptor(&self) -> String {
         let key_info = match &self.api_key {
             None => "None".to_string(),
-            Some(k) => format!("len={} prefix={:?}", k.len(), &k[..k.len().min(12)]),
+            Some(k) => format!("configured len={}", k.len()),
         };
         format!(
             "provider={} model={} base_url={} api_key={}",
@@ -341,7 +341,7 @@ impl LlmGateway {
         let status = resp.status();
         let text = resp.text().await.context("读取 provider 响应失败")?;
         if !status.is_success() {
-            bail!("provider HTTP {status}: {}", &text[..text.len().min(200)]);
+            bail!("provider HTTP {status}: {}", &text[..text.floor_char_boundary(200)]);
         }
         let v: Value = serde_json::from_str(&text).context("provider 响应非 JSON")?;
         v.pointer("/choices/0/message/content")
@@ -366,7 +366,7 @@ impl LlmGateway {
         let status = resp.status();
         let text = resp.text().await.context("读取响应失败")?;
         if !status.is_success() {
-            bail!("HTTP {status}: {}", &text[..text.len().min(200)]);
+            bail!("HTTP {status}: {}", &text[..text.floor_char_boundary(200)]);
         }
         let v: Value = serde_json::from_str(&text).context("响应非 JSON")?;
         let arr = v
@@ -419,7 +419,7 @@ impl LlmGateway {
         let status = resp.status();
         let text = resp.text().await.context("读取 LLM 响应体失败")?;
         if !status.is_success() {
-            bail!("角色 {role} HTTP {status}: {}", &text[..text.len().min(300)]);
+            bail!("角色 {role} HTTP {status}: {}", &text[..text.floor_char_boundary(300)]);
         }
         let v: Value = serde_json::from_str(&text).context("LLM 响应非 JSON")?;
         let content = v
@@ -457,3 +457,56 @@ pub const DEFAULT_PROVIDERS_TEMPLATE: &str = r#"# 云团 LLM Provider 配置（�
 # bot_chat   = { provider = "example", model = "中高档模型" }
 # agent_exec = { provider = "example", model = "强模型" }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_never_exposes_key_fragments() {
+        for key in ["sk-demo", "sk-placeholder-key-for-tests", "测试密钥测试密钥测试密钥"] {
+            let role = ResolvedRole {
+                provider: "mock".into(), model: "mock".into(),
+                base_url: "http://localhost".into(), api_key: Some(key.into()),
+            };
+            let descriptor = role.debug_descriptor();
+            assert!(!descriptor.contains(key));
+            assert!(!descriptor.contains("sk-"));
+            assert!(!descriptor.contains("测试"));
+            assert!(descriptor.contains(&format!("configured len={}", key.len())));
+        }
+    }
+
+    #[tokio::test]
+    async fn unicode_http_errors_propagate_from_all_gateway_paths() {
+        use axum::{http::StatusCode, routing::{get, post}, Router};
+        async fn failure() -> (StatusCode, String) {
+            (StatusCode::BAD_GATEWAY, format!("a{}", "中".repeat(120)))
+        }
+        let app = Router::new().route("/chat/completions", post(failure)).route("/models", get(failure));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let path = std::env::temp_dir().join(format!("yt-llm-error-{}.toml", rand::random::<u64>()));
+        std::fs::write(&path, format!(r#"
+[provider.mock]
+base_url = "{url}"
+api_key_env = ""
+[roles]
+agent_exec = {{ provider = "mock", model = "mock" }}
+"#)).unwrap();
+        let gateway = LlmGateway::load(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let errors = [
+            gateway.chat(Role::AgentExec, "system", "user", true).await.unwrap_err(),
+            gateway.test_chat(Role::AgentExec).await.unwrap_err(),
+            gateway.fetch_models("mock").await.unwrap_err(),
+        ];
+        for error in errors {
+            let text = error.to_string();
+            assert!(text.contains("502"), "{text}");
+            assert!(text.contains(&"中".repeat(60)), "{text}");
+        }
+        server.abort();
+    }
+}

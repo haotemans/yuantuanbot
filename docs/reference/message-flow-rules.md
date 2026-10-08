@@ -66,7 +66,7 @@ Event::MessageReceived
 
 11. **Decision 并发（Q52 ✅）**：dispatcher + per-chat worker 拓扑——dispatcher 订阅 broadcast 按 chat_id 派发到 mpsc（cap 32)，每 chat 一个 worker 串行 handle；不同 chat 并发互不堵塞；单 chat 瞬时洪峰超过 32 时降级同步 handle 保底不丢。
 
-12. **10 秒窗口聚合（Q54，部分实现）**：dispatcher 经 `WindowAggregator` 把首条消息作为 anchor，同窗口普通消息作为 others；固定等待 10 秒后将 anchor 交给 worker，others 标记为已处理。Decision 仍从数据库构建上下文，尚未接入完整的 `anchor` / `window_messages` 输入契约。高优先级独立窗口和窗口连续复用还有缺口，见文末。
+12. **10 秒窗口聚合（Q54，部分实现）**：dispatcher 经 `WindowAggregator` 把首条消息作为 anchor，同窗口普通消息作为 others；从收到 anchor 起固定等待 10 秒后将 anchor 交给 worker，others 标记为已处理。连续窗口可复用，消息直接进入批次，消除了原先 64 条中转队列满时丢弃的问题。同 chat 回调串行，慢回调不延长后续窗口的收集期限；空闲 lane 回收，聚合器销毁会取消其计时与回调任务。Decision 仍从数据库构建上下文，尚未接入完整的 `anchor` / `window_messages` 输入契约；高优先级独立窗口仍有缺口。
 
 13. **成本闸 + 全局并发（Q53 ✅）**：`LlmGateway::chat` 两道闸——① `CostGate` 滑动窗口（decision 30/min 可调，超限排队）;② 全局 `tokio::Semaphore` 4 许可，三角色共享，超出排队。正交不替代。
 
@@ -148,40 +148,52 @@ Decision.memory_write → long_memories 表（explicit）
 
 **规则**：
 
-30. **长活组件包 supervisor**：tracer / pipeline / task_runner / steal_listener 4 个组件由 `core::supervisor::Supervisor` 包裹启动；任一 panic / 异常退出后以指数退避自动拉起（1s → 60s 封顶，MAX_RESTARTS = 20）。adapter-qq 不包（有自己的 WS 重连），consolidation / backup 不包（一次性定时器,语义不同）。
+30. **长活组件包 supervisor**：tracer / pipeline / task_runner / steal_listener 4 个组件由 `core::supervisor::Supervisor` 包裹启动；任一 panic / 异常退出后以指数退避自动拉起（1s → 60s 封顶，MAX_RESTARTS = 20）。取消 supervisor 协程会同时取消被监督组件，避免只丢弃 JoinHandle 而让组件继续运行。adapter-qq 不包（有自己的 WS 重连），consolidation / backup 不包（一次性定时器,语义不同）。
 
 31. **优雅停机路径**：`tokio::signal::ctrl_c()` 与 `webui_serve` 在 main 末尾 `tokio::select!` 竞争；Ctrl+C 触发时:① 停止接新(webui 退出) ② 5s 排空 ③ `PRAGMA wal_checkpoint(TRUNCATE)` ④ `exit(0)`。Windows 下仅前台终端按 Ctrl+C 有效,从外部进程/脚本发信号到 yuantuan pid 到不了(Windows 信号语义差异)。
 
-32. **Q55 回放窗口**：`REPLAY_WINDOW_SECS = 3600`。启动回放前先把窗口外未处理消息 UPDATE `processed_at = -2` 标记放弃，再 SELECT `ts >= now - 3600` 升序回放,防历史脏数据雪崩。
+32. **Q55 回放窗口**：`REPLAY_WINDOW_SECS = 3600`。启动回放前先把窗口外未处理消息的 `processed_at` 写为当前时间，标记放弃，再 SELECT `ts >= now - 3600` 升序回放，防历史脏数据雪崩。
 
 ---
 
 ## 设计裁决与实现对照
 
-本表在 2026-10-09 对照相关代码核对，基线为 `c6f3f5b`。它校正原表的编号混用和过宽的完成判断，不代表本次重新通过了运行验收。决定含义以[决策台账](../decision-log.md)为准。
+本表最初在 2026-10-09 以 `c6f3f5b` 为基线校正编号和完成判断；本轮增量更新连续窗口与 Agent 加固的实现和测试结果。未触及的设计差距不据本轮测试宣称完成。决定含义以[决策台账](../decision-log.md)为准。
 
 | 裁决 | 设计约束 | 实现记录与边界 | 代码来源 |
 | --- | --- | --- | --- |
 | Q52 | 按 chat 隔离并发 | 已有 dispatcher 与 per-chat worker | [bot.rs](../../crates/core/src/bot.rs) |
 | Q53 | 全局 LLM 并发最多 4，速率限制独立 | 已有共享 Semaphore 和成本闸 | [llm.rs](../../crates/core/src/llm.rs) |
-| Q54 | 固定 10 秒窗口、原请求归属与独立请求 | 部分实现；固定窗口已有，连续复用和独立高优先级窗口仍有差距 | [window.rs](../../crates/core/src/window.rs)、[bot.rs](../../crates/core/src/bot.rs) |
+| Q54 | 固定 10 秒窗口、原请求归属与独立请求 | 部分实现；连续窗口、突发消息保留和回调顺序已补测试；独立高优先级窗口仍有差距 | [window.rs](../../crates/core/src/window.rs)、[bot.rs](../../crates/core/src/bot.rs) |
 | Q55 | 消息流水可恢复，trace 可缺失 | 已有持久化处理标记和最近 1 小时启动回放；不承诺恰好一次或无限期回放 | [bot.rs](../../crates/core/src/bot.rs)、[db.rs](../../crates/core/src/db.rs) |
 | Q56 | 不可变 anchor 与 window_messages 输入契约 | 部分实现；WindowBatch 有 anchor，Decision 输入尚未实现完整契约 | [window.rs](../../crates/core/src/window.rs)、[decision.rs](../../crates/core/src/decision.rs) |
 | Q57–Q58 | 窗口优先级、@/引用独立开窗 | 独立高优先级窗口未实现 | [window.rs](../../crates/core/src/window.rs) |
 | Q59 | 同 chat 按窗口创建顺序进入发送队列 | 部分实现；已有队列按入队顺序发送，独立窗口调度约束未完整落实 | [bot.rs](../../crates/core/src/bot.rs)、[reply_engine.rs](../../crates/core/src/reply_engine.rs) |
 | Q60 | 保留指定窗口消息并限制输入 | 完整窗口消息筛选和预算约束未实现 | [window.rs](../../crates/core/src/window.rs)、[decision.rs](../../crates/core/src/decision.rs) |
-| Q61 | 普通消息合入等待窗口，独立请求另开 | 部分实现；普通消息合入已有窗口，独立请求和后续窗口仍需处理 | [window.rs](../../crates/core/src/window.rs) |
+| Q61 | 普通消息合入等待窗口，独立请求另开 | 部分实现；普通消息合入与后续窗口已有回归测试，独立请求仍需处理 | [window.rs](../../crates/core/src/window.rs) |
 | Q62 | Decision 字符预算与 tokenizer 硬上限 | 完整双重预算未实现 | [decision.rs](../../crates/core/src/decision.rs) |
 | Q63 | 高优先级窗口优先获取全局 LLM 槽 | 未实现；普通 Semaphore 不等于业务优先级调度 | [llm.rs](../../crates/core/src/llm.rs) |
 | Q64 | 每窗口至多一次可配置失败提示 | 未实现完整契约；现有失败回退或日志不能视为该能力 | [decision.rs](../../crates/core/src/decision.rs)、[bot.rs](../../crates/core/src/bot.rs) |
 | Q65 | 通过 MCP 接入专用 decide 服务 | 原工作记录中暂缓，继续使用 OpenAI 兼容路径 | [后端工作记录](../changes/backend-hardening-workbench.md) |
 
-## 已发现的实现差距
+## Agent 任务执行与持久化（2026-10-09 加固）
 
-`WindowAggregator::feed` 为每个 chat 建立 lane。静态检查可见，首个窗口触发后接收任务退出，但 `lanes` 中的 sender 没有移除；后续消息仍尝试发到这个已关闭的 lane，失败分支只记日志。这与连续开窗的设计目标不符，不能把 Q54 标成完整完成。
+实现来源：[agent.rs](../../crates/core/src/agent.rs)、[集成测试](../../crates/core/tests/agent_loop.rs)。
 
-该问题已记录在[后端加固工作记录](../changes/backend-hardening-workbench.md)，本次只更正文档和归属，未修改实现，也未运行连续窗口复现测试。其他待完成契约按上表追踪。
+- `tasks` 是待办来源，`TaskCreated` 只负责唤醒；启动和每秒兜底查询可找回漏通知任务。查询每次最多取 6 行，执行及待收尾结果合计最多占用 3 个槽，避免在内存中堆积任务。
+- 保留现有状态协议：`running` 包含等待槽位的任务；`used_calls=0` 表示尚未开始。每轮 LLM 请求前持久化次数。重启或取消后，已开始但没有终态的任务转为 `failed`，不自动重放工具副作用；尚未开始的任务继续领取。此机制要求应用只有一个 Task runner，不提供多进程任务抢占协议。
+- `JoinSet` 观察任务 panic；非法 JSON 连续两次、工具连续三次报错、预算耗尽等均失败收尾。单次工具调用上限 120 秒；超时直接失败，不自动重试。取消 runner 会取消它拥有的工具 future，但不能撤销外部系统已经执行的副作用。
+- 创建任务与 `created` 流水、终态与终态流水分别使用同一事务；提交成功后才发布生命周期事件。收尾写入失败保留结果并重试，保留槽位，不再次执行任务。每个任务只产生一条终态流水，序号分配与插入为一条 SQL。
+- Runner 的查询、进度、流水和终态写入通过 `spawn_blocking` 执行，SQLite 的锁等待不会直接阻塞 Tokio 工作线程。同步 `create_task` 接口保持不变。
+- 中文/多字节 LLM 错误摘要按 UTF-8 边界截断。角色诊断仅报告密钥存在与长度，不再输出密钥前缀。
+
+## 仍需处理的实现差距
+
+窗口连续处理故障已有复现与修复验证，详见[后端加固工作记录](../changes/backend-hardening-workbench.md)。这不代表 Q54–Q64 全部完成：独立高优先级请求、窗口上下文预算、tokenizer 上限和发送归属仍按上表追踪。
+
+聚合批次尚无总消息/字节上限；长时间下游阻塞仍可能积累批次。`bot.rs` 的 per-chat worker 队列满时同步保底处理可能破坏串行约束，且这些 worker 的生命周期尚未全部纳入监督树。本轮未改变这些路径，不能把聚合器的顺序测试扩展为整个发送链路的保序保证。
 
 ## 修订记录
 
+- 2026-10-09：修复连续窗口及突发丢消息，补充 Agent 有界调度、失败恢复、事务收尾与监督取消的实际行为；验证证据见后端工作记录。
 - 2026-10-09：移入实现参考目录；补充代码来源和核对范围，修正 Q59/Q63/Q64 的对应关系，将窗口与输入契约的未完成部分显式列出。

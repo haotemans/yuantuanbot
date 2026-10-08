@@ -131,7 +131,7 @@ pub async fn probe_models(Json(body): Json<ProbeBody>) -> Result<Json<Value>, (S
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(bad(&format!("HTTP {status}: {}", &text[..text.len().min(200)])));
+        return Err(bad(&format!("HTTP {status}: {}", &text[..text.floor_char_boundary(200)])));
     }
     let v: Value = match serde_json::from_str(&text) {
         Ok(v) => v,
