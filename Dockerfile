@@ -38,8 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# 非 root 跑
-RUN useradd -r -u 10001 -m -s /usr/sbin/nologin yuantuan
+# uid 1000 = 主流发行版首个普通用户(ubuntu user 在多数 VM 里是 1000);
+# 跟宿主机挂载的 config/data 目录所有者 uid 对齐,容器内 yuantuan 可读可写
+RUN useradd -r -u 1000 -m -s /usr/sbin/nologin yuantuan 2>/dev/null || \
+    useradd -m -s /usr/sbin/nologin yuantuan
 
 WORKDIR /app
 COPY --from=builder /app/target/release/yuantuan /usr/local/bin/yuantuan

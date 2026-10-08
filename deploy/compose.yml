@@ -17,9 +17,13 @@ services:
     restart: unless-stopped
     working_dir: /app
     volumes:
-      - yuantuan-data:/app/data
-      - ./yuantuan-config.toml:/app/config.toml:ro
-      - ./yuantuan-providers.toml:/app/providers.toml:ro
+      # bind mount 不用 named volume — 宿主直接控制权限,容器 uid 1000 & 宿主 uid 1000 对齐
+      # 第一次启动前需要:mkdir -p data && sudo chown -R 1000:1000 data( install.sh 做)
+      - ./data:/app/data
+      # 面板「保存」需要回写 config.toml/providers.toml → 不能 :ro
+      # 宿主机文件被容器覆盖是预期行为(单源 = 宿主机文件)
+      - ./yuantuan-config.toml:/app/config.toml
+      - ./yuantuan-providers.toml:/app/providers.toml
     ports:
       - "127.0.0.1:8085:8085"    # 面板,仅 SSH 隧道
     expose:
