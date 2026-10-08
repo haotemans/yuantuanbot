@@ -1,5 +1,9 @@
 # 以 NapCat 作为 QQ 协议端（独立容器，OneBot 11 对接）
 
+[文档索引](../README.md) · [ADR 索引](README.md) · [决策台账](../decision-log.md)
+
+> 决策记录：保留决定形成时的背景与实施状态；`accepted` 不表示实现已完成。后续实施差距见[信息流参考](../reference/message-flow-rules.md)。
+
 Status: accepted
 
 云团第一阶段落地平台为 QQ。对接方式定为 NapCat 协议端，经 OneBot 11 over WebSocket（必设 token）通信；NapCat 以独立容器/进程部署，不属于云团本体，内存开销（实测常驻 300~800MB，随运行膨胀）以 swap、容器内存上限、定时重启兜底。选它是因为其 OneBot 11 覆盖最全、维护最活跃（2026 年仍持续发版）、风控面相对最小（走官方客户端协议），且是 AstrBot 官方默认推荐，用户生态无缝。

@@ -1,5 +1,5 @@
 //! yuantuan-webui：axum API + WS 推送 + 内嵌占位前端。
-//! 定稿依据：docs/runtime-design.md 第四章、docs/architecture-v0.1.md 第十五章安全小节。
+//! 定稿依据：docs/design/runtime-design.md 第四章、docs/design/architecture-v0.1.md 第十五章安全小节。
 
 mod auth;
 mod backup_api;

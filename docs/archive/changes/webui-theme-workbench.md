@@ -1,6 +1,11 @@
 # WebUI 主题 / 字体统一 Workbench
 
+[文档索引](../../README.md) · [归档索引](../README.md)
+
+> 历史记录：以下背景、测试与剩余事项对应原记录日期。归档仅改变资料归属，不扩展当时的验收范围。
+
 ## 状态
+
 - status: closed（卡片方阵 + token 收拢 + modal 详情 全 verified）
 - owner: hsb + kimi
 - last-grill: 2026-10-07
@@ -9,31 +14,37 @@
 ## 已确认裁决
 
 ### Q-T01 统一范围
+
 - decision: 只收拢 token，不换色调
 - rationale: 现有 indigo 主色 + cyan info + 亮暗双套 CSS 变量已成型；问题只是 4 处 .vue 局部手写 mono 栈没用 token，以及 chip 色调没 token
 - status: confirmed
 
 ### Q-T02 汉字字体
+
 - decision: 保持系统栈（-apple-system, Segoe UI, PingFang SC, Microsoft YaHei）
 - rationale: 零请求，中文靠系统；Inter/Noto 都太重，自用面板没必要
 - status: confirmed
 
 ### Q-T03 等宽字体
+
 - decision: 不包 JetBrains Mono 的 woff2；保持现有 --yt-mono token 定义（JetBrains Mono → ui-monospace → SF Mono → Menlo → Consolas → 系统 mono fallback）
 - rationale: bundle 零增加；Windows 的 Consolas 已经很好；
 - status: confirmed
 
 ### Q-T04 Skill/Tool chip progenitor 语义色
+
 - decision: 新增 --yt-violet 系（skill chip 用）与 --yt-cyan 系（工具调用 / info chip 用）两个语义 token；不强行用 5 个语义色（primary/success/warning/error/info）硬套
 - rationale: skill ≠ info ≠ primary；tool ≠ success；各身份一种色调，用户一眼能分清能力类别
 - status: confirmed
 
 ### Q-T05 卡片形态
+
 - decision: 正方形圆角（aspect-ratio 1/1, border-radius 16px），可点打开详情
 - rationale: 用户原话"一个一个卡片排列，卡片面写功能和开关和打开配置"
 - status: confirmed
 
 ### Q-T06 详情呈现
+
 - decision: 点击展开 = 弹 n-modal；新增/编辑 MCP 也走 modal
 - rationale: 卡片面只呈现概览；详情和编辑不压缩列表
 - status: confirmed

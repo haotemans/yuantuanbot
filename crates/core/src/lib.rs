@@ -1,5 +1,5 @@
 //! yuantuan-core：云团全部领域系统（纯逻辑，不碰 Web/网络框架）。
-//! 各子系统本单仅占位，见 docs/runtime-design.md 第一章。
+//! 领域子系统入口；职责与边界见 docs/design/runtime-design.md 第一章。
 
 pub mod agent;
 pub mod backup;

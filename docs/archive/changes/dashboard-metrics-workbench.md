@@ -1,6 +1,11 @@
 # 仪表盘资源 & Token 指标 Workbench
 
+[文档索引](../../README.md) · [归档索引](../README.md)
+
+> 历史记录：以下背景、测试与剩余事项对应原记录日期。归档仅改变资料归属，不扩展当时的验收范围。
+
 ## 状态
+
 - status: closed
 - owner: hsb + kimi
 - last-grill: 2026-10-07
@@ -8,18 +13,21 @@
 ## 已确认裁决
 
 ### Q-D01 Token 来源
+
 - decision: LlmGateway.chat() 解析响应 usage.{prompt,completion,total}_tokens，通过注入的 UsageSink 回调落 llm_usage 表
 - rationale: 准确；OpenAI 兼容端点普遍返回 usage。llm 网关不依赖 db（core 纯净性），sink 由装配侧（main / config_api 热重建）注入
 - affected-code: crates/core/src/llm.rs, crates/yuantuan/src/main.rs, crates/webui/src/config_api.rs
 - status: confirmed
 
 ### Q-D02 系统指标
+
 - decision: sysinfo crate（跨平台 Windows/Linux），静态共享 System 实例做 CPU% 增量采样
 - rationale: 跨平台零手写；首次调用 CPU 返回 0 属正常（无基准）
 - affected-code: crates/webui/Cargo.toml, crates/webui/src/dashboard.rs
 - status: confirmed
 
 ### Q-D03 呈现
+
 - decision: 6 卡（今日收/发/Decision/活跃任务/今日 token/进程内存）+ CPU 进头部 tag（>=50% 黄 >=80% 红）
 - status: confirmed
 

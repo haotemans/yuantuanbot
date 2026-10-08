@@ -1,10 +1,14 @@
 # 云团（Cloud Agent）总体架构设计 V0.1
 
+[文档索引](../README.md) · [实现参考](../reference/message-flow-rules.md) · [决策台账](../decision-log.md)
+
+> 文档性质：设计目标与约束。历史修订中的实施进度只对应当时版本；当前实现及差距集中记录在实现参考中。
+
 > 云团不是传统 Bot，而是一个具有人格、长期记忆、社会关系、工具能力、自主决策能力的长期运行 Agent。
 
 ---
 
-# 一、核心理念
+## 一、核心理念
 
 云团的目标：
 
@@ -41,7 +45,7 @@
 
 ---
 
-# 二、整体架构
+## 二、整体架构
 
 ```text
                      云团
@@ -71,7 +75,7 @@
 
 ---
 
-# 三、Bot 系统（长期存在）
+## 三、Bot 系统（长期存在）
 
 负责：
 
@@ -83,7 +87,7 @@
 
 ---
 
-## 3.1 Identity 身份系统
+### 3.1 Identity 身份系统
 
 目标：
 
@@ -127,7 +131,7 @@ Identity 不因为昵称变化而变化。
 
 ---
 
-## 3.2 Relationship 关系库
+### 3.2 Relationship 关系库
 
 目标：
 
@@ -185,7 +189,7 @@ Relationship Event
 
 ---
 
-## 3.3 Personality 人格系统
+### 3.3 Personality 人格系统
 
 人格不是一个 Prompt。
 
@@ -207,7 +211,7 @@ Relationship Event
 
 ---
 
-## 3.4 Long Memory 长期记忆
+### 3.4 Long Memory 长期记忆
 
 属于 Bot。
 
@@ -248,11 +252,11 @@ A喜欢技术讨论
 
 敏感信息（密码、密钥、证件号等）在写入阶段直接拒收，永不入库。
 
-长期记忆三主体（person / chat / self）单表存储，另有每日摘要（每群一条 + 人物按日滚动）作为聊天历史的检索索引。表结构详见 `docs/data-model.md`。
+长期记忆三主体（person / chat / self）单表存储，另有每日摘要（每群一条 + 人物按日滚动）作为聊天历史的检索索引。表结构详见 [docs/reference/data-model.md](../reference/data-model.md)。
 
 ---
 
-# 四、Agent 系统（负责执行）
+## 四、Agent 系统（负责执行）
 
 Agent 是云团的执行能力。
 
@@ -290,7 +294,7 @@ Bot回复用户
 
 ---
 
-## 4.1 Agent Short Memory
+### 4.1 Agent Short Memory
 
 工作记忆。
 
@@ -322,7 +326,7 @@ Task:
 
 ---
 
-## 4.2 Task 系统
+### 4.2 Task 系统
 
 管理任务生命周期。
 
@@ -356,11 +360,11 @@ artifacts
 
 ---
 
-# 五、Capability Tool 系统
+## 五、Capability Tool 系统
 
 云团能力。
 
-## 文件
+### 文件
 
 ```text
 create_file
@@ -369,7 +373,7 @@ compress
 send_file
 ```
 
-## 编程
+### 编程
 
 ```text
 write_code
@@ -378,7 +382,7 @@ debug
 git
 ```
 
-## 网络
+### 网络
 
 ```text
 search
@@ -386,7 +390,7 @@ api
 download
 ```
 
-## 多媒体
+### 多媒体
 
 ```text
 image
@@ -400,7 +404,7 @@ audio
 
 ---
 
-# 六、Agent 与 Bot 边界
+## 六、Agent 与 Bot 边界
 
 非常重要：
 
@@ -449,7 +453,7 @@ Bot 永不直接调用工具；任何工具使用都以 Task 形式存在，哪�
 
 ---
 
-# 七、Memory 架构
+## 七、Memory 架构
 
 三层：
 
@@ -464,7 +468,7 @@ Long Memory   Working Memory   Archive
     人格          中间结果        文件记录
 ```
 
-## 夜间归纳（Consolidation）
+### 夜间归纳（Consolidation）
 
 固定时间运行（默认每夜一次）：
 
@@ -477,7 +481,7 @@ Long Memory   Working Memory   Archive
 
 ---
 
-# 八、Agent Archive
+## 八、Agent Archive
 
 任务结束：
 
@@ -497,7 +501,7 @@ Memory Consolidation
 
 ---
 
-## 压缩归档
+### 压缩归档
 
 保存：
 
@@ -519,7 +523,7 @@ xxx.zip
 
 ---
 
-## 提取长期信息
+### 提取长期信息
 
 进入 Bot Memory。
 
@@ -545,7 +549,7 @@ gcc失败三次
 
 ---
 
-# 九、Knowledge Base 知识库
+## 九、Knowledge Base 知识库
 
 作用：
 
@@ -600,7 +604,7 @@ Knowledge Base：
 
 ---
 
-# 十、State 状态系统
+## 十、State 状态系统
 
 区别：
 
@@ -620,7 +624,7 @@ State：
 - 当前任务
 - 云团状态
 
-## 情绪状态（Mood）
+### 情绪状态（Mood）
 
 人格是气候，情绪是天气。情绪是 State 中的瞬态值，不是人格的一部分。
 
@@ -633,7 +637,7 @@ State：
 
 ---
 
-# 十一、Event System
+## 十一、Event System
 
 所有变化产生事件：
 
@@ -657,20 +661,20 @@ Memory更新
 Event Bus（进程内 channel）
 ```
 
-## 事件总线终稿（V1）
+### 事件总线终稿（V1）
 
 - 传输：tokio broadcast 单总线；事件为强类型枚举
 - 事件清单：`MessageReceived / MessageSent / BubbleSent / ReplyInterrupted / DecisionMade / TaskCreated / TaskStepDone / TaskFinished / MemoryWritten / RelationshipEventAppended / MoodChanged / MemberJoined / MemberLeft / ConsolidationDone / ConfigReloaded / PersonalityVersionChanged`
-- 落库：事件尽力写入 `events` 表（轮转保留 7 天）——Decision trace 页与任务可视化页的数据源。Q55 / ADR-0006 修订可靠性边界：消息流水必须可恢复，Decision/trace 观测事件允许过载缺失；任务业务状态不能依赖可丢失的观测事件恢复。消息恢复消费机制尚待实现（表结构见 docs/data-model.md）。
+- 落库：事件尽力写入 `events` 表（轮转保留 7 天）——Decision trace 页与任务可视化页的数据源。Q55 / ADR-0006 修订可靠性边界：消息流水必须可恢复，Decision/trace 观测事件允许过载缺失；任务业务状态不能依赖可丢失的观测事件恢复。消息恢复消费的实施状态见[信息流参考](../reference/message-flow-rules.md)（表结构见 docs/reference/data-model.md）。
 - V1 订阅者四个：Prefilter 管线（订 MessageReceived）、tracer（全订，落表）、WebUI 实时推送（全订）、夜间归纳调度器（定时器驱动，不订消息事件）
 
 ---
 
-# 十二、Context 系统（机制定稿）
+## 十二、Context 系统（机制定稿）
 
 三类上下文，统一由 Context Builder 组装。总机制：**无状态滑窗**——每轮从 SQLite 重取最新数据组装，窗户口始终咬住最新消息；进程重启上下文天然恢复，无内存会话缓存、无一致性包袱。
 
-## Bot Context（聊天环境，喂 bot_chat）
+### Bot Context（聊天环境，喂 bot_chat）
 
 分层智能拼接（自上而下）：
 
@@ -681,19 +685,19 @@ Event Bus（进程内 channel）
 
 预算：总输入 **≤40k tokens**（默认上限，可配置）。超长按层优先级压缩：先缩会话区 K 值，再裁记忆条数；名册与锚点不动。
 
-## Agent Context（任务环境，喂 agent_exec）
+### Agent Context（任务环境，喂 agent_exec）
 
 - goal + 交接语境（来自 Decision.start_task 的 task_goal）
 - Working Memory：工具调用历史——**最近一步结果全量，更早的压成摘要行**；工具结果全文只落 task_events，进模型前恒经 Runtime 硬性截断（最大截断防爆上下文）
 - 循环与预算见 4.2
 
-## Decision Context（给小脑）
+### Decision Context（给小脑）
 
-字段级输入契约已定稿（每字段有界、摘要优先），见 `docs/data-model.md` 第十章。
+字段级输入契约已定稿（每字段有界、摘要优先），见 [docs/reference/data-model.md](../reference/data-model.md) 第十章。
 
 ---
 
-# 十三、Decision 小脑
+## 十三、Decision 小脑
 
 负责：
 
@@ -705,9 +709,9 @@ Event Bus（进程内 channel）
 
 输入消息先经 Runtime 本地 Prefilter 预筛（规则集见下），过滤大部分无需决策的消息，降低 API 成本与延迟；通过预筛的消息才构造 Decision Context 调用模型。主动插话与被动回复走同一条管线，无独立心跳；是否主动开口，同样由 Decision 拿着群聊上下文裁决。
 
-## Prefilter 规则集（终稿）
+### Prefilter 规则集（终稿）
 
-Q54 补充（待实现）：A 消息命中后先等待固定 10 秒，同时继续接收新消息，然后开始 Decision。回复绑定 A 的原始消息和身份；B 普通插话不替换回复对象，也不使给 A 的回复作废。所有通过 Prefilter 的消息都可以建立窗口；@云团、引用云团、私聊为高优先级，普通群聊为普通优先级。@/引用云团创建独立窗口，普通 B 只补充 A 的窗口。此规则优先于原 Q32 的“任意上下文变化即作废”表述，见 ADR-0007。10 秒不是 API 超时时间。
+Q54 设计补充：A 消息命中后先等待固定 10 秒，同时继续接收新消息，然后开始 Decision。回复绑定 A 的原始消息和身份；B 普通插话不替换回复对象，也不使给 A 的回复作废。所有通过 Prefilter 的消息都可以建立窗口；@云团、引用云团、私聊为高优先级，普通群聊为普通优先级。@/引用云团创建独立窗口，普通 B 只补充 A 的窗口。此规则优先于原 Q32 的“任意上下文变化即作废”表述，见 ADR-0007。10 秒不是 API 超时时间。
 
 顺序短路（命中即出结果）：
 
@@ -726,7 +730,7 @@ Q54 补充（待实现）：A 消息命中后先等待固定 10 秒，同时继�
 - 回复节流：每 chat 每 60 秒最多 4 个回复回合、12 个气泡
 - 成本闸：全局每分钟最多 30 次 Decision API 调用，超限排队延迟，不丢弃
 
-输入契约：Decision Context 终稿见 `docs/data-model.md` 第十章（不可变 anchor、10 秒窗口消息、消息、发送者关系分、场景统计、记忆提示、当前情绪、活动任务）。Runtime 固定按 anchor 路由回复，模型不决定回复对象。
+输入契约：Decision Context 终稿见 [docs/reference/data-model.md](../reference/data-model.md) 第十章（不可变 anchor、10 秒窗口消息、消息、发送者关系分、场景统计、记忆提示、当前情绪、活动任务）。Runtime 固定按 anchor 路由回复，模型不决定回复对象。
 
 窗口上下文上限：保留 anchor、窗口内全部 @/引用云团消息及最后 30 条普通消息，并受总字符预算约束；裁掉的内容仍保留在消息流水，不送入 Decision。多个窗口的 Decision 可以异步，但发送按同 chat 的窗口创建顺序排队。
 
@@ -757,18 +761,18 @@ Q54 补充（待实现）：A 消息命中后先等待固定 10 秒，同时继�
 
 ---
 
-# 十四、消息行为系统
+## 十四、消息行为系统
 
 目标：
 
 像真人。
 
-## 回复形态（两条铁律）
+### 回复形态（两条铁律）
 
 1. **短句多条**：像真人一样切成多条短气泡连发（一回合 ≤3 泡，**封顶不是配额**——一句话能说完就只发一泡，绝不为分泡而分泡），不发论文式长段
 2. **难题 / 长答案 → 合并转发折叠卡**：第 4 泡强制转折叠卡——详情放进 QQ 合并转发消息（"查看N条转发消息"），群里只留一句短引导；卡片内可含步骤、代码、数据
 
-## 回复形态引擎（机制）
+### 回复形态引擎（机制）
 
 发送链路：
 
@@ -803,7 +807,7 @@ bot_chat 生成 → Bubbleizer（拆泡/校验/兜底） → 发送队列（per-
 
 避免刷屏：见上"稳定六条"第④条，短句连发按气泡计入 Prefilter 发言节流。
 
-## 表情包（Meme）
+### 表情包（Meme）
 
 - Meme 库：本地归档（`data/memes/`），按类别标签分类，WebUI 管理（导入 / LLM 自动分类建议 / 去重 / 待确认队列）
 - 去重：md5 精确 + pHash 感知（本地底座）；DINOv3 魔搭 API 为可选增强槽位，默认关闭，挂了自动降级
@@ -815,9 +819,9 @@ bot_chat 生成 → Bubbleizer（拆泡/校验/兜底） → 发送队列（per-
 
 ---
 
-# 十五、技术方向
+## 十五、技术方向
 
-## Runtime
+### Runtime
 
 Rust。
 
@@ -829,7 +833,7 @@ Rust。
 - 权限控制
 - 资源占用小（2C2G 服务器可常驻）
 
-## 模型接入（LLM Provider）
+### 模型接入（LLM Provider）
 
 所有模型能力通过 API 接入，本地不做任何推理。
 
@@ -847,15 +851,15 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 - 换模型只改配置，不改代码
 - LLM API 是系统唯一的重型外部依赖（meme 的 DINOv3 为可选增强槽位，默认关闭，非关键路径）
 
-## 平台接入（QQ 适配层）
+### 平台接入（QQ 适配层）
 
 - QQ 先行，经 NapCat 协议端对接，协议为 OneBot 11 over WebSocket（必设 token）
 - NapCat 为独立容器/进程，不属于云团本体；其内存开销（300~800MB，随运行膨胀）以 swap、容器内存上限、定时重启兜底（社区标准做法）
 - OneBot 端口绝不暴露公网
 - 适配层只认 OneBot 11，协议端可替换；Rust 自研 QQ 协议明确不做（见 ADR-0003）
-- 通讯设计定稿见 `docs/runtime-design.md` 第六章（正向 WS / 段数组映射铁律 / echo 回执 / 断线策略）
+- 通讯设计定稿见 [docs/design/runtime-design.md](runtime-design.md) 第六章（正向 WS / 段数组映射铁律 / echo 回执 / 断线策略）
 
-## 部署形态（2C2G 小鸡友好）
+### 部署形态（2C2G 小鸡友好）
 
 目标：
 
@@ -884,21 +888,21 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 升级到大服务器只是解锁更重能力，不是架构迁移。
 
-## 扩展模型（三层）
+### 扩展模型（三层）
 
 1. **内置功能模块**：编译进二进制，config 开关控制启停（meme / 知识库 / 备份皆此模式，关掉零开销）
 2. **能力扩展 = 新 Tool**：Tool trait + Registry 注册；为二期预留 `Tool::Remote`
 3. **生态扩展（二期）= MCP 外挂工具进程**：云团作 MCP client 接第三方工具服务，进程隔离，插件挂云团不死
 
-明确否决：Rust dylib 动态库插件（ABI 不稳）、进程内插件脚本（一个烂插件带走全 bot）。详见 `docs/runtime-design.md` 第五章。
+明确否决：Rust dylib 动态库插件（ABI 不稳）、进程内插件脚本（一个烂插件带走全 bot）。详见 [docs/design/runtime-design.md](runtime-design.md) 第五章。
 
-## 数据库
+### 数据库
 
 初期：
 
 - SQLite（WAL）
 - 消息流水全量落库（messages 表含 mentions 字段），为 500 条窗口与夜间归纳供数
-- 全部表结构定稿见 `docs/data-model.md`
+- 全部表结构定稿见 [docs/reference/data-model.md](../reference/data-model.md)
 - sqlite-vec（向量检索，可选）
 
 后期（可选解锁）：
@@ -914,24 +918,27 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 - 原始消息流水可选加密压缩后备份
 - 备份为运维层定时任务，不在关键路径上
 
-## WebUI
+### WebUI
 
 定位：MVP 一等公民，对标 AstrBot 全图形化体验，管理员全程无需 SSH。
 
-技术：axum 提供 REST + 单条 WebSocket（`/ws` 推送事件），前端 Vue3 + Vite + Naive UI（关系网用 vis-network），rust-embed 嵌入二进制。壳布局与三页内页定调见 `docs/runtime-design.md` 第四章。
+技术：axum 提供 REST + 单条 WebSocket（`/ws` 推送事件），前端 Vue3 + Vite + Naive UI（关系网用 vis-network），rust-embed 嵌入二进制。壳布局与三页内页定调见 [docs/design/runtime-design.md](runtime-design.md) 第四章。
 
 十一个页面（左导航四组）：
 
 总览
+
 1. 仪表盘 = 首页（今日收发 / Decision 成本 / 活跃任务 / 运行时长 + NapCat 心跳 + 迷你事件流）
 
 观察
+
 2. Decision trace 流（左实时事件流 + 右输入输出 JSON 详情 + 过滤，它为什么接 / 不接这句话）
 3. 任务执行可视化（Task 工具循环逐步回放：每步 tool_call / 结果 / 耗时 / 预算消耗）
 4. 记忆浏览（长期记忆 / 群档案 / 每日摘要）
 5. 关系网可视化（Person 节点 + 关系边 + 亲密度，人机边一并成图）
 
 配置
+
 6. 平台连接（OneBot 地址 / token）
 7. LLM Provider（base_url / key / 三角色绑定 + 连通性测试）
 8. 运行参数（夜间归纳 / 上下文预算 / 回复形态 / 节流+成本闸 / Meme 开关，写回即热应用）
@@ -948,18 +955,18 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 ---
 
-# 十六、最终定义
+## 十六、最终定义
 
 > 云团 = 一个由 Rust Runtime 驱动的长期运行 Agent，拥有 Bot 人格层、关系系统、长期记忆、知识库、Agent执行系统和 Decision 小脑；内部复杂运行，外部保持自然人格。
 
 ---
 
-# 十七、第一阶段落地
+## 十七、第一阶段落地
 
 1. Rust Runtime 骨架
 2. AstrBot 二改迁移
 3. Bot / Agent 分离
-4. SQLite 数据层（messages 全量落库，表结构见 docs/data-model.md）
+4. SQLite 数据层（messages 全量落库，表结构见 docs/reference/data-model.md）
 5. Decision模型接入（Prefilter + Schema 校验）
 6. Memory / Relationship基础版（双通道写入 + 夜间归纳 + 每日摘要）
 7. Tool系统（只读工具起步 + 带预算的工具循环）
@@ -975,18 +982,18 @@ MVP 闭环：
 
 ---
 
-# 十八、后续实现重点
+## 十八、后续实现重点
 
-- Runtime模块边界（已定稿：四 crate 结构 / 启动序列 + 监督树 / 并发三串行两并发一单写者，见 docs/runtime-design.md）
+- Runtime模块边界（已定稿：四 crate 结构 / 启动序列 + 监督树 / 并发三串行两并发一单写者，见 docs/design/runtime-design.md）
 - Bot ↔ Decision ↔ Agent接口协议
 - Event Bus事件模型（已定稿，见十一章）
 - Context Builder（无状态滑窗、在场名册、情绪注入、Decision 输入契约组装）
-- Memory Schema（已定稿，见 docs/data-model.md）
+- Memory Schema（已定稿，见 docs/reference/data-model.md）
 - Relationship Graph（@统计驱动 + 归纳提炼）
 - Task生命周期（预算模型 + 完工交接契约）
 - Tool Registry（原生 function calling 优先）
 - LLM Provider（三角色路由）
-- Decision输入输出Schema（已定稿，见十三章 + data-model.md）
+- Decision输入输出Schema（已定稿，见十三章 + [data-model.md](../reference/data-model.md)）
 - Prefilter规则集（已定稿，见十三章）
 - 情绪系统（已定稿，见十章；亲密度调制为二期）
 - 消息流水存储（messages 表）
@@ -1008,16 +1015,17 @@ MVP 闭环：
 
 ---
 
-# 修订记录
+## 修订记录
 
 - 2026-10-02 V0.1：架构基线建立。
 - 2026-10-02：补充模型接入设计（LLM + Decision 双角色走 Provider API，其余零外部依赖）、Decision 前置本地 Prefilter、2C2G 部署形态原则。
 - 2026-10-02（拷问轮 Q1–Q20 定稿）：QQ 先行 + NapCat 独立容器（ADR-0001）；不自研 Rust QQ 协议（ADR-0003）；主动/被动统一管线；人格静态化 + 版本化（ADR-0002）；记忆双通道 + 夜间归纳 + 500 条窗口 + person_id 合并 + 敏感拒收；云团↔人亲密度；表情包机制；Task 带预算工具循环；情绪系统（ADR-0004）；消息全量落库 + GitHub 私有仓备份；WebUI 七页 + axum + 密码认证；Decision Schema 终稿。
-- 2026-10-02（拷问轮 Q21–Q25 定稿）：数据模型落地为 `docs/data-model.md`（三主体长期记忆单表、每日摘要索引、mentions 字段、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、mood 免持久化、Decision 输入契约）；WebUI 扩至八页（+Meme 库管理，人格编辑器加 diff 视图）；新增偷表情包待确认队列；`data/` 统一存储布局。
+- 2026-10-02（拷问轮 Q21–Q25 定稿）：数据模型落地为 [docs/reference/data-model.md](../reference/data-model.md)（三主体长期记忆单表、每日摘要索引、mentions 字段、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、mood 免持久化、Decision 输入契约）；WebUI 扩至八页（+Meme 库管理，人格编辑器加 diff 视图）；新增偷表情包待确认队列；`data/` 统一存储布局。
 - 2026-10-02（拷问轮 Q26–Q30 定稿）：上下文机制三件套——Bot Context 分层智能拼接（在场名册以 person_id 锚定身份、40k tokens 总预算、超长按层压缩）、全上下文无状态滑窗组装、Agent Working Memory 硬性截断（最近一步全量 + 历史摘要行）；模型角色扩为三（新增 agent_exec，独立配置允许同绑）；工具调用协议定 OpenAI 原生 function calling 优先、JSON-in-text 降级兜底；完工交接契约（result_summary + artifacts + 关键数据）；回复形态两条铁律（短句多条、难题走合并转发折叠卡）；WebUI 扩至九页（+任务执行可视化）。
 - 2026-10-02（拷问轮 Q31–Q33 定稿）：回复形态引擎完整机制——bot_chat 格式化输出契约（`‖` 分泡 + `::` 指令行，Runtime 本地解析、机械兜底）；打字延时模型（按字数 clamp + 抖动，首泡快发，总预算 ≤8s）；发送队列 per-chat 串行异步执行 + 上下文变动作废剩余泡；3 泡封顶、第 4 泡强制转折叠卡；节流按气泡计数；稳定六条。
 - 2026-10-02（拷问轮 Q34–Q37 定稿）：Prefilter 规则集终稿（R1–R7 顺序短路：自身/其他bot丢弃、@我与回复我必放行、私聊必放行几乎必回、群聊过节流闸、纯图丢弃不惊动决策）；节流放宽为每 chat 60 秒 4 回合 / 12 气泡、全局每分钟 30 次 Decision 成本闸（超限排队不丢弃，全热配）；Event Bus 终稿（16 个事件类型、全量落 events 表 7 天轮转、四类订阅者）。
 - 2026-10-02（小改）：回复形态补充原则——3 泡为封顶非配额，不为分泡而分泡；分泡只沿自然语气断点，模型不凑数、兜底不强拆。
-- 2026-10-02（拷问轮 Q38–Q43 定稿）：运行时设计落地为 `docs/runtime-design.md`（四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、MCP 三层扩展模型）；WebUI 扩至十页（+仪表盘首页，左导航四组信息架构，技术栈定 Vue3 + Naive UI + vis-network + 单条 /ws）。
-- 2026-10-02（拷问轮 Q44–Q47 定稿）：前端交付走 CI（仓库只存源码，Actions 构建 musl 单文件发 release），主题默认亮色（暗色可切）；adapter-qq 通讯设计入 runtime-design.md 第六章——正向 WS（云团=client）、段数组映射铁律（core 不见 CQ 码）、同一 WS 双工 echo 回执 10s 超时、断线接受丢失记事件。
+- 2026-10-02（拷问轮 Q38–Q43 定稿）：运行时设计落地为 [docs/design/runtime-design.md](runtime-design.md)（四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、MCP 三层扩展模型）；WebUI 扩至十页（+仪表盘首页，左导航四组信息架构，技术栈定 Vue3 + Naive UI + vis-network + 单条 /ws）。
+- 2026-10-02（拷问轮 Q44–Q47 定稿）：前端交付走 CI（仓库只存源码，Actions 构建 musl 单文件发 release），主题默认亮色（暗色可切）；adapter-qq 通讯设计入 [runtime-design.md](runtime-design.md) 第六章——正向 WS（云团=client）、段数组映射铁律（core 不见 CQ 码）、同一 WS 双工 echo 回执 10s 超时、断线接受丢失记事件。
 - 2026-10-03：配置中心 2.0——全参数面板化（新增「运行参数」页，页面数 10→11）+ 热应用槽扩展（reply/context/consolidation/meme 换槽与定时器重建）+ 模型页连通性测试（/api/llm/test）。
+- 2026-10-09：按文档用途迁移目录，统一标题层级和引用；区分设计基线、实施记录与当前代码来源。

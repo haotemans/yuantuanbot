@@ -1,4 +1,4 @@
-//! Meme 表情包管线（架构文档十四章 + docs/data-model.md 七章）：
+//! Meme 表情包管线（架构文档十四章 + docs/reference/data-model.md 七章）：
 //! - 入库扫描：启动扫 memes 根（jpg/png/gif/webp），md5 精确 + dHash 汉明距≤5 感知去重，
 //!   类别取子目录名（无子目录归 'misc'），手动放入的视为管理员入库（added_by='admin', active）
 //! - 抽图：类别内 active 按 last_used_ts 最久未用优先——ORDER BY 取前 3 随机一（杜绝三连发），

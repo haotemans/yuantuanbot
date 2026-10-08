@@ -267,13 +267,13 @@ impl Default for LogConfig {
 }
 
 const DEFAULT_TEMPLATE: &str = r#"# 云团主配置
-# 运行数据全部落在 [data].dir 下（见 docs/data-model.md 第一章）
+# 运行数据全部落在 [data].dir 下（见 docs/reference/data-model.md 第一章）
 
 [data]
 dir = "data"
 
 [napcat]
-# NapCat OneBot 11 反向 WS（见 docs/runtime-design.md 第六章；与 AstrBot aiocqhttp 同形态）
+# NapCat OneBot 11 反向 WS（见 docs/design/runtime-design.md 第六章；与 AstrBot aiocqhttp 同形态）
 # enabled = false 时不接入 NapCat（其余子系统照常运行）
 # 此处是「yuantuan 服务端的监听地址」，NapCat WebUI → 网络配置 → Websockets客户端 →
 # URL 填 ws://{listen_addr}/ws、Token 填 token 字段；保存后 NapCat 主进程会主动连进来

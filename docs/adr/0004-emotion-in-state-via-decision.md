@@ -1,5 +1,9 @@
 # 情绪系统：枚举状态存于 State，由 Decision 同调用产出
 
+[文档索引](../README.md) · [ADR 索引](README.md) · [决策台账](../decision-log.md)
+
+> 决策记录：保留决定形成时的背景与实施状态；`accepted` 不表示实现已完成。后续实施差距见[信息流参考](../reference/message-flow-rules.md)。
+
 Status: accepted
 
 云团需要瞬态情绪（语气、回复意愿、表情包选择都应有"当下感受"），但大量调用模型判断情绪在成本上不可接受。决议：情绪为四态枚举（calm/happy/angry/down），归属 State 系统（"现在是什么状态"），每次 Decision 裁决时基于完整上下文顺带输出，无独立事件源、无额外 API 调用；State 记录 mood 与时间戳并随时间衰减回 calm。消费端三处：bot_chat 语气注入（改语气不改人设）、meme 选图类别、Decision 自身倾向（mood 与 action 同一裁决产出，一致性天然成立）。

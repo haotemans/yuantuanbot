@@ -1,5 +1,5 @@
 //! SQLite 共享入口：连接（WAL + 外键 + busy_timeout）与迁移（user_version，幂等）。
-//! 表结构与 docs/data-model.md 一致，共 14 张表。
+//! V0.1 表设计基线见 docs/reference/data-model.md；实际表结构以本文件的后续迁移为准。
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;

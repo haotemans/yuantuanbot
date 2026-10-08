@@ -1,5 +1,5 @@
 //! Decision 小脑（架构文档十三章）：分类器，不是对话者。
-//! 输入契约组装（docs/data-model.md 第十章）→ 调 decision 角色模型 → 输出 Schema 严格校验 →
+//! 输入契约组装（docs/reference/data-model.md 第十章）→ 调 decision 角色模型 → 输出 Schema 严格校验 →
 //! 失败带错误重试一次 → 再失败兜底 ignore 并记录。
 //! 本单副作用：mood 写回 state、memory_write 入 long_memories（explicit）、DecisionMade 事件供 trace。
 //! action=reply/send_meme/start_task 只记事件与日志，发送链路在施工单 5 接入。

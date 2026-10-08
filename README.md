@@ -32,7 +32,7 @@ cargo run -p yuantuan
 ## 地址与端口速查
 
 | 用途 | 地址 / 端口 | 谁监听 | 备注 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **管理面板（前端）** | http://127.0.0.1:8085/ | yuantuan | 浏览器打开，首次输入的密码即为管理员密码 |
 | **后端 API + WS** | http://127.0.0.1:8085/api/* 和 ws://127.0.0.1:8085/ws | yuantuan | 由 axum 提供；与面板同源 |
 | **NapCat 反向 WS** | ws://127.0.0.1:6199/ws | **yuantuan** | yuantuan 监听，NapCat 主动连入（AstrBot 同款形态） |
@@ -67,7 +67,7 @@ sqlite3 data/yuantuan.db "DELETE FROM state_kv WHERE key='admin_pass_hash';"
 
 ## 工程结构
 
-```
+```text
 crates/
   core/        全部领域系统（bot/agent/decision/memory/tools/prefilter/
                context_builder/reply_engine/consolidation/state/llm/meme/event/db）
@@ -76,18 +76,17 @@ crates/
   yuantuan/    bin：装配各系统 + main()
 webui-frontend/  Vue3 + Vite + Naive UI 管理面板（产物嵌入 crates/webui/static/）
 data/          运行时生成（yuantuan.db(WAL)、memes/、artifacts/、logs/…）
-docs/          设计文档
+docs/          文档入口、设计、实现参考、工作记录与归档
 ```
 
-## 文档地图
+## 文档
 
-- [docs/architecture-v0.1.md](docs/architecture-v0.1.md)：总体架构（人格/记忆/关系/Decision/Prefilter/回复形态/三模型/部署形态）
-- [docs/data-model.md](docs/data-model.md)：14 张表结构与更新语义
-- [docs/runtime-design.md](docs/runtime-design.md)：四 crate 结构、启动序列/监督树、并发模型、WebUI 设计、adapter 通讯设计
-- [docs/governance.md](docs/governance.md)：开发治理协议
-- [docs/decision-log.md](docs/decision-log.md)：决策台账（Q1–Q51 + 未编号裁决：问题/裁决/被否项/落点，改判可溯）
-- [docs/adr/](docs/adr/)：ADR 0001–0004（NapCat 选型、静态人格、否决自研协议、情绪归属）
-- [new-api 401 故障复盘](docs/debug/new-api-401-report.md)：占位符误作密钥的原因、修复过程与验证结果
+完整入口见 [docs/README.md](docs/README.md)，其中按用途区分设计目标、实现参考、进行中的工作与历史归档。
+
+- [总体架构](docs/design/architecture-v0.1.md)与[运行时设计](docs/design/runtime-design.md)：了解目标与系统约束。
+- [信息流实现参考](docs/reference/message-flow-rules.md)与[数据模型](docs/reference/data-model.md)：核对实现记录、数据基线和代码来源。
+- [活跃工作](docs/changes/README.md)、[ADR](docs/adr/README.md)与[历史归档](docs/archive/README.md)：继续任务或查阅决定及故障复盘。
+- [开发治理协议](docs/governance.md)：文档与代码维护约定。
 
 ## 测试
 

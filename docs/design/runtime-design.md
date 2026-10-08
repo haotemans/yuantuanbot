@@ -1,10 +1,14 @@
 # 云团运行时设计 V0.1
 
-> 对应 architecture-v0.1.md 第十五、十七章的工程落地设计：工程结构、启动序列、并发模型、WebUI 设计、扩展模型。变更走治理协议。
+[文档索引](../README.md) · [实现参考](../reference/message-flow-rules.md) · [决策台账](../decision-log.md)
+
+> 文档性质：设计目标与约束。历史修订中的实施进度只对应当时版本；当前实现及差距集中记录在实现参考中。
+
+> 对应 [architecture-v0.1.md](architecture-v0.1.md) 第十五、十七章的工程落地设计：工程结构、启动序列、并发模型、WebUI 设计、扩展模型。变更走治理协议。
 
 ---
 
-# 一、工程结构（workspace 四 crate）
+## 一、工程结构（workspace 四 crate）
 
 ```text
 yuantuan/
@@ -29,7 +33,7 @@ yuantuan/
 
 ---
 
-# 二、启动序列与监督树
+## 二、启动序列与监督树
 
 启动顺序（main）：
 
@@ -53,7 +57,7 @@ yuantuan/
 
 ---
 
-# 三、并发与串行点
+## 三、并发与串行点
 
 **串行点：**
 
@@ -62,23 +66,23 @@ yuantuan/
 
 **并发与速率限制：**
 
-- 按 chat 隔离消息处理，不同 chat 受限并发，避免一个 chat 等待模型时阻塞其他 chat（Q52，已确认、待实现）
+- 按 chat 隔离消息处理，不同 chat 受限并发，避免一个 chat 等待模型时阻塞其他 chat（Q52，已确认）
 - Decision API：全局速率限制 30 次/分（成本闸，超限排队）；每分钟调用次数不是并发数，不能用信号量数量替代
 - Task 执行器：最多 3 个并发任务
-- 全局 LLM 请求并发上限固定为 4（Q53，待实现）；与 Task 数量和 Decision 每分钟速率分别约束。
+- 全局 LLM 请求并发上限固定为 4（Q53）；与 Task 数量和 Decision 每分钟速率分别约束。
 - WebUI 请求：axum 默认并发
 
-Decision 输入（Q56/Q60/Q62，待实现）：每个窗口携带不可变 `anchor` 与有界 `window_messages`。窗口保留 anchor、所有 @/引用云团消息及最后 30 条普通消息，`state` 字符预算 8,000；再使用模型 tokenizer 对完整编译输入（含 chat template 和 schema）强制限制为 8,192 tokens。bot_chat 保留独立 40,000 字符预算。Decision 只能产出结构化动作等字段，Runtime 使用 anchor 的 `msg_id` 与 `sender_pid` 路由，模型不得选择或替换回复对象。
+Decision 输入（Q56/Q60/Q62）：每个窗口携带不可变 `anchor` 与有界 `window_messages`。窗口保留 anchor、所有 @/引用云团消息及最后 30 条普通消息，`state` 字符预算 8,000；再使用模型 tokenizer 对完整编译输入（含 chat template 和 schema）强制限制为 8,192 tokens。bot_chat 保留独立 40,000 字符预算。Decision 只能产出结构化动作等字段，Runtime 使用 anchor 的 `msg_id` 与 `sender_pid` 路由，模型不得选择或替换回复对象。
 
-窗口调度（Q57–Q64，待实现）：所有通过 Prefilter 的消息可创建或加入 10 秒窗口；同 chat 有普通等待窗口时，普通消息加入该窗口，不重复开窗；没有等待窗口时才创建普通窗口。@云团、引用云团、私聊为高优先级；@云团和引用云团始终创建独立窗口，只引用他人按普通消息处理。高优先级窗口优先获得全局 LLM 并发槽。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。失败提示每窗口最多一次，文案为空静默，有文案发送给 anchor 请求者；单泡发送失败只记内部事件。
+窗口调度（Q57–Q64）：所有通过 Prefilter 的消息可创建或加入 10 秒窗口；同 chat 有普通等待窗口时，普通消息加入该窗口，不重复开窗；没有等待窗口时才创建普通窗口。@云团、引用云团、私聊为高优先级；@云团和引用云团始终创建独立窗口，只引用他人按普通消息处理。高优先级窗口优先获得全局 LLM 并发槽。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。失败提示每窗口最多一次，文案为空静默，有文案发送给 anchor 请求者；单泡发送失败只记内部事件。
 
 Decision 模型为 [Intern-Decision-4B](https://www.modelscope.cn/models/Shanghai_AI_Laboratory/Intern-Decision-4B)：它接收 state 与 1–16 个 choice/score/noul 问题，单次 Hugging Face 前向推理返回候选概率分布，不生成自由文本；模型卡默认 `max_length=8192` tokens，提供 Python 3.12+ 推理模块，模型页未提供托管 API 推理，权重文件约 9.1 GB。
 
 Q65 已确认：模型托管于魔搭创空间，由项目的自定义 MCP `decide` 服务调用 Python 推理模块，Rust Bot 作为 MCP client 使用；这不同于魔搭 `studio-mcp`（其工具用于部署/管理 Studio）。现有 `LlmGateway::chat` 的 OpenAI chat/completions JSON 适配不兼容该推理契约。MCP transport、Studio 私有访问鉴权、xGPU 自动暂停与常驻 GPU 资源取舍，以及 `task_goal`/`memory_write`/`reason` 自由文本字段归属待裁决。xGPU 官方说明会在低访问期间自动暂停，因此不能默认假定服务常驻或冷启动满足交互延迟。
 
-Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继续收新消息，窗口不延长，结束后开始 Decision。该窗口不是 API 超时。回复锚点固定为 A；B 普通插话不取消给 A 的回复；B 的独立 @/引用请求异步开启自己的窗口。失败文案为空则静默，有文案才向原请求者发送。
+Q54（设计约束）：A 的消息命中后开启固定 10 秒窗口，期间继续收新消息，窗口不延长，结束后开始 Decision。该窗口不是 API 超时。回复锚点固定为 A；B 普通插话不取消给 A 的回复；B 的独立 @/引用请求异步开启自己的窗口。失败文案为空则静默，有文案才向原请求者发送。
 
-可靠性边界（Q55，ADR-0006，待实现）：消息流水必须可恢复，处理链路需支持从持久化消息恢复消费；Decision/trace 观测事件允许过载缺失，broadcast 通知不能充当唯一可靠消息队列。该裁决不改变 Q47 对 NapCat 断线期间未收到消息的容忍。
+可靠性边界（Q55，ADR-0006）：消息流水必须可恢复，处理链路需支持从持久化消息恢复消费；Decision/trace 观测事件允许过载缺失，broadcast 通知不能充当唯一可靠消息队列。该裁决不改变 Q47 对 NapCat 断线期间未收到消息的容忍。
 
 **一单写者：**
 
@@ -86,7 +90,7 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
 
 ---
 
-# 四、WebUI 设计
+## 四、WebUI 设计
 
 技术栈：Vue3 + Vite + Naive UI；关系网用 vis-network；REST + 单条 WebSocket `/ws` 推送 events；构建产物 rust-embed 嵌入二进制。
 
@@ -113,7 +117,7 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
 
 ---
 
-# 五、扩展模型（三层）
+## 五、扩展模型（三层）
 
 1. **内置功能模块**：编译进二进制，config 开关（meme / 知识库 / 备份皆此模式）
 2. **能力扩展 = 新 Tool**：Tool trait + Registry 注册；`Tool::Builtin`，为二期预留 `Tool::Remote`
@@ -123,18 +127,19 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
 
 ---
 
-# 六、adapter-qq 通讯设计
+## 六、adapter-qq 通讯设计
 
-## WS 拓扑：反向连接（AstrBot 同款）
+### WS 拓扑：反向连接（AstrBot 同款）
 
 云团作为服务器监听 `127.0.0.1:6199`（`[napcat] listen_addr`），NapCat 在网络配置中新增 **Websockets客户端** 卡片，URL 填 `ws://127.0.0.1:6199/ws`、Token 填 `[napcat] token`。**与 AstrBot 的 aiocqhttp 完全同形态**——协议端主动连出，bot 框架起服务器接。
 
 设计理由：
+
 - **UI 一致性**：NapCat 的「Websockets客户端」卡片就是 `ws://ip:port/path` 形态，用户熟悉，不需要在 Host/Port 之间拆协议前缀
 - **服务器侧更可控**：鉴权/连接管理由我们自己写，NapCat 改配置即可切换目标，不必重启整个 QQ 主进程
 - **无需客户端退避**：NapCat 出站连接自身有退避，我方只需 listen 等待
 
-## 消息段模型（铁律）
+### 消息段模型（铁律）
 
 - 只用 OneBot **段数组模式**，废弃 CQ 字符串模式
 - 段数组 → 内部 `Message` 模型的映射是 adapter-qq 的**唯一职责**，core 永远接触不到原始段：
@@ -145,19 +150,19 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
   - `face`（小黄脸）→ V1 忽略不存
 - 发送侧反向构造段数组；换协议端时只需重写这一层映射
 
-## 双工与回执
+### 双工与回执
 
 - 上下行复用同一条 WS：事件下行，action 上行
 - 每条 action 带 echo UUID，等响应回执 **10 秒超时判失败** → 交回复形态引擎的单泡退避重试
 - 鉴权：NapCat 客户端在 HTTP Upgrade 时带 `Authorization: Bearer <token>`，yuantuan 侧在 ws_handler 校验
 
-## 断线策略（V1）
+### 断线策略（V1）
 
 断线窗口期消息 NapCat 不缓存，**接受丢失记事件**——人也会错过消息；不补拉历史（各家 history API 实现参差，二期再议）。NapCat 自身会在断开后重连，我们只需接受下一个连接。
 
 ---
 
-# 修订记录
+## 修订记录
 
 - 2026-10-03（Q52）：明确跨 chat 受限并发；区分并发限制与每分钟调用频率，修正串行/并发小节计数措辞。运行代码尚未落实 Q52。
 - 2026-10-02 V0.1：定稿（拷问轮 Q38–Q43）：四 crate 工程结构、启动序列 + 监督树 + 优雅停机、三串行两并发一单写者、WebUI 技术栈与十页信息架构、三层扩展模型（二期 MCP）。
@@ -166,3 +171,4 @@ Q54（待实现）：A 的消息命中后开启固定 10 秒窗口，期间继�
 - 2026-10-03（TS7 补票条件，调研自官方源）：TS7 已 GA 但 7.0 无程序化 API；等 ① typescript@7.1 稳定版（API 落地，tracking microsoft/TypeScript#63800，预计 2026 Q4）+ ② vuejs/language-tools PR #6170 合并（vue-tsc 将由 @vue/content-mapper 取代）。两者齐即升级并迁移类型检查链路。
 - 2026-10-03：配置中心 2.0——全参数面板化（新增「运行参数」页，页面清单同步十一页）+ 热应用槽扩展（reply/context/consolidation/meme 换槽与定时器重建）+ 模型页连通性测试（/api/llm/test）。
 - 2026-10-06：**adapter-qq 从正向 WS 翻转为反向 WS**（与 AstrBot aiocqhttp 同形态）。原因：早期 session 把 NapCat 「Websocket服务器」卡片字面当成 NapCat 服务端，把 AstrBot 文档里的 `ws://宿主:6199/ws` 当成 NapCat 的对外端口，从而起了 client-style 的出站连接。正确拓扑：云团起服务器监听 6199/ws，NapCat 用「Websockets客户端」卡片主动连入。`[napcat] ws_url` 字段名废弃，改 `listen_addr`。错误教训：读协议文档只看 URL 字面没看拓扑方向。
+- 2026-10-09：按文档用途迁移目录，统一标题层级和引用；区分设计基线、实施记录与当前代码来源。

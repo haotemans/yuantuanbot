@@ -1,6 +1,6 @@
 //! Event System（架构文档十一章）：tokio broadcast 单总线 + 强类型事件枚举。
 //! V1 订阅者：Decision 管线（订 MessageReceived）、tracer（全订落表）、WebUI 实时推送（全订）。
-//! 落库：全部事件写入 events 表（轮转保留 7 天，表结构见 docs/data-model.md）。
+//! 落库：全部事件写入 events 表（轮转保留 7 天，表结构见 docs/reference/data-model.md）。
 
 use rusqlite::params;
 use serde::Serialize;

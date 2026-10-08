@@ -1,5 +1,9 @@
 # 消息可靠恢复，Decision/trace 允许过载缺失
 
+[文档索引](../README.md) · [ADR 索引](README.md) · [决策台账](../decision-log.md)
+
+> 决策记录：保留决定形成时的背景与实施状态；`accepted` 不表示实现已完成。后续实施差距见[信息流参考](../reference/message-flow-rules.md)。
+
 Status: accepted
 
 日期：2026-10-03。对应 Q55，修订 Q37 的全事件完整落库要求。ADR-0005 编号保留给台账中待定的插件设计。

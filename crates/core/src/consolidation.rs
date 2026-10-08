@@ -1,4 +1,4 @@
-//! 夜间归纳（架构文档七章 + docs/data-model.md 十一章更新语义）：
+//! 夜间归纳（架构文档七章 + docs/reference/data-model.md 十一章更新语义）：
 //! 调度：config [consolidation]（enabled / daily_time="HH:MM" / run_on_startup 调试项），
 //! tokio 定时任务 + AtomicBool 单实例锁（夜间归纳重跑会脏数据，见 runtime-design 三串行）。
 //!

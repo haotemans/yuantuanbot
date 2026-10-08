@@ -1,12 +1,18 @@
 # Task / Agent 执行闭环 Workbench
 
+[文档索引](../../README.md) · [归档索引](../README.md)
+
+> 历史记录：以下背景、测试与剩余事项对应原记录日期。归档仅改变资料归属，不扩展当时的验收范围。
+
 ## 状态
+
 - status: closed（全裁决落地 + 测试齐 + workspace 全过）
 - owner: hsb + kimi
 - last-grill: 2026-10-07
 - frontier: 真实群聊 agent_exec 端到端（等配好 providers.toml 三角色后由用户验证）
 
 ## 事实（开工前扫过）
+
 - `tasks` / `task_events` 表已在 V1 迁移建好
 - `crates/core/src/agent.rs` 只有 1 行占位注释——**无任何执行器**
 - Decision 已能产 `action=start_task` + `task_goal`，但 bot.rs 只记事件跳过（注释"后续单"）
@@ -17,25 +23,30 @@
 ## 已确认裁决
 
 ### Q-A01 Agent 执行器形态
+
 - decision: 同步工具循环。每轮 agent_exec LLM 返回 JSON `{ action: tool_call | reply | done, tool_name?, tool_args?, text? }`；tool_call 结果拼回上下文继续；到 done / budget 用完 / 连续 2 次 JSON 解析失败 → 收尾
 - status: confirmed
 
 ### Q-A02 可用工具范围
+
 - decision: ToolRegistry 全部已注册 Tool（hello / media_image / mcp:* / 插件 tool）
 - affected-code: agent.rs 持 Registry 引用
 - status: confirmed
 
 ### Q-A03 任务状态汇报
+
 - decision: **静默**——不发群消息。任务生命周期只走 tasks/task_events 表 + Event::TaskCreated/TaskFinished 事件，面板 Tasks.vue 看
 - status: confirmed
 
 ### Q-A04 budget_max_calls
+
 - decision: 固定 10 轮
 - status: confirmed
 
 ## 公开接口设计
 
 ### agent::TaskRunner（核心循环）
+
 ```rust
 pub struct TaskRunnerDeps {
     pub db_path: PathBuf,
@@ -45,11 +56,12 @@ pub struct TaskRunnerDeps {
     pub mood: MoodState,          // 执行期间 mood 可读（不参与循环决策）
 }
 
-pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()> 
+pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()>
 // 订阅 Event::TaskCreated → 对每个新 task spawn 一个执行协程
 ```
 
 ### 循环协议（agent_exec LLM 系统提示内嵌）
+
 ```json
 {
   "action": "tool_call" | "reply" | "done",
@@ -61,12 +73,14 @@ pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()>
 ```
 
 ### 状态机
+
 - running：任务活跃（budget 未用完且未 done）
 - finished：done 收尾（finished_at 写入）
 - failed：LLM 连续 2 次输出非法 JSON / 内部 panic / tool 抛错 3 次
 - cancelled：面板手动取消（本期不做按钮，留状态枚举）
 
 ### task_events.kind 序列
+
 - created（goal + budget）
 - llm_round（seq=n, action, tool_name?, elapsed_ms, usage）
 - tool_result（seq=n, tool_name, ok, summary, error?）
@@ -98,10 +112,8 @@ pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()>
 - used_calls 每轮 bump 到 tasks 表（面板进度条数据源），不是终局才写
 
 ## 非本期（明确不做）
+
 - 群里发任务状态消息（Q-A03 裁决静默）
 - 手动取消按钮 / 任务打断 API
 - 多任务并发限流 / SIGINT 恢复
 - 流式输出到面板
-
-## 代码反馈
-（暂无）

@@ -1,10 +1,14 @@
-# 云团数据模型 V0.1
+# 云团数据模型 V0.1（设计基线）
 
-> 对应 architecture-v0.1.md 的落地表结构。变更走治理协议：小改直接改 + 修订记录，大改先 ADR。
+[文档索引](../README.md) · [总体架构](../design/architecture-v0.1.md) · [数据库迁移](../../crates/core/src/db.rs)
+
+> 文档性质：V0.1 数据与输入契约基线，包含设计目标。后续新增表、字段和迁移以 `db.rs` 为准；本页不是由运行数据库生成的完整 schema。
+
+> 对应 [architecture-v0.1.md](../design/architecture-v0.1.md) 的落地表结构。变更走治理协议：小改直接改 + 修订记录，大改先 ADR。
 
 ---
 
-# 一、存储布局
+## 一、存储布局
 
 所有运行数据集中在 `data/` 目录（docker 单卷挂载、备份、迁移都只认它）：
 
@@ -20,7 +24,7 @@ data/
 
 ---
 
-# 二、身份与人
+## 二、身份与人
 
 ```sql
 -- 全局唯一的人
@@ -55,7 +59,7 @@ QQ 号在同平台全局唯一：同一个人出现在多个群，天然收敛�
 
 ---
 
-# 三、消息流水（全量落库）
+## 三、消息流水（全量落库）
 
 ```sql
 CREATE TABLE messages (
@@ -79,7 +83,7 @@ CREATE INDEX idx_msg_sender_ts ON messages(sender_pid, ts);
 
 ---
 
-# 四、长期记忆与摘要
+## 四、长期记忆与摘要
 
 ```sql
 -- 长期记忆：人物/群/云团自身 三主体单表
@@ -117,7 +121,7 @@ CREATE TABLE summaries (
 
 ---
 
-# 五、关系系统
+## 五、关系系统
 
 ```sql
 -- 单向边：只存当前值
@@ -153,7 +157,7 @@ CREATE INDEX idx_re_pair ON relationship_events(from_pid, to_pid);
 
 ---
 
-# 六、人格版本
+## 六、人格版本
 
 ```sql
 CREATE TABLE personality_versions (
@@ -170,7 +174,7 @@ CREATE TABLE personality_versions (
 
 ---
 
-# 七、Meme 库
+## 七、Meme 库
 
 ```sql
 CREATE TABLE meme_library (
@@ -197,7 +201,7 @@ CREATE TABLE meme_library (
 
 ---
 
-# 八、Task 系统
+## 八、Task 系统
 
 ```sql
 CREATE TABLE tasks (
@@ -226,7 +230,7 @@ CREATE INDEX idx_te_task ON task_events(task_id, seq);
 
 产出文件实体进 `data/artifacts/`，表里只存路径；归档 = state 转 `archived` + 摘要进 `data/archive/`。
 
-## 完工交接契约（Agent → Bot）
+### 完工交接契约（Agent → Bot）
 
 - `result_summary`：≤300 字人话结果摘要
 - `artifacts`：产出文件路径列表
@@ -234,13 +238,13 @@ CREATE INDEX idx_te_task ON task_events(task_id, seq);
 
 Bot 只拿这三样组织语言，不接触工具流水。
 
-## 上下文截断规则
+### 上下文截断规则
 
 LLM 可见的工具结果恒经 Runtime 硬性截断：最近一步结果全量进 Working Memory，更早的压成摘要行；全文只存 task_events。截断由 Runtime 执行，不指望模型自觉（与 Schema 校验同一哲学）。
 
 ---
 
-# 九、State 持久化
+## 九、State 持久化
 
 ```sql
 CREATE TABLE state_kv (
@@ -254,7 +258,7 @@ CREATE TABLE state_kv (
 
 ---
 
-# 十、Decision 输入契约（Decision Context）
+## 十、Decision 输入契约（Decision Context）
 
 每字段有界，由 Context Builder 组装；摘要优先于原始消息。
 
@@ -302,11 +306,11 @@ CREATE TABLE state_kv (
 
 窗口裁剪规则：必须保留 anchor、窗口内所有 @/引用云团消息和最后 30 条普通消息；Decision `state` 最多 8,000 字符，并以模型 tokenizer 对完整模板/schema 后的输入做 8,192-token 硬限制。超出的消息仍在 `messages` 表中，不能送入本次 Decision。窗口有创建序号，Runtime 按同 chat 的创建序号入发送队列。bot_chat 的 40,000 字符预算单独计算。
 
-输出 Schema 见 architecture-v0.1.md 第十三章。
+输出 Schema 见 [architecture-v0.1.md](../design/architecture-v0.1.md) 第十三章。
 
 ---
 
-# 十一、更新语义总表
+## 十一、更新语义总表
 
 | 动作 | 时机 | 写入方 |
 | --- | --- | --- |
@@ -319,7 +323,7 @@ CREATE TABLE state_kv (
 
 ---
 
-# 十二、事件表（events）
+## 十二、事件表（events）
 
 Event Bus 全量事件的落库副本（由 tracer 订阅写入），Decision trace 页与任务执行可视化页的数据源：
 
@@ -337,8 +341,9 @@ CREATE INDEX idx_events_ts ON events(ts);
 
 ---
 
-# 修订记录
+## 修订记录
 
 - 2026-10-02 V0.1：数据模型定稿（拷问轮 Q21–Q25）：三主体长期记忆单表、每日摘要索引、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、消息 mentions 字段、mood 免持久化、Decision 输入契约。
 - 2026-10-02（Q26–Q30）：Task 章新增完工交接契约（result_summary + artifacts + key_data）与工具结果硬性截断规则。
 - 2026-10-02（Q34–Q37）：新增第十二章 events 表（Event Bus 落库副本，7 天轮转），供 trace 与任务可视化页查询。
+- 2026-10-09：按文档用途迁移目录，统一标题层级和引用；区分设计基线、实施记录与当前代码来源。
