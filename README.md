@@ -87,6 +87,7 @@ docs/          设计文档
 - [docs/governance.md](docs/governance.md)：开发治理协议
 - [docs/decision-log.md](docs/decision-log.md)：决策台账（Q1–Q51 + 未编号裁决：问题/裁决/被否项/落点，改判可溯）
 - [docs/adr/](docs/adr/)：ADR 0001–0004（NapCat 选型、静态人格、否决自研协议、情绪归属）
+- [new-api 401 故障复盘](docs/debug/new-api-401-report.md)：占位符误作密钥的原因、修复过程与验证结果
 
 ## 测试
 
