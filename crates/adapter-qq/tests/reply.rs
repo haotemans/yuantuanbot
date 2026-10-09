@@ -4,6 +4,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{send_fn, spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{spawn_tracer, EventBus};
 use yuantuan_core::llm::LlmGateway;
 use yuantuan_core::prefilter::SelfMsgIds;
@@ -36,10 +38,10 @@ fn temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
-fn temp_db() -> PathBuf {
+async fn temp_db() -> PathBuf {
     let db = temp_dir("reply-db").join("yuantuan.db");
-    let mut conn = db::connect(&db).unwrap();
-    db::migrate(&mut conn).unwrap();
+    let mut conn = db::connect(&db).await.unwrap();
+    db::migrate(&mut conn).await.unwrap();
     db
 }
 
@@ -72,10 +74,11 @@ async fn mock_llm(listener: TcpListener, queues: Arc<LlmQueues>) {
                 .unwrap_or_default();
             let content = if model == "m-decision" {
                 // 模型已经收到本轮上下文后，模拟另一人在等待期间的新话题。
-                if let Some(path)=queues.inject_db.lock().unwrap().take() {
-                    let conn=db::connect(&path).unwrap();
+                let inject_path = queues.inject_db.lock().unwrap().take();
+                if let Some(path)=inject_path {
+                    let mut conn=db::connect(&path).await.unwrap();
                     conn.execute_batch("INSERT OR IGNORE INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_2002','小明',1,1);
-                        INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts) VALUES ('555666','group','p_2002','小明','等待期间出现的新话题',1759400001);").unwrap();
+                        INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts) VALUES ('555666','group','p_2002','小明','等待期间出现的新话题',1759400001);").await.unwrap();
                 }
                 queues.decision.lock().unwrap().pop_front()
             } else {
@@ -337,7 +340,7 @@ fn decision_json(mention: bool) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn reply_loop_sends_three_bubbles() {
-    let db_path = temp_db();
+    let db_path = temp_db().await;
     let mut decision: Value = serde_json::from_str(&decision_json(true)).unwrap();
     decision["memory_write"] = json!("长期使用 Rust");
     decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
@@ -421,46 +424,52 @@ async fn reply_loop_sends_three_bubbles() {
     assert!(total <= Duration::from_secs(8), "总时长超预算: {total:?}");
 
     // self 回复落库，保持会话连贯
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let mut stmt = conn
-        .prepare("SELECT text FROM messages WHERE sender_pid = 'self' AND chat_id = '555666' ORDER BY msg_id")
+        .prepare("SELECT text FROM messages WHERE sender_pid = 'self' AND chat_id = '555666' ORDER BY msg_id").await
         .unwrap();
     let self_texts: Vec<String> = stmt
-        .query_map([], |r| r.get(0))
+        .query_map(yuantuan_core::db::params![], |r| r.try_get(0))
+        .await
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
     assert_eq!(self_texts, vec!["哈。", "确实不错。", "我去试试。"]);
     let external_ids: Vec<i64> = conn
         .prepare("SELECT external_msg_id FROM messages WHERE sender_pid='self' ORDER BY msg_id")
+        .await
         .unwrap()
-        .query_map([], |r| r.get(0))
+        .query_map(yuantuan_core::db::params![], |r| r.try_get(0))
+        .await
         .unwrap()
-        .collect::<rusqlite::Result<_>>()
+        .collect::<sqlx::Result<_>>()
         .unwrap();
     assert_eq!(external_ids, vec![901, 902, 903]);
     let linked: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND reply_anchor_id=1",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(linked, 3, "每个成功气泡都保存真实回复归属");
     let profile: (String, i64) = conn
         .query_row(
             "SELECT content,source_msg_id FROM person_profile_facts WHERE person_id='p_2001'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(profile, ("长期使用 Rust".into(), 1));
     let provenance: (String, i64) = conn
         .query_row(
             "SELECT source_chat_id,source_msg_id FROM long_memories WHERE owner_id='p_2001'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(provenance, ("555666".into(), 1));
     let requests = queues.requests.lock().unwrap();
@@ -490,7 +499,7 @@ async fn reply_loop_sends_three_bubbles() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
-    let path = temp_db();
+    let path = temp_db().await;
     let mut decision: Value = serde_json::from_str(&decision_json(true)).unwrap();
     decision["reply_len"] = json!("short");
     let queues = Arc::new(LlmQueues {
@@ -513,13 +522,14 @@ async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
     .await;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let conn = db::connect(&path).unwrap();
+        let mut conn = db::connect(&path).await.unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE sender_pid='self'",
-                [],
-                |r| r.get(0),
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
             )
+            .await
             .unwrap();
         if count == 1 {
             break;
@@ -541,7 +551,7 @@ async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
-    let path = temp_db();
+    let path = temp_db().await;
     let decision = json!({"action":"start_task","mood":"calm","mention":false,"reply_len":"long",
         "task_goal":"查询过去执行结果","reason":"模拟过度接单","reply_mode":"answer",
         "assessment":{"audience":"bot","intent":"question","continuity":"new_topic","confidence":"high",
@@ -564,13 +574,14 @@ async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
     .await;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let conn = db::connect(&path).unwrap();
+        let mut conn = db::connect(&path).await.unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE sender_pid='self'",
-                [],
-                |r| r.get(0),
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
             )
+            .await
             .unwrap();
         if count == 1 {
             break;
@@ -578,13 +589,14 @@ async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
         assert!(Instant::now() < deadline, "参与策略后的回复未发送");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let conn = db::connect(&path).unwrap();
+    let mut conn = db::connect(&path).await.unwrap();
     let payload: String = conn
         .query_row(
             "SELECT payload FROM events WHERE kind='DecisionMade' ORDER BY id LIMIT 1",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     let trace: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(trace["policy"]["suggested_action"], "start_task");
@@ -593,7 +605,12 @@ async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
     assert_eq!(trace["reply_mode"], "state_uncertainty");
     assert!(!trace["policy"]["notes"].as_array().unwrap().is_empty());
     let task_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM tasks",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(task_count, 0, "询问过去记录不能直接触发工具");
     let requests = queues.requests.lock().unwrap();
@@ -606,7 +623,7 @@ async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn new_message_preserves_remaining_bubbles_and_reply_target() {
-    let db_path = temp_db();
+    let db_path = temp_db().await;
     let ignore = json!({
         "action": "ignore", "mood": "calm", "mention": false, "reply_len": "short",
         "meme_type": null, "task_goal": null, "memory_write": null, "reason": "普通消息"
@@ -639,24 +656,26 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
     let deadline = Instant::now() + Duration::from_secs(60);
     while captures.lock().unwrap().is_empty() {
         if Instant::now() >= deadline {
-            let c = db::connect(&db_path).unwrap();
+            let mut c = db::connect(&db_path).await.unwrap();
             let msgs: Vec<String> = c
-                .prepare("SELECT msg_id, sender_pid, chat_id, substr(text,1,24) FROM messages ORDER BY msg_id")
+                .prepare("SELECT msg_id, sender_pid, chat_id, substr(text,1,24) FROM messages ORDER BY msg_id").await
                 .unwrap()
-                .query_map([], |r| Ok(format!("{}|{}|{}|{}", r.get::<_,i64>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?, r.get::<_,String>(3)?)))
+                .query_map( yuantuan_core::db::params![], |r| Ok(format!("{}|{}|{}|{}", r.try_get::<i64, _>(0)?, r.try_get::<String, _>(1)?, r.try_get::<String, _>(2)?, r.try_get::<String, _>(3)?))).await
                 .unwrap()
                 .map(|r| r.unwrap())
                 .collect();
             let evs: Vec<String> = c
                 .prepare("SELECT id, kind FROM events ORDER BY id")
+                .await
                 .unwrap()
-                .query_map([], |r| {
+                .query_map(yuantuan_core::db::params![], |r| {
                     Ok(format!(
                         "{}|{}",
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?
+                        r.try_get::<i64, _>(0)?,
+                        r.try_get::<String, _>(1)?
                     ))
                 })
+                .await
                 .unwrap()
                 .map(|r| r.unwrap())
                 .collect();
@@ -680,30 +699,33 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
         .map(|(_, s)| s[0]["data"]["text"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(texts, ["第一。", "第二。", "第三。"]);
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let interrupted: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(interrupted, 0, "普通插话不触发 ReplyInterrupted");
     let self_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE sender_pid = 'self'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(self_count, 3);
     // 注入的新消息自身也正常落库决策（ignore）
     let incoming: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE sender_pid = 'p_2009'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(incoming, 1);
 }

@@ -59,9 +59,13 @@ impl Default for AdapterHandle {
 
 impl AdapterHandle {
     /// 停止接收新业务消息，保留当前连接处理发送回执以便排空。
-    pub fn stop_receiving(&self) { self.receiving.store(false, Ordering::Release); }
+    pub fn stop_receiving(&self) {
+        self.receiving.store(false, Ordering::Release);
+    }
 
-    pub(crate) fn is_receiving(&self) -> bool { self.receiving.load(Ordering::Acquire) }
+    pub(crate) fn is_receiving(&self) -> bool {
+        self.receiving.load(Ordering::Acquire)
+    }
 
     pub async fn sender(&self) -> Option<NapcatSender> {
         self.current.lock().await.clone()
@@ -78,7 +82,8 @@ impl AdapterHandle {
 
     /// 连接状态：已连接且最近 30s 内有任何帧活动（心跳/消息/回执都算）
     pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Relaxed) && self.last_active.lock().unwrap().elapsed() <= Duration::from_secs(30)
+        self.connected.load(Ordering::Relaxed)
+            && self.last_active.lock().unwrap().elapsed() <= Duration::from_secs(30)
     }
 
     // —— server.rs 内部使用的修改器（pub(crate)，装配层不直接接触）——
@@ -127,7 +132,7 @@ pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
 }
 
 /// 帧分发（传输无关）：action 回执优先路由，meta_event 跳过，message/message_sent 走 ingest
-pub(crate) fn handle_frame(
+pub(crate) async fn handle_frame(
     v: &Value,
     bus: &EventBus,
     db_path: &Path,
@@ -144,7 +149,7 @@ pub(crate) fn handle_frame(
     match v.get("post_type").and_then(|t| t.as_str()) {
         Some("meta_event") => Ok(()),
         Some("message") | Some("message_sent") => {
-            crate::ingest::ingest_message(v, bus, db_path, self_qq, self_ids)
+            crate::ingest::ingest_message(v, bus, db_path, self_qq, self_ids).await
         }
         Some(other) => {
             debug!(post_type = other, "忽略非 message 事件");
@@ -165,18 +170,36 @@ pub(crate) fn next_echo(counter: &AtomicU64) -> String {
 /// 写端类型只在 server.rs 装配时确定，这里保留具体类型（axum 的 SplitSink<WebSocket>）。
 #[derive(Clone)]
 pub struct NapcatSender {
-    write: Arc<AsyncMutex<futures_util::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>>>,
+    write: Arc<
+        AsyncMutex<
+            futures_util::stream::SplitSink<
+                axum::extract::ws::WebSocket,
+                axum::extract::ws::Message,
+            >,
+        >,
+    >,
     pending: Pending,
     counter: Arc<AtomicU64>,
 }
 
 impl NapcatSender {
     pub(crate) fn new_axum(
-        write: Arc<AsyncMutex<futures_util::stream::SplitSink<axum::extract::ws::WebSocket, axum::extract::ws::Message>>>,
+        write: Arc<
+            AsyncMutex<
+                futures_util::stream::SplitSink<
+                    axum::extract::ws::WebSocket,
+                    axum::extract::ws::Message,
+                >,
+            >,
+        >,
         pending: Pending,
         counter: Arc<AtomicU64>,
     ) -> Self {
-        Self { write, pending, counter }
+        Self {
+            write,
+            pending,
+            counter,
+        }
     }
 
     async fn action(&self, action: &str, params: Value) -> Result<Value> {
@@ -218,5 +241,4 @@ impl NapcatSender {
         )
         .await
     }
-
 }

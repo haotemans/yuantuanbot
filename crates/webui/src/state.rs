@@ -57,7 +57,9 @@ impl Extras {
             llm_slot: Arc::new(RwLock::new(None)),
             prefilter_slot: Arc::new(RwLock::new(yuantuan_core::prefilter::Config::default())),
             reply_slot: Arc::new(RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
-            ctx_slot: Arc::new(RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+            ctx_slot: Arc::new(RwLock::new(
+                yuantuan_core::context_builder::ContextCfg::default(),
+            )),
             steal_slot: Arc::new(RwLock::new(true)),
             consolidation: Arc::new(Mutex::new(None)),
             self_qq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -79,6 +81,8 @@ impl Extras {
 #[derive(Clone)]
 pub struct AppState {
     pub db_path: PathBuf,
+    // Hold the shared pool for the lifetime of the server, without reserving a connection.
+    _database: Option<Arc<yuantuan_core::db::Database>>,
     /// data/memes 根（由 db_path 推导）
     pub memes_dir: PathBuf,
     sessions: Arc<Mutex<HashMap<String, Instant>>>,
@@ -93,6 +97,7 @@ impl AppState {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("memes");
         Self {
+            _database: yuantuan_core::db::database(&db_path).ok(),
             db_path,
             memes_dir,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -101,11 +106,8 @@ impl AppState {
         }
     }
 
-    pub fn open_db(&self) -> rusqlite::Result<rusqlite::Connection> {
-        let conn = rusqlite::Connection::open(&self.db_path)?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "busy_timeout", 5000)?;
-        Ok(conn)
+    pub async fn open_db(&self) -> anyhow::Result<yuantuan_core::db::Connection> {
+        yuantuan_core::db::connect(&self.db_path).await
     }
 
     pub fn issue_session(&self, token: String) {

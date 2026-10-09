@@ -30,7 +30,12 @@ struct ServerState {
 }
 
 /// 启动反向 WS 服务器（永不返回），返回供 core 取发送端/自身号/连接状态的句柄
-pub fn spawn(bus: EventBus, db_path: PathBuf, cfg: NapcatConfig, self_ids: SelfMsgIds) -> AdapterHandle {
+pub fn spawn(
+    bus: EventBus,
+    db_path: PathBuf,
+    cfg: NapcatConfig,
+    self_ids: SelfMsgIds,
+) -> AdapterHandle {
     let handle = AdapterHandle::default();
     let state = ServerState {
         bus,
@@ -55,7 +60,9 @@ async fn serve(state: ServerState) -> Result<()> {
         .await
         .with_context(|| format!("反向 WS 监听失败：{}", state.cfg.listen_addr))?;
     info!(listen_addr = %state.cfg.listen_addr, "反向 WS 服务器已监听，等待 NapCat Websockets客户端连入");
-    axum::serve(listener, app).await.context("反向 WS 服务异常退出")
+    axum::serve(listener, app)
+        .await
+        .context("反向 WS 服务异常退出")
 }
 
 async fn ws_handler(
@@ -63,7 +70,9 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
-    if !state.handle.is_receiving() { return Err(StatusCode::SERVICE_UNAVAILABLE); }
+    if !state.handle.is_receiving() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     // 每次连接都读最新 token，热应用立即生效
     let expected_token = state.cfg.token.read().unwrap().clone();
     if !expected_token.is_empty() {
@@ -111,7 +120,9 @@ async fn session(socket: WebSocket, state: ServerState) {
                 return;
             }
         };
-        let AxumWsMessage::Text(text) = frame else { continue };
+        let AxumWsMessage::Text(text) = frame else {
+            continue;
+        };
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if v.get("echo").and_then(|e| e.as_str()) == Some(echo.as_str()) {
             match v.pointer("/data/user_id").and_then(|u| u.as_u64()) {
@@ -124,7 +135,8 @@ async fn session(socket: WebSocket, state: ServerState) {
         }
         // 握手期混入的帧照常处理；此时自身号未知，at_me 退化
         if state.handle.is_receiving() {
-            let _ = handle_frame(&v, &state.bus, &state.db_path, 0, &pending, &state.self_ids);
+            let _ =
+                handle_frame(&v, &state.bus, &state.db_path, 0, &pending, &state.self_ids).await;
         }
     };
     state.handle.store_self_qq(self_qq);
@@ -152,8 +164,19 @@ async fn session(socket: WebSocket, state: ServerState) {
                         continue;
                     }
                 };
-                if !state.handle.is_receiving() && v.get("echo").is_none() { continue; }
-                if let Err(e) = handle_frame(&v, &state.bus, &state.db_path, self_qq, &pending, &state.self_ids) {
+                if !state.handle.is_receiving() && v.get("echo").is_none() {
+                    continue;
+                }
+                if let Err(e) = handle_frame(
+                    &v,
+                    &state.bus,
+                    &state.db_path,
+                    self_qq,
+                    &pending,
+                    &state.self_ids,
+                )
+                .await
+                {
                     warn!(error = %e, "帧处理失败");
                 }
             }

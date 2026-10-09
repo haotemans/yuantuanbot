@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx.workspace = true
 argon2 = "0.5"
 rand = "0.9"
 rust-embed = "8"

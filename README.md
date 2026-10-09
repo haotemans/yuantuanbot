@@ -4,6 +4,8 @@
 
 长期住在 QQ 群里的 Rust 机器人：Decision 小脑 + 人格回复 + 夜间归纳 + 表情管线 + 十页管理面板，目标是 2C2G 小鸡服务器低占用常驻（SQLite 内嵌、单二进制、协议端走 NapCat/OneBot 11）。
 
+当前技术栈：Vue 3 + Vite + TypeScript；后端 Rust + Axum + Tokio + SQLx + SQLite。SQLx 迁移保留既有数据库文件和 V1–V7 版本，连接池、事务及验证入口见[异步数据库访问](docs/reference/sqlite-access.md)。
+
 ## 下载二进制
 
 不想本地编译的话，直接到 [Releases](https://github.com/haotemans/yuantuanbot/releases) 下载 `yuantuan-linux-x86_64`（musl 静态单文件，前端已内嵌，对应校验和同名 `.sha256`）。每个 `v*` tag 由 CI 自动构建并发布；非 tag 提交的构建产物在 Actions 对应 run 的 Artifacts 里。

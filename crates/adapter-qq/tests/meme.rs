@@ -5,6 +5,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{send_fn, spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{spawn_tracer, EventBus};
 use yuantuan_core::llm::LlmGateway;
 use yuantuan_core::meme;
@@ -27,7 +29,8 @@ const SELF_QQ: u64 = 10001;
 fn temp_dir(prefix: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-        + (std::process::id() as u128) << 16;
+        + (std::process::id() as u128)
+        << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -38,7 +41,11 @@ fn make_png(path: &PathBuf) {
     let mut img = image::RgbImage::new(32, 32);
     for y in 0..32u32 {
         for x in 0..32u32 {
-            let v = if (x / 8 + y / 8) % 2 == 0 { 240u8 } else { 20u8 };
+            let v = if (x / 8 + y / 8) % 2 == 0 {
+                240u8
+            } else {
+                20u8
+            };
             img.put_pixel(x, y, image::Rgb([v, v / 2, 200]));
         }
     }
@@ -103,7 +110,11 @@ async fn mock_napcat_capture(port: u16, initial: Vec<Value>, captures: Captures)
         .await
         .unwrap();
     for ev in initial {
-        w.lock().await.send(Message::Text(ev.to_string().into())).await.unwrap();
+        w.lock()
+            .await
+            .send(Message::Text(ev.to_string().into()))
+            .await
+            .unwrap();
     }
     let mut seq = 800i64;
     while let Some(Ok(frame)) = r.next().await {
@@ -113,7 +124,10 @@ async fn mock_napcat_capture(port: u16, initial: Vec<Value>, captures: Captures)
             Err(_) => continue,
         };
         if v["action"].as_str().unwrap_or("").starts_with("send_") {
-            captures.lock().unwrap().push(v["params"]["message"].clone());
+            captures
+                .lock()
+                .unwrap()
+                .push(v["params"]["message"].clone());
             seq += 1;
             let echo = v["echo"].as_str().unwrap_or("").to_string();
             let _ = w
@@ -150,14 +164,14 @@ async fn decision_send_meme_sends_image() {
     make_png(&png_path);
     let db_path = data.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
     // 入库（走正式扫描管线）
-    let stats = meme::scan_and_ingest(&memes, &db_path).unwrap();
+    let stats = meme::scan_and_ingest(&memes, &db_path).await.unwrap();
     assert_eq!((stats.scanned, stats.added, stats.skipped_dup), (1, 1, 0));
     // 再扫一次幂等
-    let stats2 = meme::scan_and_ingest(&memes, &db_path).unwrap();
+    let stats2 = meme::scan_and_ingest(&memes, &db_path).await.unwrap();
     assert_eq!(stats2.added, 0);
 
     // mock LLM + mock NapCat
@@ -175,7 +189,11 @@ async fn decision_send_meme_sends_image() {
 
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
     let nl_port = free_port();
-    tokio::spawn(mock_napcat_capture(nl_port, vec![at_message(501, 2001, "来个开心图")], captures.clone()));
+    tokio::spawn(mock_napcat_capture(
+        nl_port,
+        vec![at_message(501, 2001, "来个开心图")],
+        captures.clone(),
+    ));
 
     let bus = EventBus::new(128);
     let _tracer = spawn_tracer(&bus, db_path.clone());
@@ -205,10 +223,14 @@ async fn decision_send_meme_sends_image() {
         self_qq: adapter.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        prefilter: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::prefilter::Config::default(),
+        )),
         reply: Some(engine),
         reply_cfg: Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
-        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::context_builder::ContextCfg::default(),
+        )),
         memes_dir: memes.clone(),
         media_ctx: None,
         skill_registry: None,
@@ -223,19 +245,30 @@ async fn decision_send_meme_sends_image() {
     }
     let segs = captures.lock().unwrap()[0].clone();
     let arr = segs.as_array().unwrap();
-    let img = arr.iter().find(|s| s["type"] == "image").expect("应含 image 段");
+    let img = arr
+        .iter()
+        .find(|s| s["type"] == "image")
+        .expect("应含 image 段");
     let file = img["data"]["file"].as_str().unwrap().to_string();
-    assert!(file.starts_with("file:///"), "file 应为 file:// 绝对路径: {file}");
-    let local = file.trim_start_matches("file:///").replace('/', std::path::MAIN_SEPARATOR_STR);
+    assert!(
+        file.starts_with("file:///"),
+        "file 应为 file:// 绝对路径: {file}"
+    );
+    let local = file
+        .trim_start_matches("file:///")
+        .replace('/', std::path::MAIN_SEPARATOR_STR);
     assert!(PathBuf::from(&local).exists(), "图文件应存在: {local}");
 
     // use_count 增加、last_used_ts 已写
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let (use_count, last_used): (i64, Option<i64>) = conn
-        .query_row("SELECT use_count, last_used_ts FROM meme_library WHERE id = 1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT use_count, last_used_ts FROM meme_library WHERE id = 1",
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        )
+        .await
         .unwrap();
     assert_eq!(use_count, 1);
     assert!(last_used.is_some());
@@ -243,9 +276,10 @@ async fn decision_send_meme_sends_image() {
     let self_img: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND has_image=1",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(self_img, 1);
 }
@@ -289,8 +323,8 @@ async fn steal_then_approve_and_reject() {
     std::fs::create_dir_all(&memes).unwrap();
     let db_path = data.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
 
     // 图片源
@@ -307,7 +341,10 @@ async fn steal_then_approve_and_reject() {
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
     tokio::spawn(mock_napcat_capture(
         nl_port,
-        vec![image_message(601, 2002, &img_url), image_message(602, 2002, &img_url)],
+        vec![
+            image_message(601, 2002, &img_url),
+            image_message(602, 2002, &img_url),
+        ],
         captures,
     ));
 
@@ -335,25 +372,43 @@ async fn steal_then_approve_and_reject() {
     // 等 pending 行落库
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let conn = db::connect(&db_path).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM meme_library WHERE status='pending' AND added_by='steal'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM meme_library WHERE status='pending' AND added_by='steal'",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
             .unwrap();
         if n == 1 {
             break;
         }
-        assert!(Instant::now() < deadline, "30s 内 pending 未落库（当前 {n}）");
+        assert!(
+            Instant::now() < deadline,
+            "30s 内 pending 未落库（当前 {n}）"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     // 去重：第二条相同图片不再产生 pending
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM meme_library WHERE status='pending'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM meme_library WHERE status='pending'",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(n, 1, "重复图片应被去重");
     let (id, file): (i64, String) = conn
-        .query_row("SELECT id, file FROM meme_library WHERE status='pending' LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(
+            "SELECT id, file FROM meme_library WHERE status='pending' LIMIT 1",
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        )
+        .await
         .unwrap();
     assert!(file.starts_with("_inbox/"));
     assert!(memes.join(&file).exists(), "_inbox 文件应存在");
@@ -367,7 +422,9 @@ async fn steal_then_approve_and_reject() {
         temp_dir("meme-noconfig").join("config.toml"),
         temp_dir("meme-noconfig").join("providers.toml"),
     );
-    tokio::spawn(async move { let _ = yuantuan_webui::serve(db2, "127.0.0.1", wport, extras).await; });
+    tokio::spawn(async move {
+        let _ = yuantuan_webui::serve(db2, "127.0.0.1", wport, extras).await;
+    });
     tokio::time::sleep(Duration::from_millis(300)).await;
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{wport}");
@@ -396,9 +453,12 @@ async fn steal_then_approve_and_reject() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let (status, cat): (String, String) = conn
-        .query_row("SELECT status, category FROM meme_library WHERE id = ?1", rusqlite::params![id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT status, category FROM meme_library WHERE id = ?1",
+            yuantuan_core::db::params![id],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        )
+        .await
         .unwrap();
     assert_eq!((status.as_str(), cat.as_str()), ("active", "开心"));
 
@@ -420,12 +480,16 @@ async fn steal_then_approve_and_reject() {
     std::fs::write(&file2, &png_bytes).unwrap();
     // 直接 SQL 插（同图 md5 相同不影响手工行）
     conn.execute(
-        "INSERT INTO meme_library(file, category, md5, added_by, status, created_at) VALUES ('_inbox/todelete.png', '_inbox', 'manual', 'steal', 'pending', 1)",
-        [],
-    )
+        "INSERT INTO meme_library(file, category, md5, added_by, status, created_at) VALUES ('_inbox/todelete.png', '_inbox', 'manual', 'steal', 'pending', 1)", yuantuan_core::db::params![],
+    ).await
     .unwrap();
     let id2: i64 = conn
-        .query_row("SELECT id FROM meme_library WHERE file = '_inbox/todelete.png'", [], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM meme_library WHERE file = '_inbox/todelete.png'",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     let r = http
         .post(format!("{base}/api/memes/{id2}/reject"))
@@ -435,7 +499,12 @@ async fn steal_then_approve_and_reject() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let gone: i64 = conn
-        .query_row("SELECT COUNT(*) FROM meme_library WHERE id = ?1", rusqlite::params![id2], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM meme_library WHERE id = ?1",
+            yuantuan_core::db::params![id2],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(gone, 0);
     assert!(!file2.exists(), "reject 应删除文件");

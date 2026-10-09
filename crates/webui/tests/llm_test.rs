@@ -35,25 +35,33 @@ async fn start() -> Rig {
     let dir = temp_dir("rig");
     let db_path = dir.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
 
     // mock OpenAI 兼容 provider：收 chat/completions，记住 body，回固定 pong
     let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
-    let mock = Router::new().route(
-        "/v1/chat/completions",
-        post(move |Json(body): Json<Value>| {
-            let seen = seen2.clone();
-            async move {
-                seen.lock().unwrap().push(body);
-                Json(json!({"choices": [{"message": {"content": "pong"}}]}))
-            }
-        }),
-    ).route("/v1/models", axum::routing::get(|| async {
-        (axum::http::StatusCode::BAD_GATEWAY, format!("a{}", "中".repeat(120)))
-    }));
+    let mock = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen2.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({"choices": [{"message": {"content": "pong"}}]}))
+                }
+            }),
+        )
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    format!("a{}", "中".repeat(120)),
+                )
+            }),
+        );
     let mock_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mock_port = mock_listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(mock_listener, mock).await.unwrap() });
@@ -79,7 +87,9 @@ async fn start() -> Rig {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let db2 = db_path.clone();
-    tokio::spawn(async move { let _ = serve(db2, "127.0.0.1", port, extras).await; });
+    tokio::spawn(async move {
+        let _ = serve(db2, "127.0.0.1", port, extras).await;
+    });
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -101,8 +111,13 @@ async fn start() -> Rig {
         .json()
         .await
         .unwrap();
-    Rig { http, base, token: login["token"].as_str().unwrap().to_string(), llm_seen: seen,
-        mock_base: format!("http://127.0.0.1:{mock_port}/v1") }
+    Rig {
+        http,
+        base,
+        token: login["token"].as_str().unwrap().to_string(),
+        llm_seen: seen,
+        mock_base: format!("http://127.0.0.1:{mock_port}/v1"),
+    }
 }
 
 impl Rig {
@@ -142,17 +157,29 @@ async fn llm_test_three_states() {
     assert_eq!(s, 400, "key 缺失应 400: {v}");
     assert_eq!(v["ok"], json!(false));
     let err = v["error"].as_str().unwrap();
-    assert!(err.contains("环境变量") && err.contains("YT_TEST_DEFINITELY_MISSING_KEY"), "错误应指向环境变量: {err}");
+    assert!(
+        err.contains("环境变量") && err.contains("YT_TEST_DEFINITELY_MISSING_KEY"),
+        "错误应指向环境变量: {err}"
+    );
 
     // ③ 角色未绑定
     let (s, v) = rig.llm_test("agent_exec").await;
     assert_eq!(s, 400);
-    assert!(v["error"].as_str().unwrap().contains("未在 providers.toml 绑定"), "错误应说明未绑定: {v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("未在 providers.toml 绑定"),
+        "错误应说明未绑定: {v}"
+    );
 
     // 非法 role
     let (s, v) = rig.llm_test("bogus").await;
     assert_eq!(s, 400);
-    assert!(v["error"].as_str().unwrap().contains("decision"), "错误应提示合法 role: {v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("decision"),
+        "错误应提示合法 role: {v}"
+    );
 
     // 无 token 401
     let r = rig
@@ -165,10 +192,14 @@ async fn llm_test_three_states() {
     assert_eq!(r.status().as_u16(), 401);
 
     // 中文错误响应跨过第 200 字节时仍按 API 契约返回 JSON，不 panic/断开连接。
-    let response = rig.http.post(format!("{}/api/llm/models/probe", rig.base))
+    let response = rig
+        .http
+        .post(format!("{}/api/llm/models/probe", rig.base))
         .bearer_auth(&rig.token)
         .json(&json!({"base_url": rig.mock_base, "api_key_env": ""}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status().as_u16(), 400);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["ok"], false);

@@ -2,6 +2,7 @@
 use anyhow::{ensure, Result};
 use serde::Deserialize;
 use serde_json::json;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::{context_builder, db, decision, event, llm, state};
 
 #[derive(Deserialize)]
@@ -33,9 +34,9 @@ async fn main() -> Result<()> {
     ));
     std::fs::create_dir(&dir)?;
     let db_path = dir.join("test.db");
-    let mut conn = db::connect(&db_path)?;
-    db::migrate(&mut conn)?;
-    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_100','测试成员',1,1),('p_200','其他成员',1,1),('self','云团',1,1)")?;
+    let mut conn = db::connect(&db_path).await?;
+    db::migrate(&mut conn).await?;
+    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_100','测试成员',1,1),('p_200','其他成员',1,1),('self','云团',1,1)").await?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
@@ -49,21 +50,21 @@ async fn main() -> Result<()> {
             } else {
                 "p_200"
             };
-            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group',?2,'帮我解释一下方案',?3)",rusqlite::params![chat,owner,now-10])?;
-            let anchor = conn.last_insert_rowid();
-            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,reply_anchor_id) VALUES (?1,'group','self',?2,?3,?4)",rusqlite::params![chat,reply,now-5,anchor])?;
+            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group',?2,'帮我解释一下方案',?3)",yuantuan_core::db::params![chat,owner,now-10]).await?;
+            let anchor = conn.last_insert_rowid().await?;
+            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,reply_anchor_id) VALUES (?1,'group','self',?2,?3,?4)",yuantuan_core::db::params![chat,reply,now-5,anchor]).await?;
         }
         if case.busy {
             for _ in 0..20 {
-                conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','p_200','大家正在讨论周末安排',?2)",rusqlite::params![chat,now-1])?;
+                conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','p_200','大家正在讨论周末安排',?2)",yuantuan_core::db::params![chat,now-1]).await?;
             }
             for _ in 0..6 {
-                conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','self','之前的回复',?2)",rusqlite::params![chat,now-1])?;
+                conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','self','之前的回复',?2)",yuantuan_core::db::params![chat,now-1]).await?;
             }
         }
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','p_100',?2,?3)",rusqlite::params![chat,case.text,now])?;
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES (?1,'group','p_100',?2,?3)",yuantuan_core::db::params![chat,case.text,now]).await?;
         let msg = event::MessageReceivedPayload {
-            msg_id: conn.last_insert_rowid(),
+            msg_id: conn.last_insert_rowid().await?,
             chat_id: chat,
             chat_type: "group".into(),
             sender_pid: "p_100".into(),
@@ -80,7 +81,8 @@ async fn main() -> Result<()> {
             &msg,
             msg.msg_id,
             &context_builder::ContextCfg::default(),
-        )?;
+        )
+        .await?;
         let out = decision::decide(
             &db_path,
             &gateway,

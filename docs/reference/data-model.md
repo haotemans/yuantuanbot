@@ -10,6 +10,8 @@
 
 当前迁移版本为 V7；本页下方继续保留 V0.1 基线。V5 新增任务调度/列表索引；2026-10-10 的 V6 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 增加：
 
+同日按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 将驱动迁移为 SQLx；SQLite 文件、迁移 SQL 和 user_version 保持不变，不新增 V8 或 `_sqlx_migrations`。连接池、事务、异步 API 与备份契约见[异步访问参考](sqlite-access.md)。
+
 - `messages.external_msg_id INTEGER NULL` 和 `(chat_id, chat_type, external_msg_id)`、`(chat_id, msg_id)` 索引。`reply_to` 为外部消息编号，不是本地 msg_id。
 - `long_memories.source_chat_id TEXT NULL`、`source_msg_id INTEGER NULL`、`source_end_msg_id INTEGER NULL`。显式事实引用一条消息；归纳事实引用窗口；旧 NULL 来源不回填猜测。
 - `person_profile_facts(person_id, field, content, source_msg_id, evidence_quote, updated_at)`，主键 `(person_id, field)`，person_id 引用 persons。保存简档当前字段及本人原话出处，不替代每日 summaries。

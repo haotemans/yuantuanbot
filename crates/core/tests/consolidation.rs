@@ -2,6 +2,7 @@
 //! run_once → 断言 summaries/long_memories/edges/events；重复执行第二次行数不变。
 
 use serde_json::json;
+use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use yuantuan_core::consolidation::{run_once, ConsolidationCfg, ConsolidationDeps};
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{spawn_tracer, EventBus};
 use yuantuan_core::llm::LlmGateway;
 
@@ -57,14 +59,14 @@ async fn mock_llm(listener: TcpListener, content: String) {
     }
 }
 
-fn seed_fixture(db_path: &PathBuf) {
-    let conn = db::connect(db_path).unwrap();
+async fn seed_fixture(db_path: &PathBuf) {
+    let mut conn = db::connect(db_path).await.unwrap();
     let now = now_secs();
     for (pid, name) in [("p_2001", "小明"), ("p_2002", "阿强"), ("p_2003", "阿芳")] {
         conn.execute(
             "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES (?1, ?2, ?3, ?3)",
-            rusqlite::params![pid, name, now],
-        )
+            yuantuan_core::db::params![pid, name, now],
+        ).await
         .unwrap();
     }
     let t = now - 600;
@@ -96,8 +98,9 @@ fn seed_fixture(db_path: &PathBuf) {
         conn.execute(
             "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, ts)
              VALUES ('555666', 'group', ?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![pid, nick, text, mentions, t + i * 15],
+            yuantuan_core::db::params![pid, nick, text, mentions, t + i * 15],
         )
+        .await
         .unwrap();
     }
 }
@@ -107,10 +110,10 @@ async fn consolidation_end_to_end() {
     let dir = temp_dir("consolidation");
     let db_path = dir.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
-    seed_fixture(&db_path);
+    seed_fixture(&db_path).await;
 
     // mock LLM：正常 fact + 两个敏感陷阱（手机号、密码词）
     let distill = json!({
@@ -154,53 +157,60 @@ async fn consolidation_end_to_end() {
     run_once(&deps).await;
     tokio::time::sleep(Duration::from_millis(100)).await; // tracer 落库
 
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let profiles: Vec<(String, String)> = conn
         .prepare("SELECT person_id,content FROM person_profile_facts")
+        .await
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map(yuantuan_core::db::params![], |r| {
+            Ok((r.try_get(0)?, r.try_get(1)?))
+        })
+        .await
         .unwrap()
-        .collect::<rusqlite::Result<_>>()
+        .collect::<sqlx::Result<_>>()
         .unwrap();
     assert_eq!(profiles, vec![("p_2001".into(), "正在分享文档".into())]);
-    let provenance:(String,i64,i64)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let provenance:(String,i64,i64)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'", yuantuan_core::db::params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
     assert_eq!(provenance, ("555666".into(), 1, 30));
     let today: String = conn
-        .query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT strftime('%Y-%m-%d','now','localtime')",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
 
     // 1. summaries：chat 一条 + person 三条（speaker 均有）
     let chat_sum: String = conn
         .query_row(
             "SELECT summary FROM summaries WHERE owner_type='chat' AND owner_id='555666' AND period='daily' AND date=?1",
-            rusqlite::params![today], |r| r.get(0),
-        )
+            yuantuan_core::db::params![today], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert_eq!(chat_sum, "今天聊 Rust 很热闹");
     for pid in ["p_2001", "p_2002", "p_2003"] {
         let _: String = conn
             .query_row(
                 "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id=?1 AND date=?2",
-                rusqlite::params![pid, today], |r| r.get(0),
-            )
+                yuantuan_core::db::params![pid, today], |r| r.try_get(0),
+            ).await
             .unwrap_or_else(|_| panic!("person summary 缺失: {pid}"));
     }
     // person 摘要由 person_facts 聚合（p_2001 正常聚合）
     let p_sum: String = conn
         .query_row(
             "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id='p_2001' AND date=?1",
-            rusqlite::params![today], |r| r.get(0),
-        )
+            yuantuan_core::db::params![today], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert_eq!(p_sum, "小明在组织晚上的球局");
     // p_2002 的 fact 含手机号被拒 → 摘要回退发言计数，敏感内容不得出现
     let p2_sum: String = conn
         .query_row(
             "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id='p_2002' AND date=?1",
-            rusqlite::params![today], |r| r.get(0),
-        )
+            yuantuan_core::db::params![today], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert!(
         !p2_sum.contains("手机") && !p2_sum.contains("13800001111"),
@@ -211,58 +221,53 @@ async fn consolidation_end_to_end() {
     // 2. long_memories：正常 fact 落库；两个敏感陷阱被拒
     let ok_fact: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM long_memories WHERE owner_type='person' AND owner_id='p_2001' AND content='小明在组织晚上的球局' AND source='consolidation'",
-            [], |r| r.get(0),
-        )
+            "SELECT COUNT(*) FROM long_memories WHERE owner_type='person' AND owner_id='p_2001' AND content='小明在组织晚上的球局' AND source='consolidation'", yuantuan_core::db::params![], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert_eq!(ok_fact, 1);
     let group_fact: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM long_memories WHERE owner_type='chat' AND owner_id='555666' AND source='consolidation'",
-            [], |r| r.get(0),
-        )
+            "SELECT COUNT(*) FROM long_memories WHERE owner_type='chat' AND owner_id='555666' AND source='consolidation'", yuantuan_core::db::params![], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert_eq!(group_fact, 1);
     let bad_facts: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM long_memories WHERE content LIKE '%手机号%' OR content LIKE '%密码%'",
-            [], |r| r.get(0),
-        )
+            "SELECT COUNT(*) FROM long_memories WHERE content LIKE '%手机号%' OR content LIKE '%密码%'", yuantuan_core::db::params![], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert_eq!(bad_facts, 0, "敏感 fact 不得入库");
 
     // 3. @统计：A@B×2 → 一条 mention 事件 delta=0.02；A@bot → self→A delta=0.01
     let (ev1, d1): (String, f64) = conn
         .query_row(
-            "SELECT kind, delta_familiar FROM relationship_events WHERE from_pid='p_2001' AND to_pid='p_2002' AND kind='mention'",
-            [], |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+            "SELECT kind, delta_familiar FROM relationship_events WHERE from_pid='p_2001' AND to_pid='p_2002' AND kind='mention'", yuantuan_core::db::params![], |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        ).await
         .unwrap();
     assert_eq!(ev1, "mention");
     assert!((d1 - 0.02).abs() < 1e-9, "A@B×2 应得 0.02，实得 {d1}");
     let d2: f64 = conn
         .query_row(
-            "SELECT delta_familiar FROM relationship_events WHERE from_pid='self' AND to_pid='p_2001' AND kind='mention'",
-            [], |r| r.get(0),
-        )
+            "SELECT delta_familiar FROM relationship_events WHERE from_pid='self' AND to_pid='p_2001' AND kind='mention'", yuantuan_core::db::params![], |r| r.try_get(0),
+        ).await
         .unwrap();
     assert!((d2 - 0.01).abs() < 1e-9);
 
     // 4. edges：A→B familiar=0.02、trust=0.5+0.05(LLM help)；self→A familiar=0.01
     let (t, f): (f64, f64) = conn
         .query_row(
-            "SELECT trust, familiar FROM relationship_edges WHERE from_pid='p_2001' AND to_pid='p_2002'",
-            [], |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+            "SELECT trust, familiar FROM relationship_edges WHERE from_pid='p_2001' AND to_pid='p_2002'", yuantuan_core::db::params![], |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        ).await
         .unwrap();
     assert!((f - 0.02).abs() < 1e-9);
     assert!((t - 0.55).abs() < 1e-9);
     let fs: f64 = conn
         .query_row(
             "SELECT familiar FROM relationship_edges WHERE from_pid='self' AND to_pid='p_2001'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert!((fs - 0.01).abs() < 1e-9);
 
@@ -270,27 +275,32 @@ async fn consolidation_end_to_end() {
     let done: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(done, 1);
 
     // 6. 幂等：记录行数，再跑一轮 → 全部不变
-    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    let mut count = async |sql: &str| -> i64 {
+        conn.query_row(sql, yuantuan_core::db::params![], |r| r.try_get(0))
+            .await
+            .unwrap()
+    };
     let before = [
-        count("SELECT COUNT(*) FROM summaries"),
-        count("SELECT COUNT(*) FROM long_memories"),
-        count("SELECT COUNT(*) FROM relationship_events"),
-        count("SELECT COUNT(*) FROM events"),
+        count("SELECT COUNT(*) FROM summaries").await,
+        count("SELECT COUNT(*) FROM long_memories").await,
+        count("SELECT COUNT(*) FROM relationship_events").await,
+        count("SELECT COUNT(*) FROM events").await,
     ];
     run_once(&deps).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after = [
-        count("SELECT COUNT(*) FROM summaries"),
-        count("SELECT COUNT(*) FROM long_memories"),
-        count("SELECT COUNT(*) FROM relationship_events"),
-        count("SELECT COUNT(*) FROM events"),
+        count("SELECT COUNT(*) FROM summaries").await,
+        count("SELECT COUNT(*) FROM long_memories").await,
+        count("SELECT COUNT(*) FROM relationship_events").await,
+        count("SELECT COUNT(*) FROM events").await,
     ];
     // events 会多一条第二轮的 ConsolidationDone，其余必须不变
     assert_eq!(before[0], after[0], "summaries 重复");
@@ -300,9 +310,10 @@ async fn consolidation_end_to_end() {
     let f2: f64 = conn
         .query_row(
             "SELECT familiar FROM relationship_edges WHERE from_pid='p_2001' AND to_pid='p_2002'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert!((f2 - 0.02).abs() < 1e-9, "重跑后 familiar 被重复累加: {f2}");
 }

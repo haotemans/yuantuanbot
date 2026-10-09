@@ -2,6 +2,7 @@
 //! cargo run -p yuantuan-core --example verify_bot -- /path/to/providers.toml
 use anyhow::{ensure, Result};
 use serde_json::json;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::{context_builder, db, decision, event, llm, state};
 
 #[tokio::main]
@@ -13,10 +14,10 @@ async fn main() -> Result<()> {
     let dir = std::env::temp_dir().join(format!("yuantuan-bot-probe-{}", std::process::id()));
     std::fs::create_dir(&dir)?;
     let path = dir.join("probe.db");
-    let mut conn = db::connect(&path)?;
-    db::migrate(&mut conn)?;
-    context_builder::ensure_default_persona(&conn)?;
-    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_100','测试成员',1,1)")?;
+    let mut conn = db::connect(&path).await?;
+    db::migrate(&mut conn).await?;
+    context_builder::ensure_default_persona(&mut conn).await?;
+    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_100','测试成员',1,1)").await?;
     let cfg = context_builder::ContextCfg::default();
     let bus = event::EventBus::default();
     let mood = state::MoodState::default();
@@ -51,9 +52,9 @@ async fn main() -> Result<()> {
     for (i, (text, at_me, task_allowed)) in cases.into_iter().enumerate() {
         // 每个样本独立会话，避免前一测试变成后一测试的证据。
         let chat = (1000 + i).to_string();
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts) VALUES (?1,'group','p_100','测试成员',?2,unixepoch())", rusqlite::params![chat,text])?;
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts) VALUES (?1,'group','p_100','测试成员',?2,unixepoch())", yuantuan_core::db::params![chat,text]).await?;
         let msg = event::MessageReceivedPayload {
-            msg_id: conn.last_insert_rowid(),
+            msg_id: conn.last_insert_rowid().await?,
             chat_id: chat,
             chat_type: "group".into(),
             sender_pid: "p_100".into(),
@@ -65,7 +66,8 @@ async fn main() -> Result<()> {
             image_urls: vec![],
             ts: 1,
         };
-        let snapshot = context_builder::capture_reply_snapshot(&path, &msg, msg.msg_id, &cfg)?;
+        let snapshot =
+            context_builder::capture_reply_snapshot(&path, &msg, msg.msg_id, &cfg).await?;
         let outcome = decision::decide(&path, &gateway, &bus, &mood, &msg, None, &snapshot).await;
         retries += outcome.retries;
         fallbacks += u32::from(outcome.fallback);

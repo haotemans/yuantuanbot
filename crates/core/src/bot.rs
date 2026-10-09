@@ -5,6 +5,7 @@
 //! 热应用（组件级）：llm / prefilter 走共享 RwLock 槽位，每条消息读取当前值，
 //! WebUI config 写回后换槽即生效（其余组件 TODO，见 WebUI config_api）。
 
+use crate::db::SqliteExt;
 use crate::decision::{self, DecisionAction};
 use crate::event::{BubbleSentPayload, Event, EventBus, MessageReceivedPayload};
 use crate::llm::{LlmGateway, Role};
@@ -12,6 +13,7 @@ use crate::meme;
 use crate::prefilter::{SelfMsgIds, Verdict};
 use crate::reply_engine::{self, EngineHandle};
 use crate::state::MoodState;
+use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -63,19 +65,21 @@ pub type SharedPerChatCap = Arc<RwLock<usize>>;
 const REPLAY_WINDOW_SECS: i64 = 3600;
 
 pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
-    use rusqlite::params;
+    use crate::db::params;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let cutoff = now - REPLAY_WINDOW_SECS;
-    let conn = crate::db::connect(&deps.db_path)?;
+    let mut conn = crate::db::connect(&deps.db_path).await?;
     // 先把窗口外的未处理全部标记放弃（战的，不回放）
-    let abandoned = conn.execute(
-        "UPDATE messages SET processed_at = ?1
+    let abandoned = conn
+        .execute(
+            "UPDATE messages SET processed_at = ?1
          WHERE processed_at IS NULL AND sender_pid != 'self' AND ts < ?2",
-        params![now, cutoff],
-    )?;
+            params![now, cutoff],
+        )
+        .await?;
     if abandoned > 0 {
         info!(
             count = abandoned,
@@ -83,25 +87,31 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
             "Q55 放弃窗口外未处理消息"
         );
     }
-    let mut stmt = conn.prepare(
-        "SELECT msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts
+    let mut stmt = conn
+        .prepare(
+            "SELECT msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts
          FROM messages
          WHERE processed_at IS NULL AND sender_pid != 'self' AND ts >= ?1
          ORDER BY ts ASC, msg_id ASC",
-    )?;
-    let rows = stmt.query_map(params![cutoff], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, Option<String>>(4)?,
-            r.get::<_, i64>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, Option<i64>>(7)?,
-            r.get::<_, i64>(8)?,
-        ))
-    })?;
+        )
+        .await?;
+    let rows = stmt
+        .query_map(params![cutoff], |r| {
+            Ok((
+                r.try_get::<i64, _>(0)?,
+                r.try_get::<String, _>(1)?,
+                r.try_get::<String, _>(2)?,
+                r.try_get::<String, _>(3)?,
+                r.try_get::<Option<String>, _>(4)?,
+                r.try_get::<i64, _>(5)?,
+                r.try_get::<i64, _>(6)?,
+                r.try_get::<Option<i64>, _>(7)?,
+                r.try_get::<i64, _>(8)?,
+            ))
+        })
+        .await?;
+    drop(stmt);
+    drop(conn); // Rows are owned; replay must not reserve a pool slot while waiting for models.
     let mut count = 0usize;
     for row in rows {
         let (msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts) =
@@ -115,7 +125,7 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
         let text = text.unwrap_or_default();
         // Q55 裁决：回放跳过 /image 直派命令（media 副作用大）
         if crate::tools::media::command::match_image_command(&text).is_some() {
-            mark_processed(&deps.db_path, msg_id);
+            mark_processed(&deps.db_path, msg_id).await;
             debug!(msg_id, "回放跳过 /image 命令（直接标记已处理）");
             continue;
         }
@@ -175,7 +185,7 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                     .fold(batch.anchor.msg_id, i64::max);
                 // others 立刻回写 processed_at(否则 Q55 重启会把它们当未处理回放,雪崩)
                 for om in &batch.others {
-                    mark_processed(&deps.db_path, om.msg_id);
+                    mark_processed(&deps.db_path, om.msg_id).await;
                 }
 
                 // anchor 进 per-chat worker(保序不丢);worker 拿不到 lane 则同步保底
@@ -290,10 +300,10 @@ async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
 
 async fn handle_at(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) {
     handle_inner(deps, m, cutoff).await;
-    mark_processed(&deps.db_path, m.msg_id);
+    mark_processed(&deps.db_path, m.msg_id).await;
 }
 
-fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
+async fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
     if msg_id <= 0 {
         return; // 回放路径构造的合成消息没有正 msg_id
     }
@@ -301,13 +311,16 @@ fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let res = crate::db::connect(db_path).and_then(|c| {
+    let res = async {
+        let mut c = crate::db::connect(db_path).await?;
         c.execute(
             "UPDATE messages SET processed_at = ?1 WHERE msg_id = ?2",
-            rusqlite::params![now, msg_id],
+            crate::db::params![now, msg_id],
         )
+        .await
         .map_err(anyhow::Error::from)
-    });
+    }
+    .await;
     if let Err(e) = res {
         debug!(msg_id, error = %e, "processed_at 回写失败（下轮重启会回放该条，幂等）");
     }
@@ -327,7 +340,8 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
     let q = deps.self_qq.load(Ordering::Relaxed);
     let self_pid = (q != 0).then(|| format!("p_{q}"));
     let pf = *deps.prefilter.read().unwrap(); // 热应用：每条取当前阈值
-    match crate::prefilter::check(&pf, self_pid.as_deref(), &deps.self_ids, &deps.db_path, m) {
+    match crate::prefilter::check(&pf, self_pid.as_deref(), &deps.self_ids, &deps.db_path, m).await
+    {
         Verdict::Drop(rule) => debug!(rule, chat_id = %m.chat_id, "Prefilter 丢弃"),
         Verdict::Pass => {
             let gw = match deps.llm.read().unwrap().clone() {
@@ -340,14 +354,15 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
             gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
             let ctx_cfg = *deps.ctx_cfg.read().unwrap();
-            let db = deps.db_path.clone();
-            let anchor = m.clone();
-            let snapshot = match tokio::task::spawn_blocking(move || {
-                crate::context_builder::capture_reply_snapshot(&db, &anchor, cutoff, &ctx_cfg)
-            })
+            let snapshot = match crate::context_builder::capture_reply_snapshot(
+                &deps.db_path,
+                m,
+                cutoff,
+                &ctx_cfg,
+            )
             .await
             {
-                Ok(Ok(snapshot)) => snapshot,
+                Ok(snapshot) => snapshot,
                 result => {
                     warn!(error=?result,"无法读取回复上下文，跳过本轮");
                     return;
@@ -481,8 +496,12 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                 match deps.reply.as_ref() {
                     Some(engine) => match reply_engine_route(m) {
                         Ok((chat_type, target)) => {
-                            let picked = meme::pick(&deps.db_path, &deps.memes_dir, &cat)
-                                .or_else(|| meme::pick(&deps.db_path, &deps.memes_dir, "misc"));
+                            let picked = match meme::pick(&deps.db_path, &deps.memes_dir, &cat)
+                                .await
+                            {
+                                some @ Some(_) => some,
+                                None => meme::pick(&deps.db_path, &deps.memes_dir, "misc").await,
+                            };
                             match picked {
                                 Some(path) => {
                                     info!(chat_id = %m.chat_id, category = %cat, "send_meme 抽图入队");
@@ -525,7 +544,9 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                     &m.chat_id,
                     &m.sender_pid,
                     &goal,
-                ) {
+                )
+                .await
+                {
                     warn!(chat_id = %m.chat_id, error = %e, "start_task 落地失败");
                 } else {
                     info!(chat_id = %m.chat_id, goal = %goal, "start_task 已建仓");
@@ -580,9 +601,9 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
+    use crate::db::params;
 
-    fn temp_db() -> std::path::PathBuf {
+    async fn temp_db() -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
             + (std::process::id() as u128)
@@ -590,37 +611,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yt-bot-test-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("yuantuan.db");
-        let mut conn = crate::db::connect(&db).unwrap();
-        crate::db::migrate(&mut conn).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
         db
     }
 
     /// Q55：processed_at 回写——任意 msg_id 调用后该行不再 NULL
-    #[test]
-    fn mark_processed_writes_ts() {
-        let db = temp_db();
-        let conn = crate::db::connect(&db).unwrap();
+    #[tokio::test]
+    async fn mark_processed_writes_ts() {
+        let db = temp_db().await;
+        let mut conn = crate::db::connect(&db).await.unwrap();
         let now = 1000i64;
         conn.execute(
             "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('p_1','甲',?1,?1)",
             params![now],
-        ).unwrap();
+        ).await.unwrap();
         conn.execute(
             "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','hi',?1)",
             params![now],
-        ).unwrap();
-        let msg_id = conn.last_insert_rowid();
+        ).await.unwrap();
+        let msg_id = conn.last_insert_rowid().await.unwrap();
         drop(conn);
 
-        mark_processed(&db, msg_id);
+        mark_processed(&db, msg_id).await;
 
-        let conn = crate::db::connect(&db).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
         let processed: Option<i64> = conn
             .query_row(
                 "SELECT processed_at FROM messages WHERE msg_id = ?1",
                 params![msg_id],
-                |r| r.get(0),
+                |r| r.try_get(0),
             )
+            .await
             .unwrap();
         assert!(processed.is_some(), "processed_at 应被回写");
     }
@@ -628,7 +650,7 @@ mod tests {
     /// Q55：回放扫描——self 消息不进回放集；/image 命令跳过并标记
     #[tokio::test]
     async fn replay_skips_self_and_image_command() {
-        let db = temp_db();
+        let db = temp_db().await;
         // 用当前时间避免被 1h 回放窗口丢弃(REPLAY_WINDOW_SECS)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -636,21 +658,21 @@ mod tests {
             .unwrap_or(0)
             - 60; // 一分钟前(窗口内)
         {
-            let conn = crate::db::connect(&db).unwrap();
+            let mut conn = crate::db::connect(&db).await.unwrap();
             conn.execute(
                 "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1),('p_1','甲',?1,?1)",
                 params![now],
-            ).unwrap();
+            ).await.unwrap();
             // self 消息（应被回放扫描排除）
             conn.execute(
                 "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','self','我自己说的',?1)",
                 params![now],
-            ).unwrap();
+            ).await.unwrap();
             // /image 直派命令（回放应跳过且直接标记已处理）
             conn.execute(
                 "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','/image 一只猫',?1)",
                 params![now + 1],
-            ).unwrap();
+            ).await.unwrap();
         }
 
         // 构造最简 PipelineDeps：无 LLM、无 reply、无 media_ctx、无 skills
@@ -685,13 +707,14 @@ mod tests {
         assert_eq!(n, 0, "self 与 /image 都不应回放（回放计数为 0）");
 
         // /image 那条也应被标记为已处理
-        let conn = crate::db::connect(&db).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
         let pending: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL AND sender_pid != 'self'",
-                [],
-                |r| r.get(0),
+                crate::db::params![],
+                |r| r.try_get(0),
             )
+            .await
             .unwrap();
         assert_eq!(pending, 0, "回放后不应剩余未处理非 self 消息");
     }
@@ -705,23 +728,23 @@ mod tests {
     /// Q55+1h 窗口:远古未处理消息被放弃(标记为已处理),不回放
     #[tokio::test]
     async fn replay_abandons_stale_pending() {
-        let db = temp_db();
+        let db = temp_db().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         {
-            let conn = crate::db::connect(&db).unwrap();
+            let mut conn = crate::db::connect(&db).await.unwrap();
             conn.execute(
                 "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('p_1','甲',?1,?1)",
                 params![now],
-            ).unwrap();
+            ).await.unwrap();
             // 远古:2 小时前的未处理消息
             let stale = now - 7200;
             conn.execute(
                 "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('c1','group','p_1','远古消息',?1)",
                 params![stale],
-            ).unwrap();
+            ).await.unwrap();
         }
         let deps = PipelineDeps {
             bus: crate::event::EventBus::default(),
@@ -747,13 +770,14 @@ mod tests {
         };
         let n = replay_pending(&deps).await.unwrap();
         assert_eq!(n, 0, "远古消息应被放弃,不回放");
-        let conn = crate::db::connect(&db).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
         let pending: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL",
-                [],
-                |r| r.get(0),
+                crate::db::params![],
+                |r| r.try_get(0),
             )
+            .await
             .unwrap();
         assert_eq!(pending, 0, "远古未处理应被 UPDATE 标记已处理");
     }

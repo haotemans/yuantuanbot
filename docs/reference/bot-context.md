@@ -11,7 +11,7 @@
 关键入口：[context_builder.rs](../../crates/core/src/context_builder.rs)、[memory.rs](../../crates/core/src/memory.rs)、[bot.rs](../../crates/core/src/bot.rs)、[decision.rs](../../crates/core/src/decision.rs)、[reply_engine.rs](../../crates/core/src/reply_engine.rs)。
 
 - 同窗口最后一条消息的本地 ID 随 anchor 入队；排队期间到来的下一窗口消息不会混入。重启回放单条消息时以上界等于该消息 ID 恢复，不假装恢复完整旧窗口。
-- worker 开始处理时通过 `spawn_blocking` 读取一次快照；人格、关系、人物简档、话题记忆、消息和场景统计在同一个读事务中读取。之后数据库发生变化不会改动这份快照。
+- worker 开始处理时通过 SQLx 异步读取一次快照；人格、关系、人物简档、话题记忆、消息和场景统计在同一个读事务中读取。之后数据库发生变化不会改动这份快照；驱动迁移见[异步访问参考](sqlite-access.md)。
 - 消息上界约束近期对话和已知来源；这是开始处理时的资料快照，不是全库历史版本查询。人物简档只保存当前字段值；若其来源晚于旧窗口上界，该字段暂时缺失，不能恢复被覆盖的旧版本。旧无出处记忆也无法精确重建窗口当时的状态。
 - Decision 可写入新资料供后续轮次使用，本轮 bot_chat 保留原快照；当前明确陈述仍在 anchor 中。人格不由聊天或归纳改写，mood 仍是现有瞬态值。
 

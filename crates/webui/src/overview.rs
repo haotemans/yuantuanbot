@@ -5,33 +5,40 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::json;
+use sqlx::Row;
+use yuantuan_core::db::SqliteExt;
 
 pub async fn overview(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let conn = state.open_db().map_err(|e| {
+    let mut conn = state.open_db().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("数据库打开失败: {e}") })),
         )
     })?;
-    let count = |sql: &str| -> Result<i64, (StatusCode, Json<serde_json::Value>)> {
-        conn.query_row(sql, [], |r| r.get(0)).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": format!("查询失败: {e}") })),
-            )
-        })
+    let mut count = async |sql: &str| -> Result<i64, (StatusCode, Json<serde_json::Value>)> {
+        conn.query_row(sql, yuantuan_core::db::params![], |r| r.try_get(0))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("查询失败: {e}") })),
+                )
+            })
     };
 
-    let events_total = count("SELECT COUNT(*) FROM events")?;
-    let messages_total = count("SELECT COUNT(*) FROM messages")?;
+    let events_total = count("SELECT COUNT(*) FROM events").await?;
+    let messages_total = count("SELECT COUNT(*) FROM messages").await?;
     // 本地时区零点（'localtime'→'start of day'→'utc' 是实现本地零点的标准写法）
     let messages_today = count(
         "SELECT COUNT(*) FROM messages \
          WHERE ts >= CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
-    )?;
-    let db_size_bytes = std::fs::metadata(&state.db_path).map(|m| m.len()).unwrap_or(0);
+    )
+    .await?;
+    let db_size_bytes = std::fs::metadata(&state.db_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     Ok(Json(json!({
         "events_total": events_total,

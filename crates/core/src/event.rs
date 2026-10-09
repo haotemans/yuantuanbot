@@ -2,7 +2,8 @@
 //! V1 订阅者：Decision 管线（订 MessageReceived）、tracer（全订落表）、WebUI 实时推送（全订）。
 //! 落库：全部事件写入 events 表（轮转保留 7 天，表结构见 docs/reference/data-model.md）。
 
-use rusqlite::params;
+use crate::db::params;
+use crate::db::SqliteExt;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -170,7 +171,7 @@ impl EventBus {
 pub fn spawn_tracer(bus: &EventBus, db_path: PathBuf) -> tokio::task::JoinHandle<()> {
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
-        let conn = match crate::db::connect(&db_path) {
+        let mut conn = match crate::db::connect(&db_path).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(error = %e, "tracer 打开数据库失败，退出");
@@ -185,10 +186,13 @@ pub fn spawn_tracer(bus: &EventBus, db_path: PathBuf) -> tokio::task::JoinHandle
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    if let Err(e) = conn.execute(
-                        "INSERT INTO events(kind, payload, ts) VALUES (?1, ?2, ?3)",
-                        params![ev.kind(), ev.payload_json(), ts],
-                    ) {
+                    if let Err(e) = conn
+                        .execute(
+                            "INSERT INTO events(kind, payload, ts) VALUES (?1, ?2, ?3)",
+                            params![ev.kind(), ev.payload_json(), ts],
+                        )
+                        .await
+                    {
                         tracing::warn!(error = %e, "tracer 写入 events 失败");
                     }
                 }

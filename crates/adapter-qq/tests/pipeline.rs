@@ -4,6 +4,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{spawn, NapcatConfig};
 use yuantuan_core::bot::{spawn_pipeline, PipelineDeps};
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{spawn_tracer, EventBus};
 use yuantuan_core::llm::LlmGateway;
 use yuantuan_core::prefilter::SelfMsgIds;
@@ -25,16 +27,17 @@ const SELF_QQ: u64 = 10001;
 fn temp_dir(prefix: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-        + (std::process::id() as u128) << 16;
+        + (std::process::id() as u128)
+        << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-fn temp_db() -> PathBuf {
+async fn temp_db() -> PathBuf {
     let db = temp_dir("pipeline-db").join("yuantuan.db");
-    let mut conn = db::connect(&db).unwrap();
-    db::migrate(&mut conn).unwrap();
+    let mut conn = db::connect(&db).await.unwrap();
+    db::migrate(&mut conn).await.unwrap();
     db
 }
 
@@ -145,11 +148,11 @@ fn at_message(id: u64, uid: u64, text: &str) -> Value {
     })
 }
 
-fn wait_until<F: FnMut() -> bool>(mut cond: F, what: &str) {
+async fn wait_until<F: AsyncFnMut() -> bool>(mut cond: F, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(25); // Q54 窗口 10s,加 buffer
-    while !cond() {
+    while !cond().await {
         assert!(Instant::now() < deadline, "超时未完成：{what}");
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -158,7 +161,7 @@ fn wait_until<F: FnMut() -> bool>(mut cond: F, what: &str) {
 /// mock LLM 只喂一次响应,验证 memory_write / 落库在 Q54 语义下仍成立。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn decision_pipeline_q54_window_aggregation() {
-    let db_path = temp_db();
+    let db_path = temp_db().await;
 
     // Q54 下 3 条同 chat 消息 = 1 次 Decide;只喂一个 content
     let good = json!({
@@ -210,10 +213,16 @@ async fn decision_pipeline_q54_window_aggregation() {
         self_qq: handle.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        prefilter: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::prefilter::Config::default(),
+        )),
         reply: None,
-        reply_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
-        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+        reply_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::reply_engine::ReplyCfg::default(),
+        )),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::context_builder::ContextCfg::default(),
+        )),
         memes_dir: temp_dir("pipeline-memes"),
         media_ctx: None,
         skill_registry: None,
@@ -222,25 +231,41 @@ async fn decision_pipeline_q54_window_aggregation() {
 
     // Q54 断言:同 chat 3 条 → 恰好 1 次 DecisionMade(窗口到期才发)
     wait_until(
-        || {
-            let conn = db::connect(&db_path).unwrap();
+        async || {
+            let mut conn = db::connect(&db_path).await.unwrap();
             let n: i64 = conn
-                .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'",
+                    yuantuan_core::db::params![],
+                    |r| r.try_get(0),
+                )
+                .await
                 .unwrap();
             n == 1
         },
         "Q54 同 chat 3 条 → 1 次 DecisionMade(10s 窗口到期)",
-    );
+    )
+    .await;
     // 再多等一段时间,确认不会突然冒出第二次(即不会 leak 二窗)
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(n, 1, "Q54 窗口聚合恰好 1 次 Decide");
 
     let payload_str: String = conn
-        .query_row("SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     let p: Value = serde_json::from_str(&payload_str).unwrap();
     // 回复锚定第一条(Q54 设计:anchor 固定为 A)
@@ -252,19 +277,30 @@ async fn decision_pipeline_q54_window_aggregation() {
     // memory_write 落 long_memories(Q54 单 decide 也应该写)
     let (content, source): (String, String) = conn
         .query_row(
-            "SELECT content, source FROM long_memories WHERE owner_type = 'person' AND owner_id = 'p_2001'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+            "SELECT content, source FROM long_memories WHERE owner_type = 'person' AND owner_id = 'p_2001'", yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        ).await
         .unwrap();
     assert_eq!(content, "小明是 Rust 爱好者");
     assert_eq!(source, "explicit");
 
     // messages 3 条全部落库(摄取未受影响)且 processed_at 全标记(Q54 others 立即回写)
-    let mcount: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
+    let mcount: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
+        .unwrap();
     assert_eq!(mcount, 3);
     let unprocessed: i64 = conn
-        .query_row("SELECT COUNT(*) FROM messages WHERE processed_at IS NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(unprocessed, 0, "Q54 others 也要立刻 processed_at 回写");
 }
@@ -273,7 +309,7 @@ async fn decision_pipeline_q54_window_aggregation() {
 /// 需要独立窗口(独立 chat_id)避免与 Q54 主流程事件混在一起。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn decision_pipeline_fallback_retries() {
-    let db_path = temp_db();
+    let db_path = temp_db().await;
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
         "这不是 JSON".to_string(),
         "{\"action\": 123}".to_string(),
@@ -315,10 +351,16 @@ async fn decision_pipeline_fallback_retries() {
         self_qq: handle.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        prefilter: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::prefilter::Config::default(),
+        )),
         reply: None,
-        reply_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg::default())),
-        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+        reply_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::reply_engine::ReplyCfg::default(),
+        )),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::context_builder::ContextCfg::default(),
+        )),
         memes_dir: temp_dir("pipeline-memes"),
         media_ctx: None,
         skill_registry: None,
@@ -326,19 +368,30 @@ async fn decision_pipeline_fallback_retries() {
     });
 
     wait_until(
-        || {
-            let conn = db::connect(&db_path).unwrap();
+        async || {
+            let mut conn = db::connect(&db_path).await.unwrap();
             let n: i64 = conn
-                .query_row("SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE kind = 'DecisionMade'",
+                    yuantuan_core::db::params![],
+                    |r| r.try_get(0),
+                )
+                .await
                 .unwrap();
             n >= 1
         },
         "fallback 触发 DecisionMade",
-    );
+    )
+    .await;
 
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     let payload_str: String = conn
-        .query_row("SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .query_row(
+            "SELECT payload FROM events WHERE kind = 'DecisionMade' ORDER BY id LIMIT 1",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     let p: Value = serde_json::from_str(&payload_str).unwrap();
     assert_eq!(p["action"], "ignore");

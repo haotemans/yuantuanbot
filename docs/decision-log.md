@@ -194,3 +194,7 @@
 ## 2026-10-10：完善参与决策框架
 
 用户要求决策更智能。以 [ADR-0009](adr/0009-semantic-participation-policy.md) 修订上轮普通参与词表与固定冷却：在同一次 Decision 调用中评估对象、意图、对话承接、新帮助与依据，Runtime 核对可见消息、同一人回复归属、执行原话和动态冷却。未采用每轮额外模型评审、无依据自动回复、把模型把握等级视为概率或自动训练人格。新增 V7 回复归属、reply_mode 与建议/最终动作 Trace；旧响应保留保守兼容。正式契约与评测入口见[语义参与框架](reference/decision-framework.md)。
+
+## 2026-10-10：SQLx 数据访问迁移
+
+用户明确要求迁移 SQLx、更新文档、提交并推送 GitHub。采用 [ADR-0010](adr/0010-sqlx-sqlite-access.md)：SQLite 文件和 V1–V7 版本保持，全链路异步访问，4 连接池限制资源，原子事务和读快照保留；备份先 VACUUM INTO 再压缩。未采用同步 block_on 包装、同时维护两套驱动、自动切换 PostgreSQL 或伪称已实现单写者队列。实现与部署状态分别记录在[访问参考](reference/sqlite-access.md)和后端工作记录。

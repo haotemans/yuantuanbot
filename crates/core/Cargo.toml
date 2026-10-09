@@ -8,7 +8,7 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "system-proxy"] }
 anyhow = "1"
 async-trait = "0.1"

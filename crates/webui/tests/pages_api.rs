@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_webui::{serve, Extras};
 
 fn temp_dir(prefix: &str) -> PathBuf {
@@ -17,51 +18,55 @@ fn temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("yt-{prefix}-{}-{seq}-{nanos}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("yt-{prefix}-{}-{seq}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-fn seed(db_path: &PathBuf) {
-    let conn = db::connect(db_path).unwrap();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+async fn seed(db_path: &PathBuf) {
+    let mut conn = db::connect(db_path).await.unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     // persons（含 self）+ edges + 消息 + 事件 + 长期记忆 + 摘要 + 任务
     conn.execute(
         "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1),('p_2001','小明',?1,?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO relationship_edges(from_pid, to_pid, trust, familiar, updated_at) VALUES ('p_2001','self',0.7,0.3,?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, ts) VALUES ('555666','group','p_2001','小明','早', '[]', ?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO events(kind, payload, ts) VALUES ('DecisionMade', '{\"chat_id\":\"555666\",\"action\":\"reply\"}', ?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at) VALUES ('person','p_2001','小明爱钓鱼','explicit',?1,?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO summaries(owner_type, owner_id, period, date, summary, created_at) VALUES ('chat','555666','daily','2026-10-03','今天很热闹',?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO tasks(task_id, goal, state, budget_max_calls, created_by_pid, chat_id, created_at) VALUES ('t1','写周报','running',10,'p_2001','555666',?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO task_events(task_id, seq, kind, payload, ts) VALUES ('t1',1,'note','\"开工\"',?1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
     conn.execute(
         "INSERT INTO personality_versions(version_no, content, note, created_by, created_at, active) VALUES (1,'你是云团','初始','admin',?1,1)",
-        rusqlite::params![now],
-    ).unwrap();
+        yuantuan_core::db::params![now],
+    ).await.unwrap();
 }
 
 struct Rig {
@@ -74,10 +79,10 @@ async fn start() -> Rig {
     let dir = temp_dir("pages-api");
     let db_path = dir.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
-    seed(&db_path);
+    seed(&db_path).await;
     let cfg_path = dir.join("config.toml");
     std::fs::write(
         &cfg_path,
@@ -96,7 +101,9 @@ async fn start() -> Rig {
     drop(listener);
     let extras = Extras::for_test(cfg_path, prov_path);
     let db2 = db_path.clone();
-    tokio::spawn(async move { let _ = serve(db2, "127.0.0.1", port, extras).await; });
+    tokio::spawn(async move {
+        let _ = serve(db2, "127.0.0.1", port, extras).await;
+    });
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
     // 等服务就绪
@@ -144,7 +151,12 @@ async fn pages_api_full_pass() {
     let rig = start().await;
 
     // 无 token 401
-    let r = rig.http.get(format!("{}/api/dashboard", rig.base)).send().await.unwrap();
+    let r = rig
+        .http
+        .get(format!("{}/api/dashboard", rig.base))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status().as_u16(), 401);
 
     // 仪表盘
@@ -158,7 +170,9 @@ async fn pages_api_full_pass() {
     assert!(d["uptime_secs"].is_u64());
 
     // events 过滤（kind 命中 + chat_id 命中 + 倒序分页）
-    let (s, e) = rig.get("/api/events?kind=DecisionMade&chat_id=555666&limit=10").await;
+    let (s, e) = rig
+        .get("/api/events?kind=DecisionMade&chat_id=555666&limit=10")
+        .await;
     assert_eq!(s, 200);
     let arr = e["events"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
@@ -171,12 +185,17 @@ async fn pages_api_full_pass() {
     assert_eq!(e3["events"].as_array().unwrap().len(), 0);
 
     // 记忆与摘要
-    let (_, m) = rig.get("/api/memories?owner_type=person&owner_id=p_2001").await;
+    let (_, m) = rig
+        .get("/api/memories?owner_type=person&owner_id=p_2001")
+        .await;
     let ms = m["memories"].as_array().unwrap();
     assert_eq!(ms.len(), 1);
     assert_eq!(ms[0]["content"], "小明爱钓鱼");
     let (_, su) = rig.get("/api/summaries?owner_type=chat").await;
-    assert_eq!(su["summaries"].as_array().unwrap()[0]["summary"], "今天很热闹");
+    assert_eq!(
+        su["summaries"].as_array().unwrap()[0]["summary"],
+        "今天很热闹"
+    );
 
     // 关系网
     let (_, rj) = rig.get("/api/relations").await;
@@ -192,7 +211,10 @@ async fn pages_api_full_pass() {
     let (_, c) = rig.get("/api/config").await;
     assert_eq!(c["config"]["napcat"]["token"], "***");
     assert_eq!(c["config"]["prefilter"]["window_secs"], 60);
-    assert_eq!(c["providers"]["provider"]["mock"]["base_url"], "http://127.0.0.1:9/v1");
+    assert_eq!(
+        c["providers"]["provider"]["mock"]["base_url"],
+        "http://127.0.0.1:9/v1"
+    );
     assert_eq!(c["providers"]["provider"]["mock"]["api_key_present"], false);
 
     // 任务
@@ -274,8 +296,16 @@ async fn ws_pushes_events_and_config_write_applies() {
         .unwrap();
     assert_eq!(apply.status().as_u16(), 200);
     let applied: Value = apply.json().await.unwrap();
-    assert!(applied["applied"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains("LLM")));
-    assert!(applied["applied"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains("prefilter")));
+    assert!(applied["applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s.as_str().unwrap_or("").contains("LLM")));
+    assert!(applied["applied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s.as_str().unwrap_or("").contains("prefilter")));
 
     // ws 收到 ConfigReloaded（kind 字段）
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -295,7 +325,9 @@ async fn ws_pushes_events_and_config_write_applies() {
     assert!(got, "ws 应收到 ConfigReloaded");
 
     // 关闭帧
-    let _ = ws.send(tokio_tungstenite::tungstenite::Message::Close(None)).await;
+    let _ = ws
+        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await;
 
     // 结构损坏的 providers 写回被拒（base_url 类型非法，解析不回原结构 → 400）
     let bad = rig

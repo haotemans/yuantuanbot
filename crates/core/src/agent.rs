@@ -14,13 +14,15 @@
 //!
 //! 铁律：core 不依赖协议端；任务状态不发群消息（Q-A03 静默），只走 tasks/task_events 表 + 事件。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use crate::event::{Event, EventBus, TaskLifecyclePayload};
 use crate::llm::{LlmGateway, Role};
 use crate::tools::{Registry, ToolCtx};
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,21 +92,7 @@ pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()> {
                     Ok(text) => (TaskState::Finished, Some(text.clone()), None),
                     Err(error) => (TaskState::Failed, None, Some(format!("{error:#}"))),
                 };
-                let payload = p.clone();
-                let finish_deps = deps.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    finish_task(
-                        &finish_deps.db_path,
-                        &finish_deps.bus,
-                        &payload,
-                        state,
-                        text,
-                        error,
-                    )
-                })
-                .await
-                .context("任务收尾工作线程失败")
-                .and_then(|r| r);
+                let result = finish_task(&deps.db_path, &deps.bus, p, state, text, error).await;
                 match result {
                     Ok(()) => {
                         finishing.remove(&id);
@@ -117,12 +105,7 @@ pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()> {
             if available == 0 {
                 continue;
             }
-            let db_path = deps.db_path.clone();
-            let candidates = match tokio::task::spawn_blocking(move || pending_tasks(&db_path))
-                .await
-                .context("待办查询工作线程失败")
-                .and_then(|r| r)
-            {
+            let candidates = match pending_tasks(&deps.db_path).await {
                 Ok(tasks) => tasks,
                 Err(error) => {
                     warn!(%error, "读取待执行任务失败，将重试");
@@ -157,27 +140,30 @@ pub fn spawn_runner(deps: TaskRunnerDeps) -> JoinHandle<()> {
     })
 }
 
-fn pending_tasks(db_path: &std::path::Path) -> Result<Vec<(TaskLifecyclePayload, i64)>> {
-    let conn = crate::db::connect(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT task_id, chat_id, goal, used_calls FROM tasks WHERE state='running'
+async fn pending_tasks(db_path: &std::path::Path) -> Result<Vec<(TaskLifecyclePayload, i64)>> {
+    let mut conn = crate::db::connect(db_path).await?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_id, chat_id, goal, used_calls FROM tasks WHERE state='running'
          ORDER BY created_at, task_id LIMIT ?1",
-    )?;
+        )
+        .await?;
     // 最多三个活跃/收尾行 + 三个新待办，避免把整个历史加载进内存。
     let rows = stmt
-        .query_map([2 * MAX_CONCURRENT_TASKS as i64], |r| {
+        .query_map(crate::db::params![2 * MAX_CONCURRENT_TASKS as i64], |r| {
             Ok((
                 TaskLifecyclePayload {
-                    task_id: r.get(0)?,
-                    chat_id: r.get(1)?,
-                    goal: r.get(2)?,
+                    task_id: r.try_get(0)?,
+                    chat_id: r.try_get(1)?,
+                    goal: r.try_get(2)?,
                     final_state: None,
                     error: None,
                 },
-                r.get(3)?,
+                r.try_get(3)?,
             ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -384,7 +370,7 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
     }
 }
 
-fn finish_task(
+async fn finish_task(
     db_path: &std::path::Path,
     bus: &EventBus,
     p: &TaskLifecyclePayload,
@@ -393,25 +379,28 @@ fn finish_task(
     error: Option<String>,
 ) -> Result<()> {
     let now = now_secs();
-    let mut conn = crate::db::connect(db_path)?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE tasks SET state = ?1, finished_at = ?2 WHERE task_id = ?3 AND state='running'",
-        params![state.as_str(), now, p.task_id],
-    )?;
+    let mut conn = crate::db::connect(db_path).await?;
+    let mut tx = conn.begin_immediate().await?;
+    let changed = tx
+        .execute(
+            "UPDATE tasks SET state = ?1, finished_at = ?2 WHERE task_id = ?3 AND state='running'",
+            params![state.as_str(), now, p.task_id],
+        )
+        .await?;
     if changed == 0 {
         return Ok(());
     }
     record_event_static(
-        &tx,
+        &mut tx,
         &p.task_id,
         state.as_str(),
         json!({
             "final_text": final_text,
             "error": error,
         }),
-    )?;
-    tx.commit()?;
+    )
+    .await?;
+    tx.commit().await?;
     // 仅在状态和流水一起提交之后广播，面板不会先看到虚假的成功。
     bus.publish(Event::TaskFinished(TaskLifecyclePayload {
         task_id: p.task_id.clone(),
@@ -425,21 +414,17 @@ fn finish_task(
 
 /// 调用前登记 used_calls（面板进度及重启后的中断识别依据）。
 async fn bump_used_calls(db_path: &std::path::Path, task_id: &str, used: i64) -> Result<()> {
-    let db_path = db_path.to_owned();
-    let task_id = task_id.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let conn = crate::db::connect(&db_path)?;
-        let changed = conn.execute(
+    let mut conn = crate::db::connect(db_path).await?;
+    let changed = conn
+        .execute(
             "UPDATE tasks SET used_calls = ?1 WHERE task_id = ?2 AND state='running'",
             params![used, task_id],
-        )?;
-        if changed != 1 {
-            bail!("任务 {task_id} 已不存在或已结束");
-        }
-        Ok(())
-    })
-    .await
-    .context("任务进度写入工作线程失败")?
+        )
+        .await?;
+    if changed != 1 {
+        bail!("任务 {task_id} 已不存在或已结束");
+    }
+    Ok(())
 }
 
 /// task_events seq 自增：取当前 max(seq)+1
@@ -449,14 +434,8 @@ async fn record_event(
     kind: &'static str,
     payload: Value,
 ) -> Result<()> {
-    let db_path = db_path.to_owned();
-    let task_id = task_id.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let conn = crate::db::connect(&db_path)?;
-        record_event_static(&conn, &task_id, kind, payload)
-    })
-    .await
-    .context("任务流水写入工作线程失败")?
+    let mut conn = crate::db::connect(db_path).await?;
+    record_event_static(&mut conn, task_id, kind, payload).await
 }
 
 /// 把对话历史塞回单个 user prompt（agent_exec 无多轮 messages 接口限制——chat() 只接受 system+user）
@@ -528,7 +507,7 @@ pub fn parse_round(content: &str) -> std::result::Result<RoundOutput, String> {
 
 /// 由 bot.rs 调用：Decision(start_task + task_goal) → 建任务行 + 发 TaskCreated 事件
 /// 返回 task_id（ULID 风格的时间戳+随机后缀，避免新依赖）
-pub fn create_task(
+pub async fn create_task(
     db_path: &std::path::Path,
     bus: &EventBus,
     chat_id: &str,
@@ -537,15 +516,17 @@ pub fn create_task(
 ) -> Result<String> {
     let task_id = new_task_id();
     let now = now_secs();
-    let mut conn = crate::db::connect(db_path).context("打开数据库失败")?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut conn = crate::db::connect(db_path)
+        .await
+        .context("打开数据库失败")?;
+    let mut tx = conn.begin_immediate().await?;
     tx.execute(
         "INSERT INTO tasks(task_id, goal, state, budget_max_calls, used_calls, created_by_pid, chat_id, created_at)
          VALUES (?1, ?2, 'running', ?3, 0, ?4, ?5, ?6)",
         params![task_id, goal, TASK_BUDGET_MAX_CALLS, created_by_pid, chat_id, now],
-    ).context("插入 tasks 失败")?;
+    ).await.context("插入 tasks 失败")?;
     record_event_static(
-        &tx,
+        &mut tx,
         &task_id,
         "created",
         json!({
@@ -553,8 +534,9 @@ pub fn create_task(
             "budget_max_calls": TASK_BUDGET_MAX_CALLS,
             "created_by_pid": created_by_pid,
         }),
-    )?;
-    tx.commit()?;
+    )
+    .await?;
+    tx.commit().await?;
     let payload = TaskLifecyclePayload {
         task_id: task_id.clone(),
         chat_id: chat_id.to_string(),
@@ -567,8 +549,8 @@ pub fn create_task(
     Ok(task_id)
 }
 
-fn record_event_static(
-    conn: &rusqlite::Connection,
+async fn record_event_static(
+    conn: &mut sqlx::SqliteConnection,
     task_id: &str,
     kind: &str,
     payload: Value,
@@ -578,7 +560,8 @@ fn record_event_static(
         "INSERT INTO task_events(task_id, seq, kind, payload, ts)
          SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4 FROM task_events WHERE task_id=?1",
         params![task_id, kind, payload.to_string(), now_secs()],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 

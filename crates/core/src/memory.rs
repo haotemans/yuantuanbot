@@ -1,7 +1,9 @@
 //! 带出处的人物简档与话题记忆；每日摘要仍是时间线索引，不作为简档输入。
+use crate::db::SqliteExt;
+use crate::db::{params, OptionalExtension};
 use anyhow::{ensure, Result};
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -33,8 +35,8 @@ pub struct ProfileUpdate {
 }
 
 /// 资料必须来自本轮允许范围内的本人原话。只校验来源，不宣称验证语义真实。
-pub fn update_profile(
-    conn: &Connection,
+pub async fn update_profile(
+    conn: &mut sqlx::SqliteConnection,
     person: &str,
     chat: &str,
     start: i64,
@@ -62,8 +64,8 @@ pub fn update_profile(
     );
     let source: Option<(String, i64)> = conn.query_row(
         "SELECT COALESCE(text,''), ts FROM messages WHERE msg_id=?1 AND sender_pid=?2 AND chat_id=?3",
-        params![update.evidence_msg_id, person, chat], |r| Ok((r.get(0)?, r.get(1)?)),
-    ).optional()?;
+        params![update.evidence_msg_id, person, chat], |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+    ).await.optional()?;
     let (text, ts) = source.ok_or_else(|| anyhow::anyhow!("人物资料原作者或会话不匹配"))?;
     ensure!(text.contains(quote), "人物资料引文不在原消息中");
     // 更晚的原话推进出处；相同内容也推进，避免旧归纳覆盖更新的本人确认。
@@ -74,7 +76,7 @@ pub fn update_profile(
            source_msg_id=excluded.source_msg_id, evidence_quote=excluded.evidence_quote, updated_at=excluded.updated_at
          WHERE excluded.source_msg_id > person_profile_facts.source_msg_id",
         params![person, update.field.as_str(), value, update.evidence_msg_id, quote, ts],
-    )? > 0)
+    ).await? > 0)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,24 +88,31 @@ pub struct ProfileFact {
     pub updated_at: i64,
 }
 
-pub fn profile(conn: &Connection, person: &str, cutoff: i64) -> Result<Vec<ProfileFact>> {
-    let mut st = conn.prepare(
-        "SELECT p.field,p.content,p.source_msg_id,p.evidence_quote,p.updated_at
+pub async fn profile(
+    conn: &mut sqlx::SqliteConnection,
+    person: &str,
+    cutoff: i64,
+) -> Result<Vec<ProfileFact>> {
+    let mut st = conn
+        .prepare(
+            "SELECT p.field,p.content,p.source_msg_id,p.evidence_quote,p.updated_at
          FROM person_profile_facts p JOIN messages m ON m.msg_id=p.source_msg_id
          WHERE p.person_id=?1 AND m.sender_pid=p.person_id AND p.source_msg_id<=?2
            AND instr(m.text,p.evidence_quote)>0 ORDER BY p.field LIMIT 4",
-    )?;
+        )
+        .await?;
     let rows = st
         .query_map(params![person, cutoff], |r| {
             Ok(ProfileFact {
-                field: r.get(0)?,
-                content: r.get(1)?,
-                source_msg_id: r.get(2)?,
-                evidence_quote: r.get(3)?,
-                updated_at: r.get(4)?,
+                field: r.try_get(0)?,
+                content: r.try_get(1)?,
+                source_msg_id: r.try_get(2)?,
+                evidence_quote: r.try_get(3)?,
+                updated_at: r.try_get(4)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -160,8 +169,8 @@ pub fn query_terms(text: &str) -> Vec<String> {
 }
 
 /// owner 索引限定范围，最多返回 128 个候选，再按相关性/时间排序。
-pub fn recall(
-    conn: &Connection,
+pub async fn recall(
+    conn: &mut sqlx::SqliteConnection,
     person: &str,
     chat: &str,
     cutoff: i64,
@@ -183,31 +192,32 @@ pub fn recall(
          AND (source_msg_id IS NULL OR source_msg_id<=?3) AND (source_end_msg_id IS NULL OR source_end_msg_id<=?3)
          AND ({conditions}) ORDER BY updated_at DESC,id DESC LIMIT 128"
     );
-    let mut binds: Vec<rusqlite::types::Value> = vec![
+    let mut binds: Vec<crate::db::Value> = vec![
         person.to_owned().into(),
         chat.to_owned().into(),
         cutoff.into(),
     ];
     binds.extend(terms.iter().cloned().map(Into::into));
-    let mut st = conn.prepare(&sql)?;
+    let mut st = conn.prepare(&sql).await?;
     let rows = st
-        .query_map(rusqlite::params_from_iter(binds), |r| {
+        .query_map(crate::db::params_from_iter(binds), |r| {
             Ok(RecalledMemory {
-                id: r.get(0)?,
-                owner_type: r.get(1)?,
-                owner_id: r.get(2)?,
-                content: r.get(3)?,
-                source: r.get(4)?,
-                updated_at: r.get(5)?,
-                source_chat_id: r.get(6)?,
-                source_msg_id: r.get(7)?,
-                source_end_msg_id: r.get(8)?,
+                id: r.try_get(0)?,
+                owner_type: r.try_get(1)?,
+                owner_id: r.try_get(2)?,
+                content: r.try_get(3)?,
+                source: r.try_get(4)?,
+                updated_at: r.try_get(5)?,
+                source_chat_id: r.try_get(6)?,
+                source_msg_id: r.try_get(7)?,
+                source_end_msg_id: r.try_get(8)?,
                 evidence_quote: None,
                 evidence_status: "legacy_unverified".into(),
-                content_truncated: r.get(9)?,
+                content_truncated: r.try_get(9)?,
             })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        })
+        .await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
     let mut ranked: Vec<_> = rows
         .into_iter()
         .filter(|m| !crate::consolidation::is_sensitive(&m.content))
@@ -238,8 +248,8 @@ pub fn recall(
             } else {
                 let raw: Option<(String,String)> = conn.query_row(
                     "SELECT sender_pid,substr(COALESCE(text,''),1,240) FROM messages WHERE msg_id=?1 AND chat_id=?2",
-                    params![source,source_chat], |r| Ok((r.get(0)?,r.get(1)?)),
-                ).optional()?;
+                    params![source,source_chat], |r| Ok((r.try_get(0)?,r.try_get(1)?)),
+                ).await.optional()?;
                 match raw {
                     Some((sender, text))
                         if sender != "self"

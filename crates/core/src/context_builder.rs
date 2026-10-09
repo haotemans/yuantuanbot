@@ -1,11 +1,13 @@
 //! Bot Context：回复锚点/引用 + 人物简档 + 话题记忆 + 近期对话（ADR-0008）。
+use crate::db::SqliteExt;
+use crate::db::{params, OptionalExtension};
 use crate::event::MessageReceivedPayload;
 use crate::memory::{self, ProfileFact, RecalledMemory};
 use crate::state::MoodValue;
 use anyhow::{ensure, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -30,13 +32,16 @@ pub type SharedContextCfg = std::sync::Arc<std::sync::RwLock<ContextCfg>>;
 pub const DEFAULT_PERSONA: &str = "你是「云团」，在 QQ 中与大家交流的 Bot。温和、自然、有适度幽默感，优先用简短中文回答实际问题。对不熟悉的人同样友好，不根据熟悉度猜测对方喜欢或讨厌你。不为维持人设编造个人经历、跨群活动或已完成的操作；不知道就坦诚说明，必要时简短追问。玩笑保持明显的玩笑语气，不伪装成真实行动。";
 
 /// 首次安装或从未配置人格时建立可在面板编辑的版本；不覆盖管理员历史。
-pub fn ensure_default_persona(conn: &Connection) -> Result<bool> {
-    Ok(conn.execute(
-        "INSERT INTO personality_versions(version_no,content,note,created_by,created_at,active)
+pub async fn ensure_default_persona(conn: &mut sqlx::SqliteConnection) -> Result<bool> {
+    Ok(conn
+        .execute(
+            "INSERT INTO personality_versions(version_no,content,note,created_by,created_at,active)
          SELECT 1,?1,'内置默认人格','system',unixepoch(),1
          WHERE NOT EXISTS (SELECT 1 FROM personality_versions)",
-        [DEFAULT_PERSONA],
-    )? > 0)
+            crate::db::params![DEFAULT_PERSONA],
+        )
+        .await?
+        > 0)
 }
 const BEHAVIOR_RULES: &str = r#"行为准则：
 - 用中文口语交流，默认一条完整回答。只在带句末标点的完整句子之间使用「‖」，禁止在词语、半句、逗号或未闭合引号中间插入分隔符；代码里的符号保持原样。可用独立指令行 ::at、::meme 类别，不把控制符混进正文
@@ -98,27 +103,27 @@ fn clip(text: &str, limit: usize) -> (String, bool) {
     )
 }
 
-fn row_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContextMessage> {
-    let pid: String = r.get(1)?;
+fn row_message(r: &sqlx::sqlite::SqliteRow) -> sqlx::Result<ContextMessage> {
+    let pid: String = r.try_get(1)?;
     Ok(ContextMessage {
-        msg_id: r.get(0)?,
+        msg_id: r.try_get(0)?,
         speaker_kind: if pid == "self" { "bot" } else { "human" },
         person_id: pid,
-        nickname: r.get(2)?,
-        ts: r.get(3)?,
-        text: r.get(4)?,
-        reply_to_external_id: r.get(5)?,
-        has_image: r.get(6)?,
-        text_truncated: r.get(7)?,
-        reply_anchor_id: r.get(8)?,
+        nickname: r.try_get(2)?,
+        ts: r.try_get(3)?,
+        text: r.try_get(4)?,
+        reply_to_external_id: r.try_get(5)?,
+        has_image: r.try_get(6)?,
+        text_truncated: r.try_get(7)?,
+        reply_anchor_id: r.try_get(8)?,
     })
 }
 
 const MESSAGE_COLUMNS: &str = "msg_id,sender_pid,substr(COALESCE(nickname,''),1,80),ts,substr(COALESCE(text,''),1,2000),reply_to,has_image, length(COALESCE(text,''))>2000,reply_anchor_id";
 
 /// 只接受同一 chat 的外部编号；绝不把外部编号当成本地自增 msg_id。
-fn quoted(
-    conn: &Connection,
+async fn quoted(
+    conn: &mut sqlx::SqliteConnection,
     chat: &str,
     chat_type: &str,
     external: i64,
@@ -127,10 +132,11 @@ fn quoted(
     let columns = MESSAGE_COLUMNS.replacen("msg_id,", "MIN(msg_id) AS msg_id,", 1);
     let mut st = conn.prepare(&format!(
         "SELECT {columns} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND external_msg_id=?3 AND msg_id<?4 GROUP BY sender_pid,text,reply_to,has_image,reply_anchor_id ORDER BY msg_id LIMIT 2"
-    ))?;
+    )).await?;
     let rows = st
-        .query_map(params![chat, chat_type, external, before], row_message)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        .query_map(params![chat, chat_type, external, before], row_message)
+        .await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
     // SQL 按全文/作者/引用折叠重复回报；两个不同内容分组即存在歧义。
     if rows.len() > 1 {
         return Ok(None);
@@ -139,19 +145,19 @@ fn quoted(
 }
 
 /// 在单个读事务内取出本轮资料；上界由窗口传入，与处理/模型等待时的最新消息无关。
-pub fn capture_reply_snapshot(
+pub async fn capture_reply_snapshot(
     db_path: &Path,
     anchor: &MessageReceivedPayload,
     cutoff: i64,
     cfg: &ContextCfg,
 ) -> Result<ReplySnapshot> {
     ensure!(cutoff >= anchor.msg_id, "回复消息上界早于锚点");
-    let mut conn = crate::db::connect(db_path)?;
-    let tx = conn.transaction()?;
+    let mut conn = crate::db::connect(db_path).await?;
+    let mut tx = conn.transaction().await?;
     let nickname: String = tx.query_row(
         "SELECT substr(COALESCE(nickname,''),1,80) FROM messages WHERE msg_id=?1 AND chat_id=?2 AND sender_pid=?3",
-        params![anchor.msg_id,anchor.chat_id,anchor.sender_pid], |r| r.get(0),
-    ).optional()?.unwrap_or_default();
+        params![anchor.msg_id,anchor.chat_id,anchor.sender_pid], |r| r.try_get(0),
+    ).await.optional()?.unwrap_or_default();
     let (text, text_truncated) = clip(&anchor.text, 4000);
     let anchor_message = ContextMessage {
         msg_id: anchor.msg_id,
@@ -177,7 +183,15 @@ pub fn capture_reply_snapshot(
         let Some(external) = next else {
             break;
         };
-        match quoted(&tx, &anchor.chat_id, &anchor.chat_type, external, before)? {
+        match quoted(
+            &mut tx,
+            &anchor.chat_id,
+            &anchor.chat_type,
+            external,
+            before,
+        )
+        .await?
+        {
             Some(message) => {
                 before = message.msg_id;
                 next = message.reply_to_external_id;
@@ -195,7 +209,7 @@ pub fn capture_reply_snapshot(
     }
     let mut st = tx.prepare(&format!(
         "SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id<=?3 ORDER BY msg_id DESC LIMIT ?4"
-    ))?;
+    )).await?;
     let mut recent = st
         .query_map(
             params![
@@ -205,11 +219,12 @@ pub fn capture_reply_snapshot(
                 cfg.k_init.clamp(1, 100) as i64
             ],
             row_message,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        )
+        .await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
     recent.reverse();
     drop(st);
-    let profile = memory::profile(&tx, &anchor.sender_pid, cutoff)?;
+    let profile = memory::profile(&mut tx, &anchor.sender_pid, cutoff).await?;
     if profile.is_empty() {
         limitations.push("尚无带本人原话出处的人物简档，不要补造人物特征。".into());
     }
@@ -218,13 +233,14 @@ pub fn capture_reply_snapshot(
         .collect::<Vec<_>>()
         .join(" ");
     let memories = memory::recall(
-        &tx,
+        &mut tx,
         &anchor.sender_pid,
         &anchor.chat_id,
         cutoff,
         &query,
         cfg.roster_mem_per,
-    )?;
+    )
+    .await?;
     if memories.is_empty() {
         limitations.push("未检索到相关历史记忆；这不代表过去没有发生过。".into());
     }
@@ -236,9 +252,10 @@ pub fn capture_reply_snapshot(
         let (trust, familiar): (f64, f64) = tx
             .query_row(
                 "SELECT trust,familiar FROM relationship_edges WHERE from_pid='self' AND to_pid=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                crate::db::params![id],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?)),
             )
+            .await
             .optional()?
             .unwrap_or((0.5, 0.0));
         let name = std::iter::once(&anchor_message)
@@ -250,21 +267,21 @@ pub fn capture_reply_snapshot(
         participants
             .push(json!({"person_id":id,"nickname":name,"trust":trust,"familiar":familiar}));
     }
-    let persona = tx.query_row("SELECT content FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1", [], |r| r.get::<_,String>(0)).optional()?.unwrap_or_else(|| DEFAULT_PERSONA.into());
+    let persona = tx.query_row("SELECT content FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1", crate::db::params![], |r| r.try_get::<String, _>(0)).await.optional()?.unwrap_or_else(|| DEFAULT_PERSONA.into());
     let since_reply: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND msg_id<=?2 AND sender_pid!='self' AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND sender_pid='self' AND msg_id<=?2),0)",
-        params![anchor.chat_id,cutoff,anchor.chat_type], |r|r.get(0),
-    )?;
+        params![anchor.chat_id,cutoff,anchor.chat_type], |r|r.try_get(0),
+    ).await?;
     let replies: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?4 AND msg_id<=?2 AND sender_pid='self' AND ts>=?3",
-        params![anchor.chat_id,cutoff,anchor.ts-300,anchor.chat_type], |r|r.get(0),
-    )?;
+        params![anchor.chat_id,cutoff,anchor.ts-300,anchor.chat_type], |r|r.try_get(0),
+    ).await?;
     let last_reply: Option<i64> = tx.query_row(
         "SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<=?3",
-        params![anchor.chat_id,anchor.chat_type,cutoff], |r| r.get(0))?;
+        params![anchor.chat_id,anchor.chat_type,cutoff], |r| r.try_get(0)).await?;
     let human_messages_30s: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid!='self' AND msg_id<=?3 AND ts>=?4",
-        params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts-30], |r|r.get(0))?;
+        params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts-30], |r|r.try_get(0)).await?;
     let scene = json!({"recent_speakers":recent.iter().rev().take(10).map(|m|m.person_id.clone()).collect::<BTreeSet<_>>(),
         "msgs_since_my_reply":since_reply,"my_replies_last_5min":replies,"chat_topic":null,
         "human_messages_last_30s":human_messages_30s,
@@ -272,7 +289,7 @@ pub fn capture_reply_snapshot(
     let mut previous_reply = tx.query_row(&format!(
         "SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<?3 AND ts>=?4
          AND EXISTS(SELECT 1 FROM messages original WHERE original.msg_id=messages.reply_anchor_id AND original.chat_id=?1 AND original.chat_type=?2 AND original.sender_pid=?5)
-         ORDER BY msg_id DESC LIMIT 1"), params![anchor.chat_id,anchor.chat_type,anchor.msg_id,anchor.ts-300,anchor.sender_pid], row_message).optional()?;
+         ORDER BY msg_id DESC LIMIT 1"), params![anchor.chat_id,anchor.chat_type,anchor.msg_id,anchor.ts-300,anchor.sender_pid], row_message).await.optional()?;
     if let Some(reply) = previous_reply.as_mut() {
         let (text, truncated) = clip(&reply.text, 300);
         reply.text = text;
@@ -280,10 +297,10 @@ pub fn capture_reply_snapshot(
     }
     let dialogue = json!({"reply_target_person_id":anchor.sender_pid,"last_reply_to_sender":previous_reply,
         "note":"同一会话中近5分钟内确实回复过该人的消息；只是承接证据，不能证明旧回答的事实正确"});
-    let active_tasks = tx.prepare("SELECT task_id,substr(goal,1,160),used_calls FROM tasks WHERE chat_id=?1 AND created_by_pid=?2 AND state='running' ORDER BY created_at DESC LIMIT 3")?
-        .query_map(params![anchor.chat_id,anchor.sender_pid], |r| Ok(json!({"task_id":r.get::<_,String>(0)?,"goal":r.get::<_,String>(1)?,"used_calls":r.get::<_,i64>(2)?,"state":"running"})))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    tx.commit()?;
+    let active_tasks = tx.prepare("SELECT task_id,substr(goal,1,160),used_calls FROM tasks WHERE chat_id=?1 AND created_by_pid=?2 AND state='running' ORDER BY created_at DESC LIMIT 3").await?
+        .query_map(params![anchor.chat_id,anchor.sender_pid], |r| Ok(json!({"task_id":r.try_get::<String, _>(0)?,"goal":r.try_get::<String, _>(1)?,"used_calls":r.try_get::<i64, _>(2)?,"state":"running"}))).await?
+        .collect::<sqlx::Result<Vec<_>>>()?;
+    tx.commit().await?;
     Ok(ReplySnapshot {
         anchor: anchor_message,
         cutoff,
@@ -355,13 +372,14 @@ pub fn render_bot_context(
     }
 }
 
-pub fn build_bot_context(
+pub async fn build_bot_context(
     db_path: &Path,
     mood: MoodValue,
     anchor: &MessageReceivedPayload,
     cfg: &ContextCfg,
 ) -> Result<BotContext> {
-    let snapshot =
-        capture_reply_snapshot(db_path, anchor, anchor.msg_id, cfg).context("读取回复快照失败")?;
+    let snapshot = capture_reply_snapshot(db_path, anchor, anchor.msg_id, cfg)
+        .await
+        .context("读取回复快照失败")?;
     render_bot_context(&snapshot, mood, cfg)
 }

@@ -14,6 +14,7 @@
 | 回复时如何使用人物资料、记忆和对话 | [Bot 上下文](reference/bot-context.md)、[术语](../CONTEXT.md) | 带出处的简档、话题检索、引用与回复快照 |
 | Agent 如何执行代码、使用 Git/Python/Bun | [开发沙箱](reference/agent-sandbox.md) | Docker 工具、Linux 部署、任务工作卷和验证边界 |
 | 数据布局、表结构与 Decision 输入 | [数据模型](reference/data-model.md) | V0.1 设计基线；实际迁移以 `db.rs` 为准 |
+| SQLx、SQLite 连接池、事务与备份 | [异步数据库访问](reference/sqlite-access.md) | V1–V7 兼容、连接资源、取消回滚、验收与部署边界 |
 | 为什么做出某个决定 | [决策台账](decision-log.md)、[ADR 索引](adr/README.md) | 按时间保留决定、改判与被否方案 |
 | 接下来还有哪些工作 | [进行中的工作](changes/README.md) | 未关闭或尚待核对的工作记录 |
 | 查阅已结束的工作与故障 | [历史归档](archive/README.md) | 已关闭工作记录与故障复盘，保留原验证边界 |

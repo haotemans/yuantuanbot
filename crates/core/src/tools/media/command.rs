@@ -2,19 +2,21 @@
 //!
 //! 不走 Decision；不进入 bubble 引擎普通回复流（直接 enqueue_image 入 per-chat 串行队列保序）。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use anyhow::{Context, Result};
-use rusqlite::params;
 use serde_json::json;
+use sqlx::Row;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::event::{EventBus, MessageReceivedPayload};
-use crate::reply_engine::{ChatType, EngineHandle};
 use super::parser::{parse_image_command, render_error};
 use super::provider::{EndpointStyle, MediaProvider};
 use super::quota::{check_can_generate, Permission};
-use super::{ImageRequest, ImageArtifacts};
+use super::{ImageArtifacts, ImageRequest};
+use crate::event::{EventBus, MessageReceivedPayload};
+use crate::reply_engine::{ChatType, EngineHandle};
 
 /// media 命令所需全部上下文（装配侧注入）
 #[derive(Clone)]
@@ -50,8 +52,17 @@ pub async fn handle_image_command(ctx: &MediaCtx, m: &MessageReceivedPayload, bo
     let sender_pid = m.sender_pid.clone();
 
     // 第一步：从 db 读出该用户能看到的模型清单 + 每模型支持的 ratio
-    let known_models = list_known_models(&ctx.db_path).unwrap_or_default();
-    let ratios_for = |alias: &str| supported_ratios_for_model(&ctx.db_path, alias).unwrap_or_default();
+    let known_models = list_known_models(&ctx.db_path).await.unwrap_or_default();
+    let mut ratios = std::collections::HashMap::new();
+    for alias in &known_models {
+        ratios.insert(
+            alias.clone(),
+            supported_ratios_for_model(&ctx.db_path, alias)
+                .await
+                .unwrap_or_default(),
+        );
+    }
+    let ratios_for = |alias: &str| ratios.get(alias).cloned().unwrap_or_default();
 
     // 第二步：parse（Q015 严格报错）
     let cmd = match parse_image_command(body, &known_models, &ratios_for) {
@@ -63,27 +74,48 @@ pub async fn handle_image_command(ctx: &MediaCtx, m: &MessageReceivedPayload, bo
     };
 
     // 第三步：加载 model + provider 配置
-    let (model_row, provider_row) = match load_model_and_provider(&ctx.db_path, &cmd.model_alias) {
-        Ok(v) => v,
-        Err(e) => {
-            send_text(ctx, &chat_id, &m.chat_type, &sender_pid, &format!("加载模型失败：{e}")).await;
-            return;
-        }
-    };
+    let (model_row, provider_row) =
+        match load_model_and_provider(&ctx.db_path, &cmd.model_alias).await {
+            Ok(v) => v,
+            Err(e) => {
+                send_text(
+                    ctx,
+                    &chat_id,
+                    &m.chat_type,
+                    &sender_pid,
+                    &format!("加载模型失败：{e}"),
+                )
+                .await;
+                return;
+            }
+        };
     if !model_row.enabled {
         send_text(ctx, &chat_id, &m.chat_type, &sender_pid, "该模型已禁用").await;
         return;
     }
     if !provider_row.enabled {
-        send_text(ctx, &chat_id, &m.chat_type, &sender_pid, "该模型所属 provider 已禁用").await;
+        send_text(
+            ctx,
+            &chat_id,
+            &m.chat_type,
+            &sender_pid,
+            "该模型所属 provider 已禁用",
+        )
+        .await;
         return;
     }
 
     // 第四步：三次校验（Q009）
     let is_admin = (ctx.self_pid_admin)(&sender_pid);
-    let perm = if model_row.permission == "admin_only" { Permission::AdminOnly } else { Permission::Everyone };
-    let daily_used = daily_used_count(&ctx.db_path, &cmd.model_alias).unwrap_or(0);
-    let balance = get_balance(&ctx.db_path, &sender_pid).unwrap_or(0);
+    let perm = if model_row.permission == "admin_only" {
+        Permission::AdminOnly
+    } else {
+        Permission::Everyone
+    };
+    let daily_used = daily_used_count(&ctx.db_path, &cmd.model_alias)
+        .await
+        .unwrap_or(0);
+    let balance = get_balance(&ctx.db_path, &sender_pid).await.unwrap_or(0);
     let total_cost = model_row.cost_per_result * cmd.count as i64;
     if let Err(e) = check_can_generate(
         is_admin,
@@ -100,7 +132,7 @@ pub async fn handle_image_command(ctx: &MediaCtx, m: &MessageReceivedPayload, bo
     // 第五步：seed 缺省回查 chat.last_media_seed（Q014）
     let seed = match cmd.seed {
         Some(s) => Some(s),
-        None => load_chat_last_seed(&ctx.db_path, &chat_id),
+        None => load_chat_last_seed(&ctx.db_path, &chat_id).await,
     };
 
     // 第六步：提示词优化（Q010；LLM 可用则改写，不可用/失败 fallback 原文）
@@ -135,43 +167,66 @@ pub async fn handle_image_command(ctx: &MediaCtx, m: &MessageReceivedPayload, bo
         reg.get(&provider_row.name).cloned()
     };
     let Some(provider) = provider else {
-        send_text(ctx, &chat_id, &m.chat_type, &sender_pid,
-                  &format!("provider \"{}\" 未注册（启动时未装配）", provider_row.name)).await;
+        send_text(
+            ctx,
+            &chat_id,
+            &m.chat_type,
+            &sender_pid,
+            &format!("provider \"{}\" 未注册（启动时未装配）", provider_row.name),
+        )
+        .await;
         return;
     };
 
     // 入队执行任务（先做：占位记录到 media_tasks）
-    let task_id = record_task_pending(&ctx.db_path, &m, &req, &endpoint, total_cost).ok();
+    let task_id = record_task_pending(&ctx.db_path, &m, &req, &endpoint, total_cost)
+        .await
+        .ok();
     info!(model = %cmd.model_alias, ratio = %cmd.ratio, count = cmd.count, "media 任务开始");
 
     // 预备反馈一句话（避免用户干等）
-    send_text(ctx, &chat_id, &m.chat_type, &sender_pid,
-              &format!("🎨 {} · {} 生成中…", cmd.model_alias, cmd.ratio)).await;
+    send_text(
+        ctx,
+        &chat_id,
+        &m.chat_type,
+        &sender_pid,
+        &format!("🎨 {} · {} 生成中…", cmd.model_alias, cmd.ratio),
+    )
+    .await;
 
     // 真正调用
-    let result = provider.generate(&req, &model_row.model_id, endpoint, &ctx.data_dir).await;
+    let result = provider
+        .generate(&req, &model_row.model_id, endpoint, &ctx.data_dir)
+        .await;
     let finish_ts = now_ts();
 
     match result {
         Ok(artifacts) => {
             if let Some(tid) = task_id {
-                let _ = mark_task_success(&ctx.db_path, tid, &artifacts, finish_ts);
+                let _ = mark_task_success(&ctx.db_path, tid, &artifacts, finish_ts).await;
             }
             if let Some(s) = artifacts.seed {
-                let _ = save_chat_last_seed(&ctx.db_path, &chat_id, s);
+                let _ = save_chat_last_seed(&ctx.db_path, &chat_id, s).await;
             }
             if total_cost > 0 {
-                let _ = deduct_balance(&ctx.db_path, &sender_pid, total_cost);
+                let _ = deduct_balance(&ctx.db_path, &sender_pid, total_cost).await;
             }
             // 发图（Q012：OneBot image 段 file:///）
             send_images(ctx, &chat_id, &m.chat_type, &sender_pid, &artifacts).await;
         }
         Err(e) => {
             if let Some(tid) = task_id {
-                let _ = mark_task_failed(&ctx.db_path, tid, &e.to_string(), finish_ts);
+                let _ = mark_task_failed(&ctx.db_path, tid, &e.to_string(), finish_ts).await;
             }
             warn!(error = %e, model = %cmd.model_alias, "media 任务失败");
-            send_text(ctx, &chat_id, &m.chat_type, &sender_pid, &format!("❌ 生成失败：{e}")).await;
+            send_text(
+                ctx,
+                &chat_id,
+                &m.chat_type,
+                &sender_pid,
+                &format!("❌ 生成失败：{e}"),
+            )
+            .await;
         }
     }
 }
@@ -200,30 +255,39 @@ struct ProviderRow {
     enabled: bool,
 }
 
-fn list_known_models(db: &Path) -> Result<Vec<String>> {
-    let conn = crate::db::connect(db)?;
-    let mut stmt = conn.prepare("SELECT alias FROM media_models WHERE enabled = 1")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+async fn list_known_models(db: &Path) -> Result<Vec<String>> {
+    let mut conn = crate::db::connect(db).await?;
+    let mut stmt = conn
+        .prepare("SELECT alias FROM media_models WHERE enabled = 1")
+        .await?;
+    let rows = stmt
+        .query_map(crate::db::params![], |r| r.try_get::<String, _>(0))
+        .await?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn supported_ratios_for_model(db: &Path, alias: &str) -> Result<Vec<String>> {
-    let conn = crate::db::connect(db)?;
+async fn supported_ratios_for_model(db: &Path, alias: &str) -> Result<Vec<String>> {
+    let mut conn = crate::db::connect(db).await?;
     let s: Option<String> = conn
         .query_row(
             "SELECT ratios FROM media_models WHERE alias = ?1",
             params![alias],
-            |r| r.get(0),
+            |r| r.try_get(0),
         )
+        .await
         .ok();
     Ok(match s {
-        Some(s) if !s.is_empty() => s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
+        Some(s) if !s.is_empty() => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
         _ => Vec::new(),
     })
 }
 
-fn load_model_and_provider(db: &Path, alias: &str) -> Result<(ModelRow, ProviderRow)> {
-    let conn = crate::db::connect(db)?;
+async fn load_model_and_provider(db: &Path, alias: &str) -> Result<(ModelRow, ProviderRow)> {
+    let mut conn = crate::db::connect(db).await?;
     let model = conn
         .query_row(
             "SELECT model_id, provider, endpoint_style, prompt_style, daily_quota,
@@ -232,19 +296,20 @@ fn load_model_and_provider(db: &Path, alias: &str) -> Result<(ModelRow, Provider
             params![alias],
             |r| {
                 Ok(ModelRow {
-                    model_id: r.get(0)?,
-                    provider: r.get(1)?,
-                    endpoint_style: r.get(2)?,
-                    prompt_style: r.get(3)?,
-                    daily_quota: r.get(4)?,
-                    cost_per_result: r.get(5)?,
-                    permission: r.get(6)?,
-                    enabled: r.get::<_, i64>(7)? != 0,
-                    default_quality: r.get(8)?,
-                    ratios: r.get(9)?,
+                    model_id: r.try_get(0)?,
+                    provider: r.try_get(1)?,
+                    endpoint_style: r.try_get(2)?,
+                    prompt_style: r.try_get(3)?,
+                    daily_quota: r.try_get(4)?,
+                    cost_per_result: r.try_get(5)?,
+                    permission: r.try_get(6)?,
+                    enabled: r.try_get::<i64, _>(7)? != 0,
+                    default_quality: r.try_get(8)?,
+                    ratios: r.try_get(9)?,
                 })
             },
         )
+        .await
         .context("模型未注册")?;
     let provider = conn
         .query_row(
@@ -252,82 +317,87 @@ fn load_model_and_provider(db: &Path, alias: &str) -> Result<(ModelRow, Provider
             params![&model.provider],
             |r| {
                 Ok(ProviderRow {
-                    name: r.get(0)?,
-                    default_endpoint: r.get(1)?,
-                    enabled: r.get::<_, i64>(2)? != 0,
+                    name: r.try_get(0)?,
+                    default_endpoint: r.try_get(1)?,
+                    enabled: r.try_get::<i64, _>(2)? != 0,
                 })
             },
         )
+        .await
         .context("provider 不存在")?;
     Ok((model, provider))
 }
 
-fn daily_used_count(db: &Path, alias: &str) -> Result<i64> {
-    let conn = crate::db::connect(db)?;
+async fn daily_used_count(db: &Path, alias: &str) -> Result<i64> {
+    let mut conn = crate::db::connect(db).await?;
     // UTC 当天 0 点（够用于配额粒度；naive 实现避免引入 chrono）
     let sec_now = now_ts();
     let midnight = sec_now - (sec_now % 86400);
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM media_tasks WHERE model_alias = ?1 AND created_at >= ?2 AND state IN ('queued','running','success')",
         params![alias, midnight],
-        |r| r.get(0),
-    )?;
+        |r| r.try_get(0),
+    ).await?;
     Ok(n)
 }
 
-fn get_balance(db: &Path, pid: &str) -> Result<i64> {
-    let conn = crate::db::connect(db)?;
+async fn get_balance(db: &Path, pid: &str) -> Result<i64> {
+    let mut conn = crate::db::connect(db).await?;
     let b: Option<i64> = conn
         .query_row(
             "SELECT balance FROM media_credits WHERE person_id = ?1",
             params![pid],
-            |r| r.get(0),
+            |r| r.try_get(0),
         )
+        .await
         .ok();
     Ok(b.unwrap_or(0))
 }
 
-fn deduct_balance(db: &Path, pid: &str, amount: i64) -> Result<()> {
-    let conn = crate::db::connect(db)?;
+async fn deduct_balance(db: &Path, pid: &str, amount: i64) -> Result<()> {
+    let mut conn = crate::db::connect(db).await?;
     let now = now_ts();
     conn.execute(
         "UPDATE media_credits SET balance = balance - ?1, updated_at = ?2 WHERE person_id = ?3",
         params![amount, now, pid],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-fn load_chat_last_seed(db: &Path, chat_id: &str) -> Option<i64> {
-    let conn = crate::db::connect(db).ok()?;
+async fn load_chat_last_seed(db: &Path, chat_id: &str) -> Option<i64> {
+    let mut conn = crate::db::connect(db).await.ok()?;
     let key = format!("last_media_seed:{chat_id}");
     conn.query_row(
         "SELECT value FROM state_kv WHERE key = ?1",
         params![key],
-        |r| r.get::<_, String>(0),
+        |r| r.try_get::<String, _>(0),
     )
+    .await
     .ok()
     .and_then(|v| v.parse().ok())
 }
 
-fn save_chat_last_seed(db: &Path, chat_id: &str, seed: i64) -> Result<()> {
-    let conn = crate::db::connect(db)?;
+async fn save_chat_last_seed(db: &Path, chat_id: &str, seed: i64) -> Result<()> {
+    let mut conn = crate::db::connect(db).await?;
     let key = format!("last_media_seed:{chat_id}");
     conn.execute(
         "INSERT INTO state_kv(key, value, updated_at) VALUES(?1, ?2, ?3)
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
         params![key, seed.to_string(), now_ts()],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-fn record_task_pending(
+async fn record_task_pending(
     db: &Path,
     m: &MessageReceivedPayload,
     req: &ImageRequest,
     endpoint: &EndpointStyle,
     cost: i64,
 ) -> Result<i64> {
-    let conn = crate::db::connect(db)?;
+    let mut conn = crate::db::connect(db).await?;
     let now = now_ts();
     conn.execute(
         "INSERT INTO media_tasks(chat_id, chat_type, sender_pid, model_alias, provider, endpoint_style,
@@ -339,12 +409,17 @@ fn record_task_pending(
             req.raw_prompt, req.prompt, req.ratio, req.count as i64,
             req.seed, cost, now,
         ],
-    )?;
-    Ok(conn.last_insert_rowid())
+    ).await?;
+    Ok(conn.last_insert_rowid().await?)
 }
 
-fn mark_task_success(db: &Path, id: i64, artifacts: &ImageArtifacts, finish_ts: i64) -> Result<()> {
-    let conn = crate::db::connect(db)?;
+async fn mark_task_success(
+    db: &Path,
+    id: i64,
+    artifacts: &ImageArtifacts,
+    finish_ts: i64,
+) -> Result<()> {
+    let mut conn = crate::db::connect(db).await?;
     let art_json = json!(artifacts
         .paths
         .iter()
@@ -354,16 +429,18 @@ fn mark_task_success(db: &Path, id: i64, artifacts: &ImageArtifacts, finish_ts: 
     conn.execute(
         "UPDATE media_tasks SET state='success', artifacts=?1, finished_at=?2 WHERE id=?3",
         params![art_json, finish_ts, id],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-fn mark_task_failed(db: &Path, id: i64, err: &str, finish_ts: i64) -> Result<()> {
-    let conn = crate::db::connect(db)?;
+async fn mark_task_failed(db: &Path, id: i64, err: &str, finish_ts: i64) -> Result<()> {
+    let mut conn = crate::db::connect(db).await?;
     conn.execute(
         "UPDATE media_tasks SET state='failed', error=?1, finished_at=?2 WHERE id=?3",
         params![err.chars().take(400).collect::<String>(), finish_ts, id],
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -397,8 +474,12 @@ fn now_ts() -> i64 {
 
 /// 把一段文字通过 reply_engine 当作一个泡发出（错误/反馈用；走 Bubble 通道保序）
 async fn send_text(ctx: &MediaCtx, chat_id: &str, chat_type: &str, sender: &str, text: &str) {
-    let Some(engine) = &ctx.reply_engine else { return };
-    let Some((ct, target)) = route_target(chat_id, chat_type, sender) else { return };
+    let Some(engine) = &ctx.reply_engine else {
+        return;
+    };
+    let Some((ct, target)) = route_target(chat_id, chat_type, sender) else {
+        return;
+    };
     use crate::reply_engine::{Bubble, JobKind, ReplyJob};
     engine.enqueue(ReplyJob {
         chat_id: chat_id.to_string(),
@@ -407,14 +488,28 @@ async fn send_text(ctx: &MediaCtx, chat_id: &str, chat_type: &str, sender: &str,
         anchor_msg_id: 0,
         mention: false,
         mention_qq: None,
-        kind: JobKind::Bubbles(vec![Bubble { text: text.to_string(), at: false, meme: None }]),
+        kind: JobKind::Bubbles(vec![Bubble {
+            text: text.to_string(),
+            at: false,
+            meme: None,
+        }]),
     });
 }
 
 /// 把落盘的图片通过 reply_engine 当作纯图发出（Q012：OneBot image 段 file:///）
-async fn send_images(ctx: &MediaCtx, chat_id: &str, chat_type: &str, sender: &str, artifacts: &ImageArtifacts) {
-    let Some(engine) = &ctx.reply_engine else { return };
-    let Some((ct, target)) = route_target(chat_id, chat_type, sender) else { return };
+async fn send_images(
+    ctx: &MediaCtx,
+    chat_id: &str,
+    chat_type: &str,
+    sender: &str,
+    artifacts: &ImageArtifacts,
+) {
+    let Some(engine) = &ctx.reply_engine else {
+        return;
+    };
+    let Some((ct, target)) = route_target(chat_id, chat_type, sender) else {
+        return;
+    };
     for p in &artifacts.paths {
         engine.enqueue_image(chat_id.to_string(), ct, target, p.clone());
     }
@@ -423,7 +518,10 @@ async fn send_images(ctx: &MediaCtx, chat_id: &str, chat_type: &str, sender: &st
 /// chat/chat_type/target 解析（与 reply_engine::route_of 对齐）
 fn route_target(chat_id: &str, chat_type: &str, sender_pid: &str) -> Option<(ChatType, u64)> {
     match chat_type {
-        "group" => chat_id.parse::<u64>().ok().map(|gid| (ChatType::Group, gid)),
+        "group" => chat_id
+            .parse::<u64>()
+            .ok()
+            .map(|gid| (ChatType::Group, gid)),
         "private" => sender_pid
             .trim_start_matches("p_")
             .parse::<u64>()

@@ -76,7 +76,7 @@ yuantuan/
 
 Decision 输入（Q56/Q60/Q62）：每个窗口携带不可变 `anchor` 与有界 `window_messages`。窗口保留 anchor、所有 @/引用云团消息及最后 30 条普通消息，`state` 字符预算 8,000；再使用模型 tokenizer 对完整编译输入（含 chat template 和 schema）强制限制为 8,192 tokens。bot_chat 保留独立 40,000 字符预算。Decision 只能产出结构化动作等字段，Runtime 使用 anchor 的 `msg_id` 与 `sender_pid` 路由，模型不得选择或替换回复对象。
 
-Bot Context 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 采用“人物简档＋话题记忆＋近期对话”，另单独保留锚点和引用。窗口上界随任务入队，worker 在阻塞工作线程内通过单个 SQLite 读事务获取回复快照；Decision 与 bot_chat 共用资料，后者仅渲染、不重新查库。人物简档随已有 Decision/夜间归纳输出更新，不增加每轮总结模型请求。实现细节和仍未完成的 tokenizer/高优先级窗口契约见 [Bot 上下文参考](../reference/bot-context.md)。
+Bot Context 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 采用“人物简档＋话题记忆＋近期对话”，另单独保留锚点和引用。窗口上界随任务入队，worker 通过 SQLx 的单个 SQLite 读事务异步获取回复快照；Decision 与 bot_chat 共用资料，后者仅渲染、不重新查库。人物简档随已有 Decision/夜间归纳输出更新，不增加每轮总结模型请求。实现细节和仍未完成的 tokenizer/高优先级窗口契约见 [Bot 上下文参考](../reference/bot-context.md)。
 
 窗口调度（Q57–Q64）：所有通过 Prefilter 的消息可创建或加入 10 秒窗口；同 chat 有普通等待窗口时，普通消息加入该窗口，不重复开窗；没有等待窗口时才创建普通窗口。@云团、引用云团、私聊为高优先级；@云团和引用云团始终创建独立窗口，只引用他人按普通消息处理。高优先级窗口优先获得全局 LLM 并发槽。多个窗口可异步进行 Decision，但同 chat 必须按窗口创建顺序进入发送队列，前一窗口完成或明确失败后才能发送后一窗口。失败提示每窗口最多一次，文案为空静默，有文案发送给 anchor 请求者；单泡发送失败只记内部事件。
 
@@ -90,7 +90,7 @@ Q54（设计约束）：A 的消息命中后开启固定 10 秒窗口，期间�
 
 **一单写者：**
 
-- SQLite 写操作统一走单连接写队列（WAL：多读单写，杜绝 BUSY）
+- SQLite 使用 SQLx 有界连接池和 WAL，写事务受 SQLite 单写约束、busy_timeout 和业务事务控制；没有独立的单连接写队列，也不能保证杜绝 BUSY。当前选择与原写队列目标的差异见 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 和[异步访问参考](../reference/sqlite-access.md)。
 
 ---
 

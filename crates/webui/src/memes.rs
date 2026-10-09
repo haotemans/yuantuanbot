@@ -9,9 +9,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::Row;
+use yuantuan_core::db::params;
+use yuantuan_core::db::SqliteExt;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
@@ -19,9 +21,14 @@ pub struct ListQuery {
 }
 
 pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
-    let conn = match state.open_db() {
+    let mut conn = match state.open_db().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("数据库打开失败: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("数据库打开失败: {e}"),
+            )
+        }
     };
     let (sql, params_vec): (String, Vec<String>) = match q.status.as_deref() {
         Some(s) if s == "pending" || s == "active" => (
@@ -34,14 +41,15 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
             vec![],
         ),
     };
-    let mut stmt = match conn.prepare(&sql) {
+    let mut stmt = match conn.prepare(&sql).await {
         Ok(s) => s,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("查询失败: {e}")),
     };
     let rows = if params_vec.is_empty() {
-        stmt.query_map([], row_to_json)
+        stmt.query_map(yuantuan_core::db::params![], row_to_json)
+            .await
     } else {
-        stmt.query_map(params![params_vec[0]], row_to_json)
+        stmt.query_map(params![params_vec[0]], row_to_json).await
     };
     match rows {
         Ok(it) => {
@@ -52,14 +60,14 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     }
 }
 
-fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+fn row_to_json(r: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Value> {
     Ok(json!({
-        "id": r.get::<_, i64>(0)?,
-        "file": r.get::<_, String>(1)?,
-        "category": r.get::<_, String>(2)?,
-        "status": r.get::<_, String>(3)?,
-        "use_count": r.get::<_, i64>(4)?,
-        "added_by": r.get::<_, String>(5)?,
+        "id": r.try_get::<i64, _>(0)?,
+        "file": r.try_get::<String, _>(1)?,
+        "category": r.try_get::<String, _>(2)?,
+        "status": r.try_get::<String, _>(3)?,
+        "use_count": r.try_get::<i64, _>(4)?,
+        "added_by": r.try_get::<String, _>(5)?,
     }))
 }
 
@@ -73,12 +81,22 @@ pub async fn approve(
     Path(id): Path<i64>,
     body: Option<Json<ApproveBody>>,
 ) -> Response {
-    let conn = match state.open_db() {
+    let mut conn = match state.open_db().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("数据库打开失败: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("数据库打开失败: {e}"),
+            )
+        }
     };
     let exists: Option<String> = conn
-        .query_row("SELECT status FROM meme_library WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row(
+            "SELECT status FROM meme_library WHERE id = ?1",
+            params![id],
+            |r| r.try_get(0),
+        )
+        .await
         .ok();
     let Some(status) = exists else {
         return err(StatusCode::NOT_FOUND, "meme 不存在");
@@ -91,11 +109,20 @@ pub async fn approve(
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
     let res = match &new_cat {
-        Some(cat) => conn.execute(
-            "UPDATE meme_library SET status = 'active', category = ?1 WHERE id = ?2",
-            params![cat, id],
-        ),
-        None => conn.execute("UPDATE meme_library SET status = 'active' WHERE id = ?1", params![id]),
+        Some(cat) => {
+            conn.execute(
+                "UPDATE meme_library SET status = 'active', category = ?1 WHERE id = ?2",
+                params![cat, id],
+            )
+            .await
+        }
+        None => {
+            conn.execute(
+                "UPDATE meme_library SET status = 'active' WHERE id = ?1",
+                params![id],
+            )
+            .await
+        }
     };
     match res {
         Ok(_) => {
@@ -107,12 +134,22 @@ pub async fn approve(
 }
 
 pub async fn reject(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    let conn = match state.open_db() {
+    let mut conn = match state.open_db().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("数据库打开失败: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("数据库打开失败: {e}"),
+            )
+        }
     };
     let file: Option<String> = conn
-        .query_row("SELECT file FROM meme_library WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row(
+            "SELECT file FROM meme_library WHERE id = ?1",
+            params![id],
+            |r| r.try_get(0),
+        )
+        .await
         .ok();
     let Some(file) = file else {
         return err(StatusCode::NOT_FOUND, "meme 不存在");
@@ -122,7 +159,10 @@ pub async fn reject(State(state): State<AppState>, Path(id): Path<i64>) -> Respo
     if let Err(e) = std::fs::remove_file(&path) {
         tracing::warn!(id, file = %path.display(), error = %e, "meme 文件删除失败（行照删）");
     }
-    match conn.execute("DELETE FROM meme_library WHERE id = ?1", params![id]) {
+    match conn
+        .execute("DELETE FROM meme_library WHERE id = ?1", params![id])
+        .await
+    {
         Ok(_) => {
             tracing::info!(id, "meme 已拒绝并删除");
             (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
@@ -132,12 +172,22 @@ pub async fn reject(State(state): State<AppState>, Path(id): Path<i64>) -> Respo
 }
 
 pub async fn file(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    let conn = match state.open_db() {
+    let mut conn = match state.open_db().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("数据库打开失败: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("数据库打开失败: {e}"),
+            )
+        }
     };
     let file: Option<String> = conn
-        .query_row("SELECT file FROM meme_library WHERE id = ?1", params![id], |r| r.get(0))
+        .query_row(
+            "SELECT file FROM meme_library WHERE id = ?1",
+            params![id],
+            |r| r.try_get(0),
+        )
+        .await
         .ok();
     let Some(file) = file else {
         return err(StatusCode::NOT_FOUND, "meme 不存在");
@@ -145,7 +195,13 @@ pub async fn file(State(state): State<AppState>, Path(id): Path<i64>) -> Respons
     let path = state.memes_dir.join(&file);
     match std::fs::read(&path) {
         Ok(bytes) => {
-            let mime = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+            let mime = match path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase()
+                .as_str()
+            {
                 "png" => "image/png",
                 "jpg" | "jpeg" => "image/jpeg",
                 "gif" => "image/gif",

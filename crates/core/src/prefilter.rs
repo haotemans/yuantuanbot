@@ -1,8 +1,10 @@
 //! Prefilter 规则集（架构文档十三章终稿）：顺序短路 R1-R7。
 //! 阈值来自 config.toml [prefilter]（本单读启动配置，热配后续施工单）。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use crate::event::MessageReceivedPayload;
-use rusqlite::params;
+use sqlx::Row;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -54,8 +56,7 @@ impl SelfMsgIds {
     /// G008 热应用：运行期调整容量（即刻生效，旧条目按新容量收敛）
     pub fn set_cap(&self, cap: usize) {
         let new = cap.max(1);
-        self.cap
-            .store(new, std::sync::atomic::Ordering::Relaxed);
+        self.cap.store(new, std::sync::atomic::Ordering::Relaxed);
         let mut q = self.inner.lock().unwrap();
         while q.len() > new {
             q.pop_front();
@@ -87,7 +88,7 @@ pub enum Verdict {
 }
 
 /// 顺序短路判定。self_pid 形如 "p_<bot QQ>"，未知时为 None（此时 R1 仅凭 sender_pid == "self"）。
-pub fn check(
+pub async fn check(
     cfg: &Config,
     self_pid: Option<&str>,
     self_ids: &SelfMsgIds,
@@ -121,16 +122,15 @@ pub fn check(
     // 「60s 内 messages 表中 self 消息数 <= 12」作代理（见施工单 4 任务卡，别过度工程）。
     if msg.chat_type == "group" {
         let cutoff = now_secs() - cfg.window_secs;
-        let self_count = crate::db::connect(db_path)
-            .ok()
-            .and_then(|c| {
+        let self_count = async {
+                let mut c = crate::db::connect(db_path).await.ok()?;
                 c.query_row(
                     "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND sender_pid = 'self' AND ts >= ?2",
                     params![msg.chat_id, cutoff],
-                    |r| r.get::<_, i64>(0),
-                )
+                    |r| r.try_get::<i64, _>(0),
+                ).await
                 .ok()
-            })
+            }.await
             .unwrap_or(0);
         if self_count >= cfg.self_msg_cap {
             return Verdict::Drop("R6:发言节流");
@@ -154,15 +154,16 @@ fn now_secs() -> i64 {
 mod tests {
     use super::*;
 
-    fn temp_db() -> std::path::PathBuf {
+    async fn temp_db() -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-            + (std::process::id() as u128) << 16;
+            + (std::process::id() as u128)
+            << 16;
         let dir = std::env::temp_dir().join(format!("yt-prefilter-test-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("yuantuan.db");
-        let mut conn = crate::db::connect(&db).unwrap();
-        crate::db::migrate(&mut conn).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
         db
     }
 
@@ -182,67 +183,92 @@ mod tests {
         }
     }
 
-    #[test]
-    fn r1_drops_self() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r1_drops_self() {
+        let db = temp_db().await;
         let mut m = base_msg();
         m.sender_pid = "self".into();
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db, &m), Verdict::Drop("R1:发送者是自己"));
+        assert_eq!(
+            check(&Config::default(), None, &SelfMsgIds::default(), &db, &m).await,
+            Verdict::Drop("R1:发送者是自己")
+        );
         // 平台号命中 self_pid
         let mut m2 = base_msg();
         m2.sender_pid = "p_10001".into();
         assert_eq!(
-            check(&Config::default(), Some("p_10001"), &SelfMsgIds::default(), &db, &m2),
+            check(
+                &Config::default(),
+                Some("p_10001"),
+                &SelfMsgIds::default(),
+                &db,
+                &m2
+            )
+            .await,
             Verdict::Drop("R1:发送者是自己")
         );
     }
 
-    #[test]
-    fn r2_drops_bot_sender() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r2_drops_bot_sender() {
+        let db = temp_db().await;
         let mut m = base_msg();
         m.sender_bot = true;
         m.at_me = true; // 顺序短路：R2 在 R3 之前
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db, &m), Verdict::Drop("R2:bot或系统消息"));
+        assert_eq!(
+            check(&Config::default(), None, &SelfMsgIds::default(), &db, &m).await,
+            Verdict::Drop("R2:bot或系统消息")
+        );
     }
 
-    #[test]
-    fn r3_at_me_passes() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r3_at_me_passes() {
+        let db = temp_db().await;
         let mut m = base_msg();
         m.at_me = true;
         m.text = String::new(); // 即使无文字也必放行（R3 先于 R7）
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db, &m), Verdict::Pass);
+        assert_eq!(
+            check(&Config::default(), None, &SelfMsgIds::default(), &db, &m).await,
+            Verdict::Pass
+        );
     }
 
-    #[test]
-    fn r4_reply_to_me_passes() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r4_reply_to_me_passes() {
+        let db = temp_db().await;
         let ids = SelfMsgIds::default();
         ids.record(424242);
         let mut m = base_msg();
         m.reply_to = Some(424242);
-        assert_eq!(check(&Config::default(), None, &ids, &db, &m), Verdict::Pass);
+        assert_eq!(
+            check(&Config::default(), None, &ids, &db, &m).await,
+            Verdict::Pass
+        );
         // 未记录的引用不命中 R4，继续后续规则（文本非空 → Pass）
         let mut m2 = base_msg();
         m2.reply_to = Some(999);
-        assert_eq!(check(&Config::default(), None, &ids, &db, &m2), Verdict::Pass);
+        assert_eq!(
+            check(&Config::default(), None, &ids, &db, &m2).await,
+            Verdict::Pass
+        );
     }
 
-    #[test]
-    fn r5_private_passes() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r5_private_passes() {
+        let db = temp_db().await;
         let mut m = base_msg();
         m.chat_type = "private".into();
         m.chat_id = "dm_2001".into();
         m.text = String::new();
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db, &m), Verdict::Pass);
+        assert_eq!(
+            check(&Config::default(), None, &SelfMsgIds::default(), &db, &m).await,
+            Verdict::Pass
+        );
     }
 
-    #[test]
-    fn r6_throttle_drops_at_cap() {
-        let db = temp_db();
-        let conn = crate::db::connect(&db).unwrap();
+    #[tokio::test]
+    async fn r6_throttle_drops_at_cap() {
+        let db = temp_db().await;
+        let mut conn = crate::db::connect(&db).await.unwrap();
         let now = now_secs();
         // 先建 self 档案再插 12 条 self 消息（达到 12 顶）→ Drop
         for _ in 0..12 {
@@ -250,27 +276,47 @@ mod tests {
                 "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1)
                  ON CONFLICT(person_id) DO NOTHING",
                 params![now],
-            ).unwrap();
+            ).await.unwrap();
             conn.execute(
                 "INSERT INTO messages(chat_id, chat_type, sender_pid, text, ts) VALUES ('555666','group','self','回',?1)",
                 params![now],
-            ).unwrap();
+            ).await.unwrap();
         }
         assert_eq!(
-            check(&Config::default(), None, &SelfMsgIds::default(), &db, &base_msg()),
+            check(
+                &Config::default(),
+                None,
+                &SelfMsgIds::default(),
+                &db,
+                &base_msg()
+            )
+            .await,
             Verdict::Drop("R6:发言节流")
         );
         // 不超顶 → 过闸
-        let db2 = temp_db();
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db2, &base_msg()), Verdict::Pass);
+        let db2 = temp_db().await;
+        assert_eq!(
+            check(
+                &Config::default(),
+                None,
+                &SelfMsgIds::default(),
+                &db2,
+                &base_msg()
+            )
+            .await,
+            Verdict::Pass
+        );
     }
 
-    #[test]
-    fn r7_drops_image_only() {
-        let db = temp_db();
+    #[tokio::test]
+    async fn r7_drops_image_only() {
+        let db = temp_db().await;
         let mut m = base_msg();
         m.text = "   ".into();
         m.has_image = true;
-        assert_eq!(check(&Config::default(), None, &SelfMsgIds::default(), &db, &m), Verdict::Drop("R7:无文字纯图片或表情"));
+        assert_eq!(
+            check(&Config::default(), None, &SelfMsgIds::default(), &db, &m).await,
+            Verdict::Drop("R7:无文字纯图片或表情")
+        );
     }
 }

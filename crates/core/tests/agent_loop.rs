@@ -6,10 +6,12 @@
 //! - Event::TaskFinished 带 final_state=finished
 //! - usage_sink 写入 llm_usage（mock 返回 usage 字段）
 
+use sqlx::Row;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use yuantuan_core::agent::{self, TaskRunnerDeps};
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{Event, EventBus};
 use yuantuan_core::llm::LlmGateway;
 use yuantuan_core::tools::Registry;
@@ -56,11 +58,13 @@ async fn spawn_mock_responses(responses: Vec<String>) -> (String, Arc<AtomicUsiz
     (format!("http://{addr}"), calls)
 }
 
-fn temp_db() -> (tempfile_guard::TempDir, std::path::PathBuf) {
+async fn temp_db() -> (tempfile_guard::TempDir, std::path::PathBuf) {
     let dir = tempfile_guard::TempDir::new();
     let db = dir.path().join("test.db");
-    let mut conn = yuantuan_core::db::connect(&db).expect("open test db");
-    yuantuan_core::db::migrate(&mut conn).expect("migrate");
+    let mut conn = yuantuan_core::db::connect(&db).await.expect("open test db");
+    yuantuan_core::db::migrate(&mut conn)
+        .await
+        .expect("migrate");
     (dir, db)
 }
 
@@ -97,7 +101,7 @@ mod tempfile_guard {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_loop_tool_call_then_done() {
     let (base_url, calls) = spawn_mock_llm().await;
-    let (_guard, db_path) = temp_db();
+    let (_guard, db_path) = temp_db().await;
 
     // providers.toml 写入临时文件：三角色全绑 mock provider
     let prov_path = _guard.path().join("providers.toml");
@@ -137,8 +141,9 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
     // 让 runner 先订阅上再发事件
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let task_id =
-        agent::create_task(&db_path, &bus, "g_test", "p_tester", "验证闭环").expect("create_task");
+    let task_id = agent::create_task(&db_path, &bus, "g_test", "p_tester", "验证闭环")
+        .await
+        .expect("create_task");
     let task_id_for_wait = task_id.clone();
 
     // 等 TaskFinished 事件
@@ -159,13 +164,14 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
     assert!(calls.load(Ordering::SeqCst) >= 2, "LLM 至少被调 2 轮");
 
     // tasks 行终态
-    let conn = yuantuan_core::db::connect(&db_path).unwrap();
+    let mut conn = yuantuan_core::db::connect(&db_path).await.unwrap();
     let (state, used, finished_at): (String, i64, Option<i64>) = conn
         .query_row(
             "SELECT state, used_calls, finished_at FROM tasks WHERE task_id = ?1",
-            rusqlite::params![task_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            yuantuan_core::db::params![task_id],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(state, "finished");
     assert_eq!(used, 2);
@@ -174,9 +180,11 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
     // task_events 序列
     let mut stmt = conn
         .prepare("SELECT kind FROM task_events WHERE task_id = ?1 ORDER BY seq ASC")
+        .await
         .unwrap();
     let kinds: Vec<String> = stmt
-        .query_map(rusqlite::params![task_id], |r| r.get(0))
+        .query_map(yuantuan_core::db::params![task_id], |r| r.try_get(0))
+        .await
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
@@ -191,7 +199,7 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
 
 async fn assert_task_fails(content: String, tools: Registry, expected: &str, used_calls: i64) {
     let (base_url, _) = spawn_mock_responses(vec![content]).await;
-    let (guard, db_path) = temp_db();
+    let (guard, db_path) = temp_db().await;
     let prov_path = guard.path().join("providers.toml");
     std::fs::write(
         &prov_path,
@@ -216,7 +224,9 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
         bus: bus.clone(),
     });
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let id = agent::create_task(&db_path, &bus, "g_test", "p_test", "failure regression").unwrap();
+    let id = agent::create_task(&db_path, &bus, "g_test", "p_test", "failure regression")
+        .await
+        .unwrap();
     let finished = tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             if let Event::TaskFinished(p) = rx.recv().await.unwrap() {
@@ -230,13 +240,14 @@ agent_exec = {{ provider = "mock", model = "mock-model" }}
     .expect("failed tasks must reach a terminal state");
     assert_eq!(finished.final_state.as_deref(), Some("failed"));
     assert!(finished.error.unwrap().contains(expected));
-    let conn = yuantuan_core::db::connect(&db_path).unwrap();
+    let mut conn = yuantuan_core::db::connect(&db_path).await.unwrap();
     let row: (String, i64, Option<i64>) = conn
         .query_row(
             "SELECT state, used_calls, finished_at FROM tasks WHERE task_id=?1",
-            [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            yuantuan_core::db::params![&id],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(row.0, "failed");
     assert_eq!(row.1, used_calls);
@@ -349,12 +360,17 @@ async fn durable_backlog_and_duplicate_events_execute_once_with_three_slots() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let (_guard, db_path) = temp_db();
+    let (_guard, db_path) = temp_db().await;
     let bus = EventBus::new(4);
     // No runner yet: every notification is lost, but the durable tasks remain.
-    let ids: Vec<_> = (0..12)
-        .map(|_| agent::create_task(&db_path, &bus, "g_test", "p_test", "backlog").unwrap())
-        .collect();
+    let mut ids = Vec::new();
+    for _ in 0..12 {
+        ids.push(
+            agent::create_task(&db_path, &bus, "g_test", "p_test", "backlog")
+                .await
+                .unwrap(),
+        );
+    }
     let runner = agent::spawn_runner(test_deps(&db_path, &base_url, &bus, Registry::new()));
     // Overflow the event receiver and repeat the same task event.
     for _ in 0..50 {
@@ -370,13 +386,14 @@ async fn durable_backlog_and_duplicate_events_execute_once_with_three_slots() {
     }
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let conn = yuantuan_core::db::connect(&db_path).unwrap();
+            let mut conn = yuantuan_core::db::connect(&db_path).await.unwrap();
             let finished: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM tasks WHERE state='finished'",
-                    [],
-                    |r| r.get(0),
+                    yuantuan_core::db::params![],
+                    |r| r.try_get(0),
                 )
+                .await
                 .unwrap();
             if finished == 12 {
                 break;
@@ -433,7 +450,7 @@ async fn waiting_task() -> (
 ) {
     let (url, _) =
         spawn_mock_responses(vec![r#"{"action":"tool_call","tool_name":"wait"}"#.into()]).await;
-    let (guard, path) = temp_db();
+    let (guard, path) = temp_db().await;
     let bus = EventBus::new(64);
     let rx = bus.subscribe();
     let (entered, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -442,7 +459,9 @@ async fn waiting_task() -> (
     tools.register(WaitingTool { entered, dropped });
     let deps = test_deps(&path, &url, &bus, tools);
     let runner = agent::spawn_runner(deps.clone());
-    let id = agent::create_task(&path, &bus, "g_test", "p_test", "waiting").unwrap();
+    let id = agent::create_task(&path, &bus, "g_test", "p_test", "waiting")
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx.recv())
         .await
         .unwrap()
@@ -485,31 +504,37 @@ async fn stalled_tool_times_out_without_retrying_side_effects() {
 #[tokio::test]
 async fn terminal_write_failure_rolls_back_and_retries_without_reexecution() {
     let (url, calls) = spawn_mock_responses(vec![r#"{"action":"done","text":"ok"}"#.into()]).await;
-    let (_guard, path) = temp_db();
-    let conn = yuantuan_core::db::connect(&path).unwrap();
+    let (_guard, path) = temp_db().await;
+    let mut conn = yuantuan_core::db::connect(&path).await.unwrap();
     conn.execute_batch(
         "CREATE TRIGGER reject_finished BEFORE INSERT ON task_events WHEN NEW.kind='finished'
         BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
     )
+    .await
     .unwrap();
     let bus = EventBus::new(64);
     let mut rx = bus.subscribe();
     let runner = agent::spawn_runner(test_deps(&path, &url, &bus, Registry::new()));
-    let id = agent::create_task(&path, &bus, "g_test", "p_test", "commit retry").unwrap();
+    let id = agent::create_task(&path, &bus, "g_test", "p_test", "commit retry")
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let row: (String, Option<i64>) = conn
         .query_row(
             "SELECT state,finished_at FROM tasks WHERE task_id=?1",
-            [&id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            yuantuan_core::db::params![&id],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         )
+        .await
         .unwrap();
     assert_eq!(row, ("running".into(), None));
     while let Ok(event) = rx.try_recv() {
         assert!(!matches!(event, Event::TaskFinished(_)));
     }
-    conn.execute_batch("DROP TRIGGER reject_finished").unwrap();
+    conn.execute_batch("DROP TRIGGER reject_finished")
+        .await
+        .unwrap();
     assert_eq!(
         wait_finished(&mut rx, &id).await.final_state.as_deref(),
         Some("finished")
@@ -518,9 +543,10 @@ async fn terminal_write_failure_rolls_back_and_retries_without_reexecution() {
     assert_eq!(
         conn.query_row(
             "SELECT COUNT(*) FROM task_events WHERE kind='finished'",
-            [],
-            |r| r.get::<_, i64>(0)
+            yuantuan_core::db::params![],
+            |r| r.try_get::<i64, _>(0)
         )
+        .await
         .unwrap(),
         1
     );
@@ -528,21 +554,31 @@ async fn terminal_write_failure_rolls_back_and_retries_without_reexecution() {
     let _ = runner.await;
 }
 
-#[test]
-fn task_creation_is_atomic_with_its_audit_event() {
-    let (_guard, path) = temp_db();
-    let conn = yuantuan_core::db::connect(&path).unwrap();
+#[tokio::test]
+async fn task_creation_is_atomic_with_its_audit_event() {
+    let (_guard, path) = temp_db().await;
+    let mut conn = yuantuan_core::db::connect(&path).await.unwrap();
     conn.execute_batch(
         "CREATE TRIGGER reject_created BEFORE INSERT ON task_events WHEN NEW.kind='created'
         BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
     )
+    .await
     .unwrap();
     let bus = EventBus::new(16);
     let mut rx = bus.subscribe();
-    assert!(agent::create_task(&path, &bus, "g_test", "p_test", "atomic create").is_err());
+    assert!(
+        agent::create_task(&path, &bus, "g_test", "p_test", "atomic create")
+            .await
+            .is_err()
+    );
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
+        conn.query_row(
+            "SELECT COUNT(*) FROM tasks",
+            yuantuan_core::db::params![],
+            |r| r.try_get::<i64, _>(0)
+        )
+        .await
+        .unwrap(),
         0
     );
     assert!(matches!(

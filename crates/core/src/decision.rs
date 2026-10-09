@@ -4,12 +4,14 @@
 //! 本单副作用：mood 写回 state、memory_write 入 long_memories（explicit）、DecisionMade 事件供 trace。
 //! 输出经参与策略约束后交给 bot 管线执行，trace 同时保留建议与最终动作。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use crate::event::{DecisionMadePayload, Event, EventBus, MessageReceivedPayload};
 use crate::llm::{LlmGateway, Role};
 use crate::state::{MoodState, MoodValue};
-use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
@@ -286,7 +288,7 @@ pub async fn decide(
                     anchor_id: msg.msg_id,
                     visible_ids: &visible_ids,
                     linked_reply_id: snapshot.dialogue["last_reply_to_sender"]["msg_id"].as_i64(),
-                    reply_age: seconds_since_last_reply(db_path, msg),
+                    reply_age: seconds_since_last_reply(db_path, msg).await,
                     bot_bubbles_5min: snapshot.scene["my_replies_last_5min"].as_i64().unwrap_or(0),
                     human_messages_30s: snapshot.scene["human_messages_last_30s"]
                         .as_i64()
@@ -300,7 +302,12 @@ pub async fn decide(
             policy
                 .notes
                 .push("旧响应缺少参与判断，使用保守兼容规则".into());
-            enforce_quiet_group_policy(o, msg, snapshot, seconds_since_last_reply(db_path, msg));
+            enforce_quiet_group_policy(
+                o,
+                msg,
+                snapshot,
+                seconds_since_last_reply(db_path, msg).await,
+            );
         }
     }
 
@@ -308,7 +315,7 @@ pub async fn decide(
         Some(o) => (o, false),
         None => (fallback_output(), true),
     };
-    apply_side_effects(db_path, bus, mood, msg, &output);
+    apply_side_effects(db_path, bus, mood, msg, &output).await;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     // action 是 Runtime 最终动作；模型的原建议保存在 policy 中。
@@ -547,15 +554,18 @@ fn enforce_quiet_group_policy(
 }
 
 /// 实时限流状态不进入模型证据。旧窗口排队/回放时也考虑刚发出的回复。
-fn seconds_since_last_reply(db_path: &Path, msg: &MessageReceivedPayload) -> Option<i64> {
-    let latest = crate::db::connect(db_path).and_then(|conn| {
+async fn seconds_since_last_reply(db_path: &Path, msg: &MessageReceivedPayload) -> Option<i64> {
+    let latest = async {
+        let mut conn = crate::db::connect(db_path).await?;
         conn.query_row(
             "SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self'",
             params![msg.chat_id, msg.chat_type],
-            |r| r.get::<_, Option<i64>>(0),
+            |r| r.try_get::<Option<i64>, _>(0),
         )
-        .map_err(Into::into)
-    });
+        .await
+        .map_err(anyhow::Error::from)
+    }
+    .await;
     // 无法核对时暂不主动插话；直接提问不受此冷却限制。
     latest
         .unwrap_or(Some(now_secs()))
@@ -630,7 +640,7 @@ fn build_context(
         "sender":sender,"scene":snapshot.scene,"mood":mood.get().as_str(),"active_task":null,
     })
 }
-fn apply_side_effects(
+async fn apply_side_effects(
     db_path: &Path,
     bus: &EventBus,
     mood: &MoodState,
@@ -645,7 +655,7 @@ fn apply_side_effects(
     if let Some(fact) = out.memory_write.as_ref().map(|s| s.trim()).filter(|s| {
         !s.is_empty() && s.chars().count() <= 800 && !crate::consolidation::is_sensitive(s)
     }) {
-        let conn = match crate::db::connect(db_path) {
+        let mut conn = match crate::db::connect(db_path).await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "memory_write 落库失败：打开数据库");
@@ -657,7 +667,7 @@ fn apply_side_effects(
             "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id)
              VALUES ('person', ?1, ?2, 'explicit', ?3, ?3, ?4, ?5)",
             params![msg.sender_pid, fact, now, msg.chat_id, msg.msg_id],
-        ) {
+        ).await {
             Ok(_) => {
                 debug!(person = %msg.sender_pid, "显式记忆已写入");
                 bus.publish(Event::MemoryWritten);
@@ -666,17 +676,19 @@ fn apply_side_effects(
         }
     }
     if !out.profile_updates.is_empty() {
-        match crate::db::connect(db_path) {
-            Ok(conn) => {
+        match crate::db::connect(db_path).await {
+            Ok(mut conn) => {
                 for update in out.profile_updates.iter().take(4) {
                     match crate::memory::update_profile(
-                        &conn,
+                        &mut conn,
                         &msg.sender_pid,
                         &msg.chat_id,
                         msg.msg_id,
                         msg.msg_id,
                         update,
-                    ) {
+                    )
+                    .await
+                    {
                         Ok(true) => bus.publish(Event::MemoryWritten),
                         Ok(false) => {}
                         Err(e) => warn!(error=%e,"人物简档更新未通过来源校验"),
@@ -707,8 +719,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn quiet_policy_rejects_acknowledgments_and_ambient_chatter() {
+    #[tokio::test]
+    async fn quiet_policy_rejects_acknowledgments_and_ambient_chatter() {
         use crate::context_builder::{capture_reply_snapshot, ContextCfg};
         let mut msg = MessageReceivedPayload {
             msg_id: 1,
@@ -726,11 +738,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yt-quiet-{}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         let db = dir.join("test.db");
-        let mut conn = crate::db::connect(&db).unwrap();
-        crate::db::migrate(&mut conn).unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
         conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_1','测试',1,1);
-            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','p_1','当前问题',1000);").unwrap();
-        let mut snapshot = capture_reply_snapshot(&db, &msg, 1, &ContextCfg::default()).unwrap();
+            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','p_1','当前问题',1000);").await.unwrap();
+        let mut snapshot = capture_reply_snapshot(&db, &msg, 1, &ContextCfg::default())
+            .await
+            .unwrap();
         assert!(snapshot.scene["seconds_since_my_reply"].is_null());
         for (text, directed, seconds, expected) in [
             ("哈哈", true, 200, DecisionAction::Ignore),
@@ -797,14 +811,16 @@ mod tests {
         );
         assert_eq!(out.action, DecisionAction::Reply, "群聊规则不抑制私聊");
         msg.chat_type = "group".into();
-        assert!(seconds_since_last_reply(&db, &msg).is_none());
+        assert!(seconds_since_last_reply(&db, &msg).await.is_none());
         conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('self','云团',1,1);
-            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','self','新回复',unixepoch());").unwrap();
+            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','self','新回复',unixepoch());").await.unwrap();
         assert!(
-            seconds_since_last_reply(&db, &msg).unwrap() < 2,
+            seconds_since_last_reply(&db, &msg).await.unwrap() < 2,
             "旧快照之后发送的消息也要计入冷却"
         );
+        let database = conn.database();
         drop(conn);
+        database.close().await;
         std::fs::remove_dir_all(dir).unwrap();
     }
 

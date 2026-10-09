@@ -4,33 +4,45 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_webui::{serve, Extras};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auth_status_reflects_setup_state() {
     let nanos = {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128 + (std::process::id() as u128) << 16
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
+            + (std::process::id() as u128)
+            << 16
     };
     let dir = std::env::temp_dir().join(format!("yt-auth-status-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("yuantuan.db");
     {
-        let mut conn = db::connect(&db_path).unwrap();
-        db::migrate(&mut conn).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let extras = Extras::for_test(dir.join("config.toml"), dir.join("providers.toml"));
     let db2 = db_path.clone();
-    tokio::spawn(async move { let _ = serve(db2, "127.0.0.1", port, extras).await; });
+    tokio::spawn(async move {
+        let _ = serve(db2, "127.0.0.1", port, extras).await;
+    });
     let http = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{port}");
 
     // 服务未就绪时连接会被拒，返回 Option 让就绪等待循环能容忍
     let get_status = || async {
-        let r: Value = http.get(format!("{base}/api/auth/status")).send().await.ok()?.json().await.ok()?;
+        let r: Value = http
+            .get(format!("{base}/api/auth/status"))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
         r["need_setup"].as_bool()
     };
 
@@ -55,7 +67,12 @@ async fn auth_status_reflects_setup_state() {
     assert_eq!(get_status().await, Some(false));
 
     // 删除密码 → true（忘记密码的运维路径，README 有指引）
-    let conn = db::connect(&db_path).unwrap();
-    conn.execute("DELETE FROM state_kv WHERE key = 'admin_pass_hash'", []).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
+    conn.execute(
+        "DELETE FROM state_kv WHERE key = 'admin_pass_hash'",
+        yuantuan_core::db::params![],
+    )
+    .await
+    .unwrap();
     assert_eq!(get_status().await, Some(true));
 }

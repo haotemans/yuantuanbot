@@ -5,6 +5,7 @@
 //! 滚动 = 本地 backups/ 保留最近 keep_days 天（默认 7）
 //! 恢复 = 启动时检测 data/.restore-pending，存在则解压覆盖 data/ 后删除标记
 
+use crate::db::SqliteExt;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -68,11 +69,25 @@ pub async fn run_backup(cfg: &BackupCfg, data_dir: &Path) -> Result<BackupArtifa
     let stamp = chrono_stamp();
     let out = backups.join(format!("yt-{stamp}.tar.gz"));
 
-    // 1) tar.gz 打包（tokio 阻塞任务，避免阻塞 async runtime）
+    // VACUUM INTO creates a consistent SQLite snapshot while live writers continue.
+    let snapshot = backups.join(format!(".snapshot-{:016x}.db", rand::random::<u64>()));
+    let snapshot_guard = SnapshotFile(snapshot.clone());
+    let source = data_dir.join("yuantuan.db");
+    if source.exists() {
+        let mut conn = crate::db::connect(&source).await?;
+        conn.execute(
+            "VACUUM INTO ?1",
+            crate::db::params![snapshot.to_string_lossy().as_ref()],
+        )
+        .await?;
+    }
     let data_dir_clone = data_dir.to_path_buf();
     let out_clone = out.clone();
     let tar_result = tokio::task::spawn_blocking(move || {
-        tar_data_dir(&data_dir_clone, &out_clone)
+        // Own the guard in the worker: cancellation cannot remove its input mid-archive.
+        let result = tar_data_dir(&data_dir_clone, &out_clone, &snapshot_guard.0);
+        drop(snapshot_guard);
+        result
     })
     .await
     .context("tar spawn_blocking 失败")??;
@@ -135,13 +150,17 @@ fn days_to_ymd(mut days: i64) -> (i64, u32, u32) {
     (y + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
-fn tar_data_dir(data_dir: &Path, out: &Path) -> Result<u64> {
+fn tar_data_dir(data_dir: &Path, out: &Path, snapshot: &Path) -> Result<u64> {
     let f = std::fs::File::create(out).with_context(|| format!("创建 {} 失败", out.display()))?;
     let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
 
     for rel in INCLUDE {
-        let src = data_dir.join(rel);
+        let src = if *rel == "yuantuan.db" {
+            snapshot.to_path_buf()
+        } else {
+            data_dir.join(rel)
+        };
         if !src.exists() {
             continue;
         }
@@ -149,10 +168,6 @@ fn tar_data_dir(data_dir: &Path, out: &Path) -> Result<u64> {
             tar.append_dir_all(rel, &src)
                 .with_context(|| format!("打包目录 {rel} 失败"))?;
         } else {
-            // yuantuan.db：WAL 模式下先 checkpoint，避免备份出不一致快照
-            if *rel == "yuantuan.db" {
-                checkpoint_wal(data_dir)?;
-            }
             tar.append_path_with_name(&src, rel)
                 .with_context(|| format!("打包文件 {rel} 失败"))?;
         }
@@ -163,23 +178,19 @@ fn tar_data_dir(data_dir: &Path, out: &Path) -> Result<u64> {
     Ok(meta.len())
 }
 
-fn checkpoint_wal(data_dir: &Path) -> Result<()> {
-    let db = data_dir.join("yuantuan.db");
-    if !db.exists() {
-        return Ok(());
+struct SnapshotFile(PathBuf);
+impl Drop for SnapshotFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
-    let conn = rusqlite::Connection::open(&db).context("打开 db 做 checkpoint 失败")?;
-    conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
-        .context("WAL checkpoint 失败")?;
-    Ok(())
 }
 
 async fn cleanup_old(backups: &Path, keep_days: i64) {
     if keep_days <= 0 {
         return;
     }
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs((keep_days as u64) * 86400);
+    let cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs((keep_days as u64) * 86400);
     let mut rd = match tokio::fs::read_dir(backups).await {
         Ok(r) => r,
         Err(_) => return,
@@ -189,11 +200,7 @@ async fn cleanup_old(backups: &Path, keep_days: i64) {
         if !name.starts_with("yt-") || !name.ends_with(".tar.gz") {
             continue;
         }
-        let mtime = e
-            .metadata()
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let mtime = e.metadata().await.ok().and_then(|m| m.modified().ok());
         if let Some(t) = mtime {
             if t < cutoff {
                 let _ = tokio::fs::remove_file(e.path()).await;
@@ -236,7 +243,8 @@ pub async fn restore_from_pending(data_dir: &Path) -> Result<Option<PathBuf>> {
 }
 
 fn untar_into(tar_path: &Path, data_dir: &Path) -> Result<()> {
-    let f = std::fs::File::open(tar_path).with_context(|| format!("打开 {} 失败", tar_path.display()))?;
+    let f = std::fs::File::open(tar_path)
+        .with_context(|| format!("打开 {} 失败", tar_path.display()))?;
     let gz = flate2::read::GzDecoder::new(f);
     let mut tar = tar::Archive::new(gz);
     tar.unpack(data_dir).context("解压到 data/ 失败")?;
@@ -244,8 +252,8 @@ fn untar_into(tar_path: &Path, data_dir: &Path) -> Result<()> {
 }
 
 async fn git_push(cfg: &BackupCfg, backups: &Path, new_tar: &Path) -> Result<()> {
-    let pat = std::env::var(&cfg.pat_env)
-        .with_context(|| format!("环境变量 {} 未设置", cfg.pat_env))?;
+    let pat =
+        std::env::var(&cfg.pat_env).with_context(|| format!("环境变量 {} 未设置", cfg.pat_env))?;
     let repo_dir = backups.join("_repo");
     if !repo_dir.exists() {
         // 首次：clone
@@ -255,10 +263,23 @@ async fn git_push(cfg: &BackupCfg, backups: &Path, new_tar: &Path) -> Result<()>
     // 拷贝新 tar 到 repo
     let name = new_tar.file_name().unwrap().to_string_lossy().to_string();
     let dst = repo_dir.join(&name);
-    tokio::fs::copy(new_tar, &dst).await.context("拷贝 tar 到 repo 失败")?;
+    tokio::fs::copy(new_tar, &dst)
+        .await
+        .context("拷贝 tar 到 repo 失败")?;
     run_git(&repo_dir, &["add", "-A"]).await?;
-    run_git(&repo_dir, &["-c", "user.email=bot@yuantuan", "-c", "user.name=yuantuan-backup",
-                          "commit", "-m", &format!("backup {name}")]).await?;
+    run_git(
+        &repo_dir,
+        &[
+            "-c",
+            "user.email=bot@yuantuan",
+            "-c",
+            "user.name=yuantuan-backup",
+            "commit",
+            "-m",
+            &format!("backup {name}"),
+        ],
+    )
+    .await?;
     run_git(&repo_dir, &["push"]).await?;
     Ok(())
 }
@@ -283,7 +304,11 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
         .context("git 命令启动失败")?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        bail!("git {:?} 失败：{}", args, &stderr[..stderr.floor_char_boundary(200)]);
+        bail!(
+            "git {:?} 失败：{}",
+            args,
+            &stderr[..stderr.floor_char_boundary(200)]
+        );
     }
     Ok(())
 }

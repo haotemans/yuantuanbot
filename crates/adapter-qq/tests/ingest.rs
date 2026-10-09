@@ -4,18 +4,20 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use yuantuan_adapter_qq::{spawn, NapcatConfig};
 use yuantuan_core::db;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{spawn_tracer, EventBus};
 use yuantuan_core::prefilter::SelfMsgIds;
 
 const SELF_QQ: u64 = 10001;
 
-fn temp_db() -> PathBuf {
+async fn temp_db() -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
         + (std::process::id() as u128)
@@ -23,8 +25,8 @@ fn temp_db() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("yt-adapter-test-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("yuantuan.db");
-    let mut conn = db::connect(&db).unwrap();
-    db::migrate(&mut conn).unwrap();
+    let mut conn = db::connect(&db).await.unwrap();
+    db::migrate(&mut conn).await.unwrap();
     db
 }
 
@@ -104,7 +106,7 @@ async fn mock_napcat(port: u16) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ingest_group_and_private_messages() {
-    let db_path = temp_db();
+    let db_path = temp_db().await;
     let port = free_port();
     let server = tokio::spawn(mock_napcat(port));
 
@@ -123,12 +125,22 @@ async fn ingest_group_and_private_messages() {
     // 轮询等待摄取完成（最多 8s）
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
-        let conn = db::connect(&db_path).unwrap();
+        let mut conn = db::connect(&db_path).await.unwrap();
         let msgs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM messages",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
             .unwrap();
         let evs: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM events",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
             .unwrap();
         if msgs == 3 && evs == 3 {
             break;
@@ -141,14 +153,15 @@ async fn ingest_group_and_private_messages() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let conn = db::connect(&db_path).unwrap();
+    let mut conn = db::connect(&db_path).await.unwrap();
     // g1：群文本，名片取 card
     let external: Option<i64> = conn
         .query_row(
             "SELECT external_msg_id FROM messages WHERE msg_id=1",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert!(
         external.is_some(),
@@ -156,9 +169,8 @@ async fn ingest_group_and_private_messages() {
     );
     let (text, chat_type, chat_id, nick, at_me, has_image): (String, String, String, String, i64, i64) =
         conn.query_row(
-            "SELECT text, chat_type, chat_id, nickname, at_me, has_image FROM messages WHERE msg_id = 1",
-            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-        ).unwrap();
+            "SELECT text, chat_type, chat_id, nickname, at_me, has_image FROM messages WHERE msg_id = 1", yuantuan_core::db::params![], |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?, r.try_get(4)?, r.try_get(5)?)),
+        ).await.unwrap();
     assert_eq!(
         (
             text.as_str(),
@@ -175,9 +187,10 @@ async fn ingest_group_and_private_messages() {
     let (mentions, at_me2, nick2): (String, i64, String) = conn
         .query_row(
             "SELECT mentions, at_me, nickname FROM messages WHERE msg_id = 2",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(mentions, json!([format!("p_{SELF_QQ}")]).to_string());
     assert_eq!(at_me2, 1);
@@ -187,9 +200,10 @@ async fn ingest_group_and_private_messages() {
     let (chat_id3, chat_type3, has_image3): (String, String, i64) = conn
         .query_row(
             "SELECT chat_id, chat_type, has_image FROM messages WHERE msg_id = 3",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            yuantuan_core::db::params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
         )
+        .await
         .unwrap();
     assert_eq!(
         (chat_id3.as_str(), chat_type3.as_str(), has_image3),
@@ -198,32 +212,43 @@ async fn ingest_group_and_private_messages() {
 
     // 档案：两个发言人建档；QQ 号反查 person 稳定
     let person_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM persons",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(person_count, 2);
     let pid: String = conn
         .query_row(
             "SELECT person_id FROM identities WHERE platform = 'qq' AND platform_uid = '2001'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(pid, "p_2001");
     let card: String = conn
         .query_row(
             "SELECT card FROM member_profiles WHERE chat_id = '555666' AND person_id = 'p_2001'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap();
     assert_eq!(card, "小明");
 
     // 事件：tracer 落库 3 条 MessageReceived，payload 为含 chat_id 的 JSON
     let mut stmt = conn
         .prepare("SELECT kind, payload FROM events ORDER BY id")
+        .await
         .unwrap();
     let rows: Vec<(String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map(yuantuan_core::db::params![], |r| {
+            Ok((r.try_get(0)?, r.try_get(1)?))
+        })
+        .await
         .unwrap()
         .map(|r| r.unwrap())
         .collect();

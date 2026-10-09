@@ -14,7 +14,9 @@ use rand::distr::Alphanumeric;
 use rand::{Rng, RngCore};
 use serde::Deserialize;
 use serde_json::json;
+use sqlx::Row;
 use std::time::{SystemTime, UNIX_EPOCH};
+use yuantuan_core::db::SqliteExt;
 
 #[derive(Deserialize)]
 pub struct LoginReq {
@@ -23,40 +25,43 @@ pub struct LoginReq {
 
 /// 免 token：登录页据此显示真实首启引导状态
 pub async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let need_setup = state
-        .open_db()
+    let need_setup = async {
+        let mut conn = state.open_db().await.ok()?;
+        conn.query_row(
+            "SELECT COUNT(*) > 0 FROM state_kv WHERE key = 'admin_pass_hash'",
+            yuantuan_core::db::params![],
+            |r| r.try_get::<bool, _>(0),
+        )
+        .await
         .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) > 0 FROM state_kv WHERE key = 'admin_pass_hash'",
-                [],
-                |r| r.get::<_, bool>(0),
-            )
-            .ok()
-        })
-        .map(|has| !has)
-        .unwrap_or(false); // 库不可读时按已配置处理，不引导
+    }
+    .await
+    .map(|has| !has)
+    .unwrap_or(false); // 库不可读时按已配置处理，不引导
     Json(json!({ "need_setup": need_setup }))
 }
 
-pub async fn login(
-    State(state): State<AppState>,
-    Json(req): Json<LoginReq>,
-) -> Response {
+pub async fn login(State(state): State<AppState>, Json(req): Json<LoginReq>) -> Response {
     if req.password.is_empty() {
         return err(StatusCode::BAD_REQUEST, "password 不能为空");
     }
 
-    let conn = match state.open_db() {
+    let mut conn = match state.open_db().await {
         Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("数据库打开失败: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("数据库打开失败: {e}"),
+            )
+        }
     };
     let stored: Option<String> = conn
         .query_row(
             "SELECT value FROM state_kv WHERE key = 'admin_pass_hash'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .ok();
 
     match stored {
@@ -85,8 +90,8 @@ pub async fn login(
             let now = epoch_secs();
             if let Err(e) = conn.execute(
                 "INSERT INTO state_kv(key, value, updated_at) VALUES ('admin_pass_hash', ?1, ?2)",
-                rusqlite::params![hash, now],
-            ) {
+                yuantuan_core::db::params![hash, now],
+            ).await {
                 return err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("写入管理员密码失败: {e}"),
@@ -138,11 +143,7 @@ fn epoch_secs() -> i64 {
 }
 
 /// /api/*（login 除外）统一过 Bearer token 校验
-pub async fn require_session(
-    State(state): State<AppState>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn require_session(State(state): State<AppState>, req: Request, next: Next) -> Response {
     let token = req
         .headers()
         .get(header::AUTHORIZATION)

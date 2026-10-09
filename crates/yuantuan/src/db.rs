@@ -1,8 +1,8 @@
 //! data/ 目录初始化与数据库打开（迁移与连接实现在 yuantuan_core::db）。
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
 use std::path::{Path, PathBuf};
+use yuantuan_core::db::Connection;
 
 const SUBDIRS: [&str; 5] = ["memes", "artifacts", "archive", "logs", "backups"];
 
@@ -13,13 +13,12 @@ pub fn init_data_dirs(data_dir: &str) -> Result<PathBuf> {
         .with_context(|| format!("创建数据目录失败: {}", root.display()))?;
     for sub in SUBDIRS {
         let p = root.join(sub);
-        std::fs::create_dir_all(&p)
-            .with_context(|| format!("创建子目录失败: {}", p.display()))?;
+        std::fs::create_dir_all(&p).with_context(|| format!("创建子目录失败: {}", p.display()))?;
     }
     Ok(root.to_path_buf())
 }
 
 /// 打开 data/yuantuan.db（WAL / 外键 / busy_timeout 见 yuantuan_core::db::connect）
-pub fn open(data_dir: &str) -> Result<Connection> {
-    yuantuan_core::db::connect(&Path::new(data_dir).join("yuantuan.db"))
+pub async fn open(data_dir: &str) -> Result<Connection> {
+    yuantuan_core::db::connect(&Path::new(data_dir).join("yuantuan.db")).await
 }

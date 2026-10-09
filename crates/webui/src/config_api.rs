@@ -12,11 +12,14 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
+use yuantuan_core::db::SqliteExt;
 
 /// 掩码的键名（大小写不敏感）
 const MASK_KEYS: [&str; 4] = ["token", "api_key", "password", "secret"];
 
-pub async fn get_config(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub async fn get_config(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let config = read_toml_as_json(&state.extras.config_path)
         .map(masked)
         .unwrap_or_else(|| json!({}));
@@ -28,9 +31,14 @@ pub async fn get_config(State(state): State<AppState>) -> Result<Json<Value>, (S
         if let (Some(out), Some(src)) = (providers.get_mut("provider"), map.get("provider")) {
             if let (Some(out_tbl), Some(src_tbl)) = (out.as_object_mut(), src.as_object()) {
                 for (name, src_v) in src_tbl {
-                    let env_name = src_v.get("api_key_env").and_then(|e| e.as_str()).unwrap_or("");
+                    let env_name = src_v
+                        .get("api_key_env")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("");
                     let set = !env_name.is_empty()
-                        && std::env::var(env_name).map(|v| !v.is_empty()).unwrap_or(false);
+                        && std::env::var(env_name)
+                            .map(|v| !v.is_empty())
+                            .unwrap_or(false);
                     if let Some(o) = out_tbl.get_mut(name).and_then(|v| v.as_object_mut()) {
                         o.insert("api_key_present".into(), json!(set));
                     }
@@ -103,9 +111,15 @@ pub struct WriteBody {
     providers: Option<Value>,
 }
 
-pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBody>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+pub async fn post_config(
+    State(state): State<AppState>,
+    Json(body): Json<WriteBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if body.config.is_none() && body.providers.is_none() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({ "error": "config/providers 至少给一个" }))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "config/providers 至少给一个" })),
+        ));
     }
     let mut applied: Vec<String> = Vec::new();
     let mut requires_restart: Vec<String> = Vec::new();
@@ -118,13 +132,26 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         let orig = read_toml_as_json(&state.extras.config_path).unwrap_or_else(|| json!({}));
         unmask_in_place(&mut cfg_clean, &orig);
         let toml_text = to_toml_text(&cfg_clean)?;
-        let back: toml::Value = toml::from_str(&toml_text)
-            .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("config TOML 回读解析失败: {e}") }))))?;
+        let back: toml::Value = toml::from_str(&toml_text).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("config TOML 回读解析失败: {e}") })),
+            )
+        })?;
         if let Some(sandbox) = cfg_clean.get("sandbox") {
-            let sandbox: yuantuan_core::tools::sandbox::SandboxConfig = serde_json::from_value(sandbox.clone())
-                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("sandbox 配置错误: {e}")}))))?;
-            sandbox.validate()
-                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+            let sandbox: yuantuan_core::tools::sandbox::SandboxConfig =
+                serde_json::from_value(sandbox.clone()).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("sandbox 配置错误: {e}")})),
+                    )
+                })?;
+            sandbox.validate().map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+            })?;
         }
         if cfg_clean.get("sandbox") != orig.get("sandbox") {
             requires_restart.push("sandbox 开发沙箱（重启生效）".into());
@@ -136,9 +163,18 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         if let Some(pf) = back.get("prefilter") {
             let d = yuantuan_core::prefilter::Config::default();
             let mut slot = state.extras.prefilter_slot.write().unwrap();
-            slot.window_secs = pf.get("window_secs").and_then(|v| v.as_integer()).unwrap_or(d.window_secs);
-            slot.self_msg_cap = pf.get("self_msg_cap").and_then(|v| v.as_integer()).unwrap_or(d.self_msg_cap);
-            slot.decision_cost_per_min = pf.get("decision_cost_per_min").and_then(|v| v.as_integer()).unwrap_or(d.decision_cost_per_min);
+            slot.window_secs = pf
+                .get("window_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(d.window_secs);
+            slot.self_msg_cap = pf
+                .get("self_msg_cap")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(d.self_msg_cap);
+            slot.decision_cost_per_min = pf
+                .get("decision_cost_per_min")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(d.decision_cost_per_min);
             applied.push("prefilter 节流阈值+成本闸热应用".into());
         }
 
@@ -146,16 +182,25 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         if let Some(rp) = back.get("reply") {
             let d = yuantuan_core::reply_engine::ReplyCfg::default();
             let mut slot = state.extras.reply_slot.write().unwrap();
-            slot.first_delay_min_ms = as_u64(rp, "first_delay_min_ms").unwrap_or(d.first_delay_min_ms);
-            slot.first_delay_max_ms = as_u64(rp, "first_delay_max_ms").unwrap_or(d.first_delay_max_ms);
+            slot.first_delay_min_ms =
+                as_u64(rp, "first_delay_min_ms").unwrap_or(d.first_delay_min_ms);
+            slot.first_delay_max_ms =
+                as_u64(rp, "first_delay_max_ms").unwrap_or(d.first_delay_max_ms);
             slot.base_delay_ms = as_u64(rp, "base_delay_ms").unwrap_or(d.base_delay_ms);
             slot.per_char_ms = as_u64(rp, "per_char_ms").unwrap_or(d.per_char_ms);
-            slot.jitter_ratio = rp.get("jitter_ratio").and_then(|v| v.as_float()).unwrap_or(d.jitter_ratio);
+            slot.jitter_ratio = rp
+                .get("jitter_ratio")
+                .and_then(|v| v.as_float())
+                .unwrap_or(d.jitter_ratio);
             slot.min_delay_ms = as_u64(rp, "min_delay_ms").unwrap_or(d.min_delay_ms);
             slot.max_delay_ms = as_u64(rp, "max_delay_ms").unwrap_or(d.max_delay_ms);
             slot.total_budget_ms = as_u64(rp, "total_budget_ms").unwrap_or(d.total_budget_ms);
-            slot.bubble_cap = as_u64(rp, "bubble_cap").map(|n| n as usize).unwrap_or(d.bubble_cap);
-            slot.bubble_char_cap = as_u64(rp, "bubble_char_cap").map(|n| n as usize).unwrap_or(d.bubble_char_cap);
+            slot.bubble_cap = as_u64(rp, "bubble_cap")
+                .map(|n| n as usize)
+                .unwrap_or(d.bubble_cap);
+            slot.bubble_char_cap = as_u64(rp, "bubble_char_cap")
+                .map(|n| n as usize)
+                .unwrap_or(d.bubble_char_cap);
             applied.push("reply 回复形态参数热应用".into());
         }
 
@@ -163,9 +208,13 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         if let Some(cx) = back.get("context") {
             let d = yuantuan_core::context_builder::ContextCfg::default();
             let mut slot = state.extras.ctx_slot.write().unwrap();
-            slot.budget_chars = as_u64(cx, "budget_chars").map(|n| n as usize).unwrap_or(d.budget_chars);
+            slot.budget_chars = as_u64(cx, "budget_chars")
+                .map(|n| n as usize)
+                .unwrap_or(d.budget_chars);
             slot.k_init = as_u64(cx, "k").map(|n| n as usize).unwrap_or(d.k_init);
-            slot.roster_mem_per = as_u64(cx, "roster_mem_per").map(|n| n as usize).unwrap_or(d.roster_mem_per);
+            slot.roster_mem_per = as_u64(cx, "roster_mem_per")
+                .map(|n| n as usize)
+                .unwrap_or(d.roster_mem_per);
             applied.push("context 上下文预算热应用".into());
         }
 
@@ -182,7 +231,9 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
             let mut applied_any = false;
             if let Some(cap) = pp.get("per_chat_queue_cap").and_then(|v| v.as_integer()) {
                 *state.extras.per_chat_cap.write().unwrap() = (cap.max(1)) as usize;
-                applied.push(format!("pipeline.per_chat_queue_cap 热应用为 {cap}(仅影响新 chat worker)"));
+                applied.push(format!(
+                    "pipeline.per_chat_queue_cap 热应用为 {cap}(仅影响新 chat worker)"
+                ));
                 applied_any = true;
             }
             if let Some(cap) = pp.get("self_msg_ids_cap").and_then(|v| v.as_integer()) {
@@ -190,10 +241,15 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
                 applied.push(format!("pipeline.self_msg_ids_cap 热应用为 {cap}"));
                 applied_any = true;
             }
-            if let Some(cpm) = pp.get("decision_cost_per_min_init").and_then(|v| v.as_integer()) {
+            if let Some(cpm) = pp
+                .get("decision_cost_per_min_init")
+                .and_then(|v| v.as_integer())
+            {
                 if let Some(gw) = state.extras.llm_slot.read().unwrap().as_ref() {
                     gw.set_cost_per_min((cpm.max(1)) as usize);
-                    applied.push(format!("pipeline.decision_cost_per_min_init 热应用为 {cpm}"));
+                    applied.push(format!(
+                        "pipeline.decision_cost_per_min_init 热应用为 {cpm}"
+                    ));
                     applied_any = true;
                 }
             }
@@ -210,7 +266,10 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
                 .and_then(|v| v.as_str())
                 .unwrap_or("03:00")
                 .to_string();
-            let run_on_startup = cs.get("run_on_startup").and_then(|v| v.as_bool()).unwrap_or(false);
+            let run_on_startup = cs
+                .get("run_on_startup")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if let Some(old) = state.extras.consolidation.lock().unwrap().take() {
                 old.abort();
             }
@@ -221,7 +280,11 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
                         llm: state.extras.llm_slot.read().unwrap().clone(),
                         bus: state.extras.bus.clone(),
                         self_qq: state.extras.self_qq.clone(),
-                        cfg: yuantuan_core::consolidation::ConsolidationCfg { enabled, daily_time, run_on_startup },
+                        cfg: yuantuan_core::consolidation::ConsolidationCfg {
+                            enabled,
+                            daily_time,
+                            run_on_startup,
+                        },
                     },
                 );
                 *state.extras.consolidation.lock().unwrap() = Some(h);
@@ -244,7 +307,8 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
                 applied.push("napcat token 热应用（下次 NapCat 拨入即生效）".into());
             }
             if nap.get("listen_addr").is_some() || nap.get("enabled").is_some() {
-                requires_restart.push("napcat listen_addr/enabled（重启生效；token 为热应用）".into());
+                requires_restart
+                    .push("napcat listen_addr/enabled（重启生效；token 为热应用）".into());
             }
         }
         if back.get("webui").is_some() {
@@ -263,13 +327,26 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
             let repo_url = bk_cfg.get("repo_url").and_then(|v| v.as_str());
             let pat_env = bk_cfg.get("pat_env").and_then(|v| v.as_str());
             let daily_time = bk_cfg.get("daily_time").and_then(|v| v.as_str());
-            let keep_days = bk_cfg.get("keep_days").and_then(|v| v.as_integer()).map(|n| n as i64);
+            let keep_days = bk_cfg
+                .get("keep_days")
+                .and_then(|v| v.as_integer())
+                .map(|n| n as i64);
             let mut slot = state.extras.backup_cfg.write().unwrap();
-            if let Some(v) = enabled { slot.enabled = v; }
-            if let Some(v) = repo_url { slot.repo_url = v.to_string(); }
-            if let Some(v) = pat_env { slot.pat_env = v.to_string(); }
-            if let Some(v) = daily_time { slot.daily_time = v.to_string(); }
-            if let Some(v) = keep_days { slot.keep_days = v; }
+            if let Some(v) = enabled {
+                slot.enabled = v;
+            }
+            if let Some(v) = repo_url {
+                slot.repo_url = v.to_string();
+            }
+            if let Some(v) = pat_env {
+                slot.pat_env = v.to_string();
+            }
+            if let Some(v) = daily_time {
+                slot.daily_time = v.to_string();
+            }
+            if let Some(v) = keep_days {
+                slot.keep_days = v;
+            }
             applied.push("backup 配置热应用（下次定时循环即生效）".into());
         }
     }
@@ -281,7 +358,12 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         std::fs::write(&tmp, &toml_text).map_err(|e| err(&format!("写临时文件失败: {e}")))?;
         let check = yuantuan_core::llm::LlmGateway::load(&tmp);
         let _ = std::fs::remove_file(&tmp);
-        let mut gateway = check.map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("providers.toml 校验失败: {e}") }))))?;
+        let mut gateway = check.map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("providers.toml 校验失败: {e}") })),
+            )
+        })?;
         std::fs::write(&state.extras.providers_path, &toml_text)
             .map_err(|e| err(&format!("写 providers.toml 失败: {e}")))?;
         // 热重建也要带 usage sink，否则换槽后 token 统计断掉
@@ -289,8 +371,8 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         gateway.set_usage_sink(std::sync::Arc::new(move |rec: yuantuan_core::llm::LlmUsageRecord| {
             let db = db.clone();
             tokio::spawn(async move {
-                let _ = tokio::task::spawn_blocking(move || {
-                    let conn = yuantuan_core::db::connect(&db).ok()?;
+                let _ = (async move {
+                    let mut conn = yuantuan_core::db::connect(&db).await.ok()?;
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -298,13 +380,13 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
                     conn.execute(
                         "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![
+                        yuantuan_core::db::params![
                             now, rec.role.to_string(), rec.model,
                             rec.usage.prompt_tokens as i64,
                             rec.usage.completion_tokens as i64,
                             rec.usage.total_tokens as i64,
                         ],
-                    ).ok()
+                    ).await.ok()
                 }).await;
             });
         }));
@@ -312,28 +394,50 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         applied.push("LLM Provider 重建热应用".into());
     }
 
-    state.extras.bus.publish(yuantuan_core::event::Event::ConfigReloaded);
+    state
+        .extras
+        .bus
+        .publish(yuantuan_core::event::Event::ConfigReloaded);
     tracing::info!(applied = ?applied, requires_restart = ?requires_restart, "配置写回并热应用");
-    Ok(Json(json!({ "ok": true, "applied": applied, "requires_restart": requires_restart })))
+    Ok(Json(
+        json!({ "ok": true, "applied": applied, "requires_restart": requires_restart }),
+    ))
 }
 
 fn as_u64(tbl: &toml::Value, key: &str) -> Option<u64> {
-    tbl.get(key).and_then(|v| v.as_integer()).and_then(|n| u64::try_from(n).ok())
+    tbl.get(key)
+        .and_then(|v| v.as_integer())
+        .and_then(|n| u64::try_from(n).ok())
 }
 
 /// JSON → TOML 文本；写前须保证能反向解析
 fn to_toml_text(v: &Value) -> Result<String, (StatusCode, Json<Value>)> {
-    let tv: toml::Value = serde_json::from_value(v.clone())
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("JSON 结构无法映射到 TOML: {e}") }))))?;
-    let text = toml::to_string_pretty(&tv)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("TOML 序列化失败: {e}") }))))?;
-    toml::from_str::<toml::Value>(&text)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("TOML 回读校验失败: {e}") }))))?;
+    let tv: toml::Value = serde_json::from_value(v.clone()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("JSON 结构无法映射到 TOML: {e}") })),
+        )
+    })?;
+    let text = toml::to_string_pretty(&tv).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("TOML 序列化失败: {e}") })),
+        )
+    })?;
+    toml::from_str::<toml::Value>(&text).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("TOML 回读校验失败: {e}") })),
+        )
+    })?;
     Ok(text)
 }
 
 fn err(msg: &str) -> (StatusCode, Json<Value>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg })))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": msg })),
+    )
 }
 
 /// G007：面板「保存并重启」——spawn 新 yuantuan 进程接管（继承环境变量与 cwd），自己 exit(0)。
@@ -374,7 +478,10 @@ pub async fn restart(State(_state): State<AppState>) -> (StatusCode, Json<Value>
             .spawn()
         {
             Ok(child) => {
-                tracing::info!(pid = child.id(), "新进程已拉起（延迟 1200ms 启动），本进程即将退出");
+                tracing::info!(
+                    pid = child.id(),
+                    "新进程已拉起（延迟 1200ms 启动），本进程即将退出"
+                );
             }
             Err(e) => {
                 tracing::error!(error = %e, "新进程拉起失败，本进程不退出（保持运行）");
@@ -383,5 +490,8 @@ pub async fn restart(State(_state): State<AppState>) -> (StatusCode, Json<Value>
         }
         std::process::exit(0);
     });
-    (StatusCode::ACCEPTED, Json(json!({ "ok": true, "msg": "重启中，500ms 后新进程接管" })))
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "ok": true, "msg": "重启中，500ms 后新进程接管" })),
+    )
 }

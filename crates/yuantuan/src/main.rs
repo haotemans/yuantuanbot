@@ -1,5 +1,7 @@
 //! 云团装配入口：配置 → data 目录 → SQLite 迁移 → Event Bus / tracer → adapter-qq → WebUI。
 
+use sqlx::Row;
+use yuantuan_core::db::SqliteExt;
 mod config;
 mod db;
 mod shutdown;
@@ -46,21 +48,23 @@ async fn main() -> Result<()> {
     }
 
     // c. SQLite（WAL）+ 迁移
-    let mut conn = db::open(&cfg.data.dir)?;
+    let mut conn = db::open(&cfg.data.dir).await?;
+    let database = conn.database();
     info!(db = %data_root.join("yuantuan.db").display(), "SQLite 已打开（WAL）");
-    yuantuan_core::db::migrate(&mut conn)?;
-    if yuantuan_core::context_builder::ensure_default_persona(&conn)? {
+    yuantuan_core::db::migrate(&mut conn).await?;
+    if yuantuan_core::context_builder::ensure_default_persona(&mut conn).await? {
         info!("已初始化默认人格，可在面板中编辑");
     }
 
-    let tables = yuantuan_core::db::list_tables(&conn)?;
+    let tables = yuantuan_core::db::list_tables(&mut conn).await?;
     info!(count = tables.len(), "迁移完成，库内表清单");
     let has_admin: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 FROM state_kv WHERE key = 'admin_pass_hash'",
-            [],
-            |r| r.get(0),
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap_or(false);
     if has_admin {
         info!("管理员密码已配置");
@@ -73,8 +77,13 @@ async fn main() -> Result<()> {
 
     // c2. meme 入库扫描（md5/dHash 去重）
     let memes_dir = data_root.join("memes");
-    match yuantuan_core::meme::scan_and_ingest(&memes_dir, &db_path) {
-        Ok(s) => info!(scanned = s.scanned, added = s.added, skipped_dup = s.skipped_dup, "meme 库扫描完成"),
+    match yuantuan_core::meme::scan_and_ingest(&memes_dir, &db_path).await {
+        Ok(s) => info!(
+            scanned = s.scanned,
+            added = s.added,
+            skipped_dup = s.skipped_dup,
+            "meme 库扫描完成"
+        ),
         Err(e) => tracing::warn!(error = %e, "meme 库扫描失败（不阻断启动）"),
     }
 
@@ -84,7 +93,9 @@ async fn main() -> Result<()> {
     {
         let bus2 = bus.clone();
         let db2 = db_path.clone();
-        supervisor.spawn("tracer", move || yuantuan_core::event::spawn_tracer(&bus2, db2.clone()));
+        supervisor.spawn("tracer", move || {
+            yuantuan_core::event::spawn_tracer(&bus2, db2.clone())
+        });
     }
 
     // e. LLM Provider（providers.toml 缺失则生成模板；角色未配置则管线降级 ignore，不崩）
@@ -112,8 +123,8 @@ async fn main() -> Result<()> {
     // g. 回复形态引擎（per-chat 发送队列；adapter 未接入时发送函数恒报错、reply 记事件跳过）
     //    mood 单实例：Decision 写回、引擎 ::meme 映射共读；参数走热应用槽
     let mood = yuantuan_core::state::MoodState::default();
-    let reply_slot: yuantuan_core::reply_engine::SharedReplyCfg =
-        std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg {
+    let reply_slot: yuantuan_core::reply_engine::SharedReplyCfg = std::sync::Arc::new(
+        std::sync::RwLock::new(yuantuan_core::reply_engine::ReplyCfg {
             first_delay_min_ms: cfg.reply.first_delay_min_ms,
             first_delay_max_ms: cfg.reply.first_delay_max_ms,
             base_delay_ms: cfg.reply.base_delay_ms,
@@ -124,21 +135,21 @@ async fn main() -> Result<()> {
             total_budget_ms: cfg.reply.total_budget_ms,
             bubble_cap: cfg.reply.bubble_cap,
             bubble_char_cap: cfg.reply.bubble_char_cap,
-        }));
-    let ctx_slot: yuantuan_core::context_builder::SharedContextCfg =
-        std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg {
+        }),
+    );
+    let ctx_slot: yuantuan_core::context_builder::SharedContextCfg = std::sync::Arc::new(
+        std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg {
             budget_chars: cfg.context.budget_chars,
             k_init: cfg.context.k,
             roster_mem_per: cfg.context.roster_mem_per,
-        }));
+        }),
+    );
     let send = adapter
         .as_ref()
         .map(|h| yuantuan_adapter_qq::send_fn(h.clone()))
         .unwrap_or_else(|| {
             std::sync::Arc::new(|_req| {
-                Box::pin(async move {
-                    anyhow::bail!("adapter 未接入（[napcat].enabled=false）")
-                })
+                Box::pin(async move { anyhow::bail!("adapter 未接入（[napcat].enabled=false）") })
                     as std::pin::Pin<
                         Box<
                             dyn std::future::Future<Output = anyhow::Result<serde_json::Value>>
@@ -197,14 +208,14 @@ async fn main() -> Result<()> {
 
     // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply/send_meme）
     //    llm/prefilter/reply/context 走共享槽：WebUI config 写回即热应用
-    let llm_slot: yuantuan_core::bot::SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(llm.clone()));
-    let prefilter_slot: yuantuan_core::bot::SharedPrefilter = std::sync::Arc::new(std::sync::RwLock::new(
-        yuantuan_core::prefilter::Config {
+    let llm_slot: yuantuan_core::bot::SharedLlm =
+        std::sync::Arc::new(std::sync::RwLock::new(llm.clone()));
+    let prefilter_slot: yuantuan_core::bot::SharedPrefilter =
+        std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config {
             window_secs: cfg.prefilter.window_secs,
             self_msg_cap: cfg.prefilter.self_msg_cap,
             decision_cost_per_min: cfg.prefilter.decision_cost_per_min,
-        },
-    ));
+        }));
     // G008 调优参数入槽
     let per_chat_cap_slot: yuantuan_core::bot::SharedPerChatCap =
         std::sync::Arc::new(std::sync::RwLock::new(cfg.pipeline.per_chat_queue_cap));
@@ -236,7 +247,7 @@ async fn main() -> Result<()> {
             data_dir: data_root.clone(),
             bus: bus.clone(),
             reply_engine: Some(reply_engine.clone()),
-            registry: load_media_registry(&db_path),
+            registry: load_media_registry(&db_path).await,
             // Q009 admin 列表：从 config.toml [media].admin_qq 读（QQ 号 → "p_<qq>" 形式比对）
             self_pid_admin: {
                 let admins = cfg.media.admin_qq.clone();
@@ -258,7 +269,7 @@ async fn main() -> Result<()> {
         result = yuantuan_core::bot::replay_pending(&pipeline_deps) => result,
         signal = shutdown_signal.wait() => {
             info!(signal = signal?, "启动回放期间收到停止信号");
-            return finish_shutdown(&db_path, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await;
+            return finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await;
         }
     };
     match replay {
@@ -268,7 +279,9 @@ async fn main() -> Result<()> {
     }
     {
         let deps = pipeline_deps.clone();
-        supervisor.spawn("pipeline", move || yuantuan_core::bot::spawn_pipeline(deps.clone()));
+        supervisor.spawn("pipeline", move || {
+            yuantuan_core::bot::spawn_pipeline(deps.clone())
+        });
     }
 
     // h'''. Task runner（Q-A01 同步工具循环）：订阅 TaskCreated → 每任务一个执行协程
@@ -342,10 +355,8 @@ async fn main() -> Result<()> {
     {
         *backup_cfg_slot.write().unwrap() = cfg.backup.clone();
     }
-    let _backup_scheduler = yuantuan_core::backup::spawn_daily_scheduler(
-        backup_cfg_slot.clone(),
-        data_root.clone(),
-    );
+    let _backup_scheduler =
+        yuantuan_core::backup::spawn_daily_scheduler(backup_cfg_slot.clone(), data_root.clone());
 
     // f. WebUI（阻塞至进程结束）
     info!("云团骨架启动成功");
@@ -376,8 +387,10 @@ async fn main() -> Result<()> {
     {
         // 服务器：banner 里给 ssh 端口转发提示，用户自己挑访问方式
         if cfg.webui.host == "127.0.0.1" {
-            info!("  远程访问：ssh -L {}:127.0.0.1:{} user@本机，浏览器开 http://127.0.0.1:{}/",
-                cfg.webui.port, cfg.webui.port, cfg.webui.port);
+            info!(
+                "  远程访问：ssh -L {}:127.0.0.1:{} user@本机，浏览器开 http://127.0.0.1:{}/",
+                cfg.webui.port, cfg.webui.port, cfg.webui.port
+            );
         }
     }
     let extras = yuantuan_webui::Extras {
@@ -412,7 +425,8 @@ async fn main() -> Result<()> {
         config_path: std::path::PathBuf::from("config.toml"),
         providers_path: std::path::PathBuf::from("providers.toml"),
     };
-    let webui_serve = yuantuan_webui::serve(db_path.clone(), &cfg.webui.host, cfg.webui.port, extras);
+    let webui_serve =
+        yuantuan_webui::serve(db_path.clone(), &cfg.webui.host, cfg.webui.port, extras);
 
     // 同时接收 Docker SIGTERM 与终端 SIGINT；信号处理在启动回放前已注册。
     tokio::select! {
@@ -424,35 +438,54 @@ async fn main() -> Result<()> {
             info!(signal = signal?, "收到停止信号，开始优雅停机");
             _backup_scheduler.abort();
             if let Some(handle) = consolidation_handle.lock().unwrap().take() { handle.abort(); }
-            finish_shutdown(&db_path, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await
+            finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await
         }
     }
 }
 
 async fn finish_shutdown(
     db_path: &std::path::Path,
+    database: &yuantuan_core::db::Database,
     adapter: Option<&yuantuan_adapter_qq::AdapterHandle>,
     reply: &yuantuan_core::reply_engine::EngineHandle,
     supervisor: &yuantuan_core::supervisor::Supervisor,
     mcp: &yuantuan_core::mcp::McpManager,
 ) -> Result<()> {
     use std::time::Duration;
-    if let Some(adapter) = adapter { adapter.stop_receiving(); }
-    for name in ["pipeline", "task_runner", "steal_listener"] { supervisor.stop(name); }
+    if let Some(adapter) = adapter {
+        adapter.stop_receiving();
+    }
+    for name in ["pipeline", "task_runner", "steal_listener"] {
+        supervisor.stop(name);
+    }
     tokio::task::yield_now().await;
     let drained = reply.shutdown(Duration::from_secs(5)).await;
     info!(drained, "发送队列关闭");
     let _ = tokio::time::timeout(Duration::from_secs(1), mcp.shutdown_all()).await;
     supervisor.stop_all();
     let db_path = db_path.to_owned();
-    let result = tokio::task::spawn_blocking(move || -> Result<(i64, i64, i64)> {
-        let conn = rusqlite::Connection::open(db_path)?;
-        conn.busy_timeout(Duration::from_millis(500))?;
-        Ok(conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
-    }).await;
+    let checkpoint = async move {
+        let mut conn = yuantuan_core::db::Connection::open(db_path).await?;
+        conn.execute_batch("PRAGMA busy_timeout=500").await?;
+        Ok::<(i64, i64, i64), anyhow::Error>(
+            conn.query_row(
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+                yuantuan_core::db::params![],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
+            )
+            .await?,
+        )
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), checkpoint).await;
     match result {
         Ok(Ok((0, _, _))) => info!("WAL checkpoint 完成"),
         result => warn!(?result, "WAL checkpoint 未完成，下次启动由 SQLite 恢复"),
+    }
+    if tokio::time::timeout(Duration::from_secs(1), database.close())
+        .await
+        .is_err()
+    {
+        warn!("SQLx 连接池关闭超时，剩余连接随进程退出释放");
     }
     info!("优雅停机完成");
     Ok(())
@@ -497,14 +530,16 @@ fn load_enabled_plugins(
 /// - 按 endpoint 形态实例化对应适配器（当前仅 NAI；openai_compat/gemini/xai 后续按需扩展）
 /// - api_key_env 读环境变量；缺失则跳过该 provider 并告警
 /// - 失败行不阻断启动，只 warn
-fn load_media_registry(db_path: &std::path::Path) -> Arc<RwLock<HashMap<String, Arc<dyn yuantuan_core::tools::media::provider::MediaProvider>>>> {
-    use yuantuan_core::tools::media::provider::{EndpointStyle, MediaProvider, ProviderCfg};
+async fn load_media_registry(
+    db_path: &std::path::Path,
+) -> Arc<RwLock<HashMap<String, Arc<dyn yuantuan_core::tools::media::provider::MediaProvider>>>> {
     use yuantuan_core::tools::media::provider::nai::NaiProvider;
+    use yuantuan_core::tools::media::provider::{EndpointStyle, MediaProvider, ProviderCfg};
 
     let registry: HashMap<String, Arc<dyn MediaProvider>> = HashMap::new();
     let registry = Arc::new(RwLock::new(registry));
 
-    let conn = match yuantuan_core::db::connect(db_path) {
+    let mut conn = match yuantuan_core::db::connect(db_path).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "media_providers 装配：打开 db 失败，registry 为空");
@@ -513,21 +548,23 @@ fn load_media_registry(db_path: &std::path::Path) -> Arc<RwLock<HashMap<String, 
     };
     let mut stmt = match conn.prepare(
         "SELECT name, base_url, api_key_env, default_endpoint FROM media_providers WHERE enabled = 1"
-    ) {
+    ).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "media_providers 装配：prepare 失败，registry 为空");
             return registry;
         }
     };
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    });
+    let rows = stmt
+        .query_map(yuantuan_core::db::params![], |r| {
+            Ok((
+                r.try_get::<String, _>(0)?,
+                r.try_get::<String, _>(1)?,
+                r.try_get::<String, _>(2)?,
+                r.try_get::<String, _>(3)?,
+            ))
+        })
+        .await;
     let rows: Vec<_> = match rows {
         Ok(rs) => rs.filter_map(|r| r.ok()).collect(),
         Err(e) => {
@@ -563,7 +600,9 @@ fn load_media_registry(db_path: &std::path::Path) -> Arc<RwLock<HashMap<String, 
             default_endpoint: endpoint,
         };
         let provider: Arc<dyn MediaProvider> = match endpoint {
-            EndpointStyle::NaiNative | EndpointStyle::OpenaiCompat => Arc::new(NaiProvider::new(cfg)),
+            EndpointStyle::NaiNative | EndpointStyle::OpenaiCompat => {
+                Arc::new(NaiProvider::new(cfg))
+            }
             EndpointStyle::Gemini | EndpointStyle::Xai => {
                 tracing::warn!(provider = %name, endpoint = ?endpoint, "暂不支持该 endpoint，跳过");
                 continue;
@@ -594,8 +633,8 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
             g.set_usage_sink(std::sync::Arc::new(move |rec: yuantuan_core::llm::LlmUsageRecord| {
                 let db = db.clone();
                 tokio::spawn(async move {
-                    let res = tokio::task::spawn_blocking(move || {
-                        let conn = yuantuan_core::db::connect(&db).ok()?;
+                    let res = (async move {
+                        let mut conn = yuantuan_core::db::connect(&db).await.ok()?;
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
@@ -603,7 +642,7 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
                         conn.execute(
                             "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                            rusqlite::params![
+                            yuantuan_core::db::params![
                                 now,
                                 rec.role.to_string(),
                                 rec.model,
@@ -611,10 +650,10 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
                                 rec.usage.completion_tokens as i64,
                                 rec.usage.total_tokens as i64,
                             ],
-                        ).ok()
+                        ).await.ok()
                     }).await;
-                    if let Err(e) = res {
-                        tracing::debug!(error = %e, "llm_usage 落库任务失败");
+                    if res.is_none() {
+                        tracing::debug!("llm_usage 落库任务失败");
                     }
                 });
             }));

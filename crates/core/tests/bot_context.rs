@@ -1,5 +1,7 @@
-use rusqlite::params;
 use serde_json::Value;
+use sqlx::Row;
+use yuantuan_core::db::params;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::{
     context_builder::{capture_reply_snapshot, render_bot_context, ContextCfg},
     db,
@@ -13,7 +15,7 @@ struct Rig {
     path: std::path::PathBuf,
 }
 impl Rig {
-    fn new() -> Self {
+    async fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "yt-context-{}-{:016x}",
             std::process::id(),
@@ -21,10 +23,12 @@ impl Rig {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.db");
-        db::migrate(&mut db::connect(&path).unwrap()).unwrap();
+        db::migrate(&mut db::connect(&path).await.unwrap())
+            .await
+            .unwrap();
         Self { dir, path }
     }
-    fn message(
+    async fn message(
         &self,
         person: &str,
         chat: &str,
@@ -32,11 +36,11 @@ impl Rig {
         external: Option<i64>,
         reply: Option<i64>,
     ) -> MessageReceivedPayload {
-        let conn = db::connect(&self.path).unwrap();
-        conn.execute("INSERT OR IGNORE INTO persons(person_id,display_name,first_seen,last_seen) VALUES (?1,'同名',1,1)",[person]).unwrap();
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts,external_msg_id,reply_to) VALUES (?1,'group',?2,'同名',?3,100,?4,?5)",params![chat,person,text,external,reply]).unwrap();
+        let mut conn = db::connect(&self.path).await.unwrap();
+        conn.execute("INSERT OR IGNORE INTO persons(person_id,display_name,first_seen,last_seen) VALUES (?1,'同名',1,1)", yuantuan_core::db::params![person]).await.unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts,external_msg_id,reply_to) VALUES (?1,'group',?2,'同名',?3,100,?4,?5)",params![chat,person,text,external,reply]).await.unwrap();
         MessageReceivedPayload {
-            msg_id: conn.last_insert_rowid(),
+            msg_id: conn.last_insert_rowid().await.unwrap(),
             chat_id: chat.into(),
             chat_type: "group".into(),
             sender_pid: person.into(),
@@ -49,10 +53,10 @@ impl Rig {
             ts: 100,
         }
     }
-    fn fact(&self, owner_type: &str, owner: &str, content: &str, time: i64) {
-        db::connect(&self.path).unwrap().execute(
+    async fn fact(&self, owner_type: &str, owner: &str, content: &str, time: i64) {
+        db::connect(&self.path).await.unwrap().execute(
             "INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at) VALUES (?1,?2,?3,'explicit',?4,?4)",params![owner_type,owner,content,time],
-        ).unwrap();
+        ).await.unwrap();
     }
 }
 impl Drop for Rig {
@@ -69,20 +73,38 @@ fn update(message: &MessageReceivedPayload, value: &str) -> ProfileUpdate {
     }
 }
 
-#[test]
-fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
-    let rig = Rig::new();
-    let conn = db::connect(&rig.path).unwrap();
-    assert!(yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
-    assert!(!yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
+#[tokio::test]
+async fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
+    let rig = Rig::new().await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    assert!(
+        yuantuan_core::context_builder::ensure_default_persona(&mut conn)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !yuantuan_core::context_builder::ensure_default_persona(&mut conn)
+            .await
+            .unwrap()
+    );
     conn.execute(
         "UPDATE personality_versions SET content='管理员自定义',active=0",
-        [],
+        yuantuan_core::db::params![],
     )
+    .await
     .unwrap();
-    assert!(!yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
+    assert!(
+        !yuantuan_core::context_builder::ensure_default_persona(&mut conn)
+            .await
+            .unwrap()
+    );
     let content: String = conn
-        .query_row("SELECT content FROM personality_versions", [], |r| r.get(0))
+        .query_row(
+            "SELECT content FROM personality_versions",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .unwrap();
     assert_eq!(content, "管理员自定义");
 }
@@ -90,7 +112,7 @@ fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
 #[tokio::test]
 async fn model_cannot_start_tasks_without_a_source_request() {
     use serde_json::json;
-    let rig = Rig::new();
+    let rig = Rig::new().await;
     let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
         assert_eq!(body["tool_choice"],"none");
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
@@ -113,10 +135,11 @@ async fn model_cannot_start_tasks_without_a_source_request() {
         ("有人说：请帮我运行测试", false, "ignore"),
         ("请帮我运行 Python 测试", true, "start_task"),
     ] {
-        let mut msg = rig.message("p_a", "123", text, None, None);
+        let mut msg = rig.message("p_a", "123", text, None, None).await;
         msg.at_me = directed;
-        let snapshot =
-            capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default()).unwrap();
+        let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
+            .await
+            .unwrap();
         let out = yuantuan_core::decision::decide(
             &rig.path,
             &gw,
@@ -134,52 +157,66 @@ async fn model_cannot_start_tasks_without_a_source_request() {
     server.abort();
 }
 
-#[test]
-fn dialogue_links_only_recent_replies_to_the_same_person_and_chat() {
-    let rig = Rig::new();
-    let a = rig.message("p_a", "123", "帮我选语言", None, None);
-    let qa = rig.message("self", "123", "你打算用哪种语言？", Some(901), None);
-    let b = rig.message("p_b", "123", "帮我选框架", None, None);
-    let qb = rig.message("self", "123", "你准备选哪个框架？", Some(902), None);
-    let conn = db::connect(&rig.path).unwrap();
+#[tokio::test]
+async fn dialogue_links_only_recent_replies_to_the_same_person_and_chat() {
+    let rig = Rig::new().await;
+    let a = rig.message("p_a", "123", "帮我选语言", None, None).await;
+    let qa = rig
+        .message("self", "123", "你打算用哪种语言？", Some(901), None)
+        .await;
+    let b = rig.message("p_b", "123", "帮我选框架", None, None).await;
+    let qb = rig
+        .message("self", "123", "你准备选哪个框架？", Some(902), None)
+        .await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
     conn.execute(
         "UPDATE messages SET reply_anchor_id=?1 WHERE msg_id=?2",
         params![a.msg_id, qa.msg_id],
     )
+    .await
     .unwrap();
     conn.execute(
         "UPDATE messages SET reply_anchor_id=?1 WHERE msg_id=?2",
         params![b.msg_id, qb.msg_id],
     )
+    .await
     .unwrap();
-    rig.message("self", "123", "旧消息没有归属不能猜", None, None);
-    let followup = rig.message("p_a", "123", "Python", None, None);
+    rig.message("self", "123", "旧消息没有归属不能猜", None, None)
+        .await;
+    let followup = rig.message("p_a", "123", "Python", None, None).await;
     let snap = capture_reply_snapshot(
         &rig.path,
         &followup,
         followup.msg_id,
         &ContextCfg::default(),
     )
+    .await
     .unwrap();
     assert_eq!(snap.dialogue["last_reply_to_sender"]["msg_id"], qa.msg_id);
     assert_eq!(snap.dialogue["reply_target_person_id"], "p_a");
-    let elsewhere = rig.message("p_a", "456", "Python", None, None);
+    let elsewhere = rig.message("p_a", "456", "Python", None, None).await;
     let snap = capture_reply_snapshot(
         &rig.path,
         &elsewhere,
         elsewhere.msg_id,
         &ContextCfg::default(),
     )
+    .await
     .unwrap();
     assert!(snap.dialogue["last_reply_to_sender"].is_null());
-    conn.execute("UPDATE messages SET ts=-201 WHERE msg_id=?1", [qa.msg_id])
-        .unwrap();
+    conn.execute(
+        "UPDATE messages SET ts=-201 WHERE msg_id=?1",
+        yuantuan_core::db::params![qa.msg_id],
+    )
+    .await
+    .unwrap();
     let snap = capture_reply_snapshot(
         &rig.path,
         &followup,
         followup.msg_id,
         &ContextCfg::default(),
     )
+    .await
     .unwrap();
     assert!(
         snap.dialogue["last_reply_to_sender"].is_null(),
@@ -190,7 +227,7 @@ fn dialogue_links_only_recent_replies_to_the_same_person_and_chat() {
         ("t2", "p_b", "123"),
         ("t3", "p_a", "456"),
     ] {
-        conn.execute("INSERT INTO tasks(task_id,goal,state,budget_max_calls,created_by_pid,chat_id,created_at) VALUES (?1,'进行中的任务','running',10,?2,?3,1)",params![id,person,chat]).unwrap();
+        conn.execute("INSERT INTO tasks(task_id,goal,state,budget_max_calls,created_by_pid,chat_id,created_at) VALUES (?1,'进行中的任务','running',10,?2,?3,1)",params![id,person,chat]).await.unwrap();
     }
     let snap = capture_reply_snapshot(
         &rig.path,
@@ -198,24 +235,27 @@ fn dialogue_links_only_recent_replies_to_the_same_person_and_chat() {
         followup.msg_id,
         &ContextCfg::default(),
     )
+    .await
     .unwrap();
     assert_eq!(snap.active_tasks.len(), 1);
     assert_eq!(snap.active_tasks[0]["task_id"], "t1");
 }
 
-#[test]
-fn participation_load_does_not_mix_private_chat_with_same_group_number() {
-    let rig = Rig::new();
-    let private = rig.message("self", "123", "私聊回复", None, None);
-    let conn = db::connect(&rig.path).unwrap();
+#[tokio::test]
+async fn participation_load_does_not_mix_private_chat_with_same_group_number() {
+    let rig = Rig::new().await;
+    let private = rig.message("self", "123", "私聊回复", None, None).await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
     conn.execute(
         "UPDATE messages SET chat_type='private' WHERE msg_id=?1",
-        [private.msg_id],
+        yuantuan_core::db::params![private.msg_id],
     )
+    .await
     .unwrap();
-    let anchor = rig.message("p_a", "123", "群里消息", None, None);
-    let snap =
-        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default()).unwrap();
+    let anchor = rig.message("p_a", "123", "群里消息", None, None).await;
+    let snap = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
     assert_eq!(snap.scene["my_replies_last_5min"], 0);
     assert_eq!(snap.scene["human_messages_last_30s"], 1);
     assert!(snap.scene["seconds_since_my_reply"].is_null());
@@ -224,17 +264,22 @@ fn participation_load_does_not_mix_private_chat_with_same_group_number() {
 #[tokio::test]
 async fn semantic_evidence_must_survive_decision_context_pruning() {
     use serde_json::json;
-    let rig = Rig::new();
-    let old = rig.message("p_a", "123", "原先的 Docker 问题", None, None);
+    let rig = Rig::new().await;
+    let old = rig
+        .message("p_a", "123", "原先的 Docker 问题", None, None)
+        .await;
     for i in 0..10 {
         rig.fact(
             "person",
             "p_a",
             &format!("Docker {i} {}", "历史资料".repeat(190)),
             i,
-        );
+        )
+        .await;
     }
-    let anchor = rig.message("p_a", "123", "Docker 怎么配置", None, None);
+    let anchor = rig
+        .message("p_a", "123", "Docker 怎么配置", None, None)
+        .await;
     let snapshot = capture_reply_snapshot(
         &rig.path,
         &anchor,
@@ -244,6 +289,7 @@ async fn semantic_evidence_must_survive_decision_context_pruning() {
             ..ContextCfg::default()
         },
     )
+    .await
     .unwrap();
     let app = axum::Router::new().route("/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
@@ -277,120 +323,151 @@ async fn semantic_evidence_must_survive_decision_context_pruning() {
     server.abort();
 }
 
-#[test]
-fn profile_requires_own_exact_evidence_and_new_sources_win() {
-    let rig = Rig::new();
-    let old = rig.message("p_a", "g1", "我长期使用 Rust", Some(900), None);
-    let new = rig.message("p_a", "g2", "我现在长期使用 Python", Some(901), None);
-    let other = rig.message("p_b", "g1", "我长期使用 Java", Some(902), None);
-    let conn = db::connect(&rig.path).unwrap();
+#[tokio::test]
+async fn profile_requires_own_exact_evidence_and_new_sources_win() {
+    let rig = Rig::new().await;
+    let old = rig
+        .message("p_a", "g1", "我长期使用 Rust", Some(900), None)
+        .await;
+    let new = rig
+        .message("p_a", "g2", "我现在长期使用 Python", Some(901), None)
+        .await;
+    let other = rig
+        .message("p_b", "g1", "我长期使用 Java", Some(902), None)
+        .await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
     assert!(memory::update_profile(
-        &conn,
+        &mut conn,
         "p_a",
         "g1",
         old.msg_id,
         old.msg_id,
         &update(&old, "偏好 Rust")
     )
+    .await
     .unwrap());
     assert!(memory::update_profile(
-        &conn,
+        &mut conn,
         "p_a",
         "g2",
         new.msg_id,
         new.msg_id,
         &update(&new, "偏好 Python")
     )
+    .await
     .unwrap());
     assert!(!memory::update_profile(
-        &conn,
+        &mut conn,
         "p_a",
         "g1",
         old.msg_id,
         old.msg_id,
         &update(&old, "偏好 Rust")
     )
+    .await
     .unwrap());
     assert!(memory::update_profile(
-        &conn,
+        &mut conn,
         "p_a",
         "g1",
         1,
         other.msg_id,
         &update(&other, "偏好 Java")
     )
+    .await
     .is_err());
     let mut forged = update(&new, "偏好 Rust");
     forged.evidence_quote = "这句话不存在".into();
-    assert!(memory::update_profile(&conn, "p_a", "g2", 1, other.msg_id, &forged).is_err());
+    assert!(
+        memory::update_profile(&mut conn, "p_a", "g2", 1, other.msg_id, &forged)
+            .await
+            .is_err()
+    );
     assert!(memory::update_profile(
-        &conn,
+        &mut conn,
         "self",
         "g1",
         1,
         other.msg_id,
         &update(&old, "偏好 Rust")
     )
+    .await
     .is_err());
-    let profile = memory::profile(&conn, "p_a", other.msg_id).unwrap();
+    let profile = memory::profile(&mut conn, "p_a", other.msg_id)
+        .await
+        .unwrap();
     assert_eq!(profile.len(), 1);
     assert_eq!(profile[0].content, "偏好 Python");
     assert_eq!(profile[0].source_msg_id, new.msg_id);
-    assert!(memory::profile(&conn, "p_b", other.msg_id)
+    assert!(memory::profile(&mut conn, "p_b", other.msg_id)
+        .await
         .unwrap()
         .is_empty());
     // 无按当时版本重建能力时宁可缺失，不能把未来资料带回旧窗口。
-    assert!(memory::profile(&conn, "p_a", old.msg_id)
+    assert!(memory::profile(&mut conn, "p_a", old.msg_id)
+        .await
         .unwrap()
         .is_empty());
 }
 
-#[test]
-fn renewed_confirmation_blocks_older_contradicting_consolidation() {
-    let rig = Rig::new();
-    let a = rig.message("p_a", "g", "我长期使用 Rust", None, None);
-    let b = rig.message("p_a", "g", "我长期使用 Java", None, None);
-    let c = rig.message("p_a", "g", "我仍然长期使用 Rust", None, None);
-    let conn = db::connect(&rig.path).unwrap();
+#[tokio::test]
+async fn renewed_confirmation_blocks_older_contradicting_consolidation() {
+    let rig = Rig::new().await;
+    let a = rig.message("p_a", "g", "我长期使用 Rust", None, None).await;
+    let b = rig.message("p_a", "g", "我长期使用 Java", None, None).await;
+    let c = rig
+        .message("p_a", "g", "我仍然长期使用 Rust", None, None)
+        .await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
     for msg in [&a, &c] {
         memory::update_profile(
-            &conn,
+            &mut conn,
             "p_a",
             "g",
             msg.msg_id,
             msg.msg_id,
             &update(msg, "偏好 Rust"),
         )
+        .await
         .unwrap();
     }
     assert!(!memory::update_profile(
-        &conn,
+        &mut conn,
         "p_a",
         "g",
         b.msg_id,
         b.msg_id,
         &update(&b, "偏好 Java")
     )
+    .await
     .unwrap());
     assert_eq!(
-        memory::profile(&conn, "p_a", c.msg_id).unwrap()[0].content,
+        memory::profile(&mut conn, "p_a", c.msg_id).await.unwrap()[0].content,
         "偏好 Rust"
     );
 }
 
-#[test]
-fn topic_recall_finds_old_relevant_memories_and_scopes_owners() {
-    let rig = Rig::new();
-    let anchor = rig.message("p_a", "g", "Docker 部署怎么做", None, None);
-    rig.fact("person", "p_a", "Docker 部署采用 compose", 1);
-    rig.fact("chat", "g", "Docker 部署端口仅本机访问", 2);
-    rig.fact("person", "p_b", "Docker 部署属于同名的另一个人", 999);
-    rig.fact("chat", "other", "Docker 部署属于另一群", 999);
+#[tokio::test]
+async fn topic_recall_finds_old_relevant_memories_and_scopes_owners() {
+    let rig = Rig::new().await;
+    let anchor = rig
+        .message("p_a", "g", "Docker 部署怎么做", None, None)
+        .await;
+    rig.fact("person", "p_a", "Docker 部署采用 compose", 1)
+        .await;
+    rig.fact("chat", "g", "Docker 部署端口仅本机访问", 2).await;
+    rig.fact("person", "p_b", "Docker 部署属于同名的另一个人", 999)
+        .await;
+    rig.fact("chat", "other", "Docker 部署属于另一群", 999)
+        .await;
     for i in 0..200 {
-        rig.fact("person", "p_a", &format!("今天晚饭吃什么 {i}"), i + 100);
+        rig.fact("person", "p_a", &format!("今天晚饭吃什么 {i}"), i + 100)
+            .await;
     }
-    let conn = db::connect(&rig.path).unwrap();
-    let memories = memory::recall(&conn, "p_a", "g", anchor.msg_id, &anchor.text, 3).unwrap();
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    let memories = memory::recall(&mut conn, "p_a", "g", anchor.msg_id, &anchor.text, 3)
+        .await
+        .unwrap();
     assert_eq!(memories.len(), 2);
     assert!(memories
         .iter()
@@ -399,31 +476,43 @@ fn topic_recall_finds_old_relevant_memories_and_scopes_owners() {
         .iter()
         .all(|m| m.evidence_status == "legacy_unverified"));
     assert!(
-        memory::recall(&conn, "p_a", "g", anchor.msg_id, "这个呢", 3)
+        memory::recall(&mut conn, "p_a", "g", anchor.msg_id, "这个呢", 3)
+            .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        memory::recall(&conn, "p_a", "g", anchor.msg_id, "Docker", 0)
+        memory::recall(&mut conn, "p_a", "g", anchor.msg_id, "Docker", 0)
+            .await
             .unwrap()
             .is_empty()
     );
     assert!(memory::query_terms("部署方案").contains(&"部署".to_owned()));
 }
 
-#[test]
-fn snapshot_preserves_anchor_identity_and_excludes_future_messages() {
-    let rig = Rig::new();
-    let anchor = rig.message("p_a", "g", "Docker 部署问题", Some(90), None);
-    let other = rig.message("p_b", "g", "我只是在插话", Some(91), None);
-    let bot = rig.message("self", "g", "以前的回答不是事实证明", Some(92), None);
+#[tokio::test]
+async fn snapshot_preserves_anchor_identity_and_excludes_future_messages() {
+    let rig = Rig::new().await;
+    let anchor = rig
+        .message("p_a", "g", "Docker 部署问题", Some(90), None)
+        .await;
+    let other = rig
+        .message("p_b", "g", "我只是在插话", Some(91), None)
+        .await;
+    let bot = rig
+        .message("self", "g", "以前的回答不是事实证明", Some(92), None)
+        .await;
     let cfg = ContextCfg::default();
-    let snapshot = capture_reply_snapshot(&rig.path, &anchor, bot.msg_id, &cfg).unwrap();
+    let snapshot = capture_reply_snapshot(&rig.path, &anchor, bot.msg_id, &cfg)
+        .await
+        .unwrap();
     let before = render_bot_context(&snapshot, MoodValue::Calm, &cfg)
         .unwrap()
         .user;
-    rig.message("p_b", "g", "未来的新话题不能混入", None, None);
-    rig.fact("person", "p_a", "Docker 新记忆不能混入已取快照", 500);
+    rig.message("p_b", "g", "未来的新话题不能混入", None, None)
+        .await;
+    rig.fact("person", "p_a", "Docker 新记忆不能混入已取快照", 500)
+        .await;
     assert_eq!(
         render_bot_context(&snapshot, MoodValue::Calm, &cfg)
             .unwrap()
@@ -441,71 +530,94 @@ fn snapshot_preserves_anchor_identity_and_excludes_future_messages() {
         .recent_messages
         .iter()
         .any(|m| m.msg_id == bot.msg_id && m.speaker_kind == "bot"));
-    let again = capture_reply_snapshot(&rig.path, &anchor, bot.msg_id, &cfg).unwrap();
+    let again = capture_reply_snapshot(&rig.path, &anchor, bot.msg_id, &cfg)
+        .await
+        .unwrap();
     assert!(!again
         .recent_messages
         .iter()
         .any(|m| m.text.contains("未来")));
 }
 
-#[test]
-fn references_use_external_ids_and_never_guess_local_ids_or_other_chats() {
-    let rig = Rig::new();
-    let quote = rig.message("p_b", "g", "很久之前的部署原文", Some(8000), None);
+#[tokio::test]
+async fn references_use_external_ids_and_never_guess_local_ids_or_other_chats() {
+    let rig = Rig::new().await;
+    let quote = rig
+        .message("p_b", "g", "很久之前的部署原文", Some(8000), None)
+        .await;
     for _ in 0..30 {
-        rig.message("p_b", "g", "插话", None, None);
+        rig.message("p_b", "g", "插话", None, None).await;
     }
-    let anchor = rig.message("p_a", "g", "这个后来怎么样", Some(8001), Some(8000));
+    let anchor = rig
+        .message("p_a", "g", "这个后来怎么样", Some(8001), Some(8000))
+        .await;
     let cfg = ContextCfg::default();
-    let s = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &cfg).unwrap();
+    let s = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &cfg)
+        .await
+        .unwrap();
     assert_eq!(s.quoted_messages[0].msg_id, quote.msg_id);
     assert_eq!(s.quoted_messages[0].person_id, "p_b");
     assert!(!s.recent_messages.iter().any(|m| m.msg_id == quote.msg_id));
-    rig.message("p_b", "other", "别的群同编号原文", Some(123), None);
-    let missing = rig.message("p_a", "g", "找不到引用", None, Some(123));
-    let s = capture_reply_snapshot(&rig.path, &missing, missing.msg_id, &cfg).unwrap();
+    rig.message("p_b", "other", "别的群同编号原文", Some(123), None)
+        .await;
+    let missing = rig.message("p_a", "g", "找不到引用", None, Some(123)).await;
+    let s = capture_reply_snapshot(&rig.path, &missing, missing.msg_id, &cfg)
+        .await
+        .unwrap();
     assert!(s.quoted_messages.is_empty());
-    let collision = rig.message(
-        "p_a",
-        "g",
-        "外部编号碰巧等于本地编号",
-        None,
-        Some(quote.msg_id),
-    );
-    let s = capture_reply_snapshot(&rig.path, &collision, collision.msg_id, &cfg).unwrap();
+    let collision = rig
+        .message(
+            "p_a",
+            "g",
+            "外部编号碰巧等于本地编号",
+            None,
+            Some(quote.msg_id),
+        )
+        .await;
+    let s = capture_reply_snapshot(&rig.path, &collision, collision.msg_id, &cfg)
+        .await
+        .unwrap();
     assert!(s.quoted_messages.is_empty());
     assert!(s.limitations.iter().any(|s| s.contains("未找到")));
 }
 
-#[test]
-fn conflicting_external_id_is_reported_even_after_duplicate_reports() {
-    let rig = Rig::new();
-    rig.message("p_b", "g", "原文一", Some(40), None);
-    rig.message("p_b", "g", "原文一", Some(40), None);
-    rig.message("p_c", "g", "冲突原文", Some(40), None);
-    let anchor = rig.message("p_a", "g", "引用哪条", None, Some(40));
-    let s =
-        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default()).unwrap();
+#[tokio::test]
+async fn conflicting_external_id_is_reported_even_after_duplicate_reports() {
+    let rig = Rig::new().await;
+    rig.message("p_b", "g", "原文一", Some(40), None).await;
+    rig.message("p_b", "g", "原文一", Some(40), None).await;
+    rig.message("p_c", "g", "冲突原文", Some(40), None).await;
+    let anchor = rig.message("p_a", "g", "引用哪条", None, Some(40)).await;
+    let s = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
     assert!(s.quoted_messages.is_empty());
     assert!(s.limitations.iter().any(|s| s.contains("歧义")));
 }
 
-#[test]
-fn budget_preserves_target_and_quotes_or_refuses_generation() {
-    let rig = Rig::new();
-    let quote = rig.message("p_b", "g", "必要的引用原文", Some(88), None);
-    let anchor = rig.message("p_a", "g", &"很长的当前问题".repeat(900), None, Some(88));
+#[tokio::test]
+async fn budget_preserves_target_and_quotes_or_refuses_generation() {
+    let rig = Rig::new().await;
+    let quote = rig
+        .message("p_b", "g", "必要的引用原文", Some(88), None)
+        .await;
+    let anchor = rig
+        .message("p_a", "g", &"很长的当前问题".repeat(900), None, Some(88))
+        .await;
     let mut cutoff = anchor.msg_id;
     for _ in 0..20 {
         cutoff = rig
             .message("p_b", "g", &"插话".repeat(1800), None, None)
+            .await
             .msg_id;
     }
     let cfg = ContextCfg {
         budget_chars: 8000,
         ..ContextCfg::default()
     };
-    let s = capture_reply_snapshot(&rig.path, &anchor, cutoff, &cfg).unwrap();
+    let s = capture_reply_snapshot(&rig.path, &anchor, cutoff, &cfg)
+        .await
+        .unwrap();
     let rendered = render_bot_context(&s, MoodValue::Calm, &cfg).unwrap();
     assert!(rendered.system.chars().count() + rendered.user.chars().count() <= 8000);
     let value: Value = serde_json::from_str(&rendered.user).unwrap();
@@ -524,14 +636,15 @@ fn budget_preserves_target_and_quotes_or_refuses_generation() {
     .is_err());
 }
 
-#[test]
-fn daily_summaries_are_not_promoted_to_stable_profiles() {
-    let rig = Rig::new();
-    let anchor = rig.message("p_a", "g", "你好", None, None);
-    let conn = db::connect(&rig.path).unwrap();
-    conn.execute("INSERT INTO summaries(owner_type,owner_id,period,date,summary,created_at) VALUES ('person','p_a','daily','2026-10-10','他开玩笑说自己是宇航员',1)",[]).unwrap();
-    let s =
-        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default()).unwrap();
+#[tokio::test]
+async fn daily_summaries_are_not_promoted_to_stable_profiles() {
+    let rig = Rig::new().await;
+    let anchor = rig.message("p_a", "g", "你好", None, None).await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    conn.execute("INSERT INTO summaries(owner_type,owner_id,period,date,summary,created_at) VALUES ('person','p_a','daily','2026-10-10','他开玩笑说自己是宇航员',1)", yuantuan_core::db::params![]).await.unwrap();
+    let s = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
     assert!(s.profile.is_empty());
     assert!(
         !render_bot_context(&s, MoodValue::Calm, &ContextCfg::default())
@@ -547,14 +660,16 @@ async fn oversized_required_decision_evidence_never_reaches_provider() {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
-    let rig = Rig::new();
+    let rig = Rig::new().await;
     let text = "\u{0001}".repeat(4000); // JSON 转义后的体积显著大于原文字数。
-    rig.message("p_b", "g", &text, Some(90), None);
-    rig.message("p_b", "g", &text, Some(91), Some(90));
-    rig.message("p_b", "g", &text, Some(92), Some(91));
-    let anchor = rig.message("p_a", "g", &text, Some(93), Some(92));
+    rig.message("p_b", "g", &text, Some(90), None).await;
+    rig.message("p_b", "g", &text, Some(91), Some(90)).await;
+    rig.message("p_b", "g", &text, Some(92), Some(91)).await;
+    let anchor = rig.message("p_a", "g", &text, Some(93), Some(92)).await;
     let snapshot =
-        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default()).unwrap();
+        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default())
+            .await
+            .unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
     let count = requests.clone();
     let app = axum::Router::new().route(

@@ -14,11 +14,13 @@
 //! 中途进程崩则该 chat 当日损失一轮，可接受）；同日重复执行整 chat 跳过。
 //! summaries 另有 UNIQUE(owner_type,owner_id,period,date) + UPSERT 兜底防重。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use crate::event::{ChatConsolidationOutcome, ConsolidationDonePayload, Event, EventBus};
 use crate::llm::{LlmGateway, Role};
 use anyhow::{Context, Result};
-use rusqlite::params;
 use serde::Deserialize;
+use sqlx::Row;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,7 +71,7 @@ pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
             run_once(&deps).await;
         }
         loop {
-            let wait = secs_until_next(&deps.db_path, &deps.cfg.daily_time);
+            let wait = secs_until_next(&deps.db_path, &deps.cfg.daily_time).await;
             info!(hours = wait / 3600, daily_time = %deps.cfg.daily_time, "夜间归纳下次执行倒计时");
             tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
             run_once(&deps).await;
@@ -78,20 +80,21 @@ pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
 }
 
 /// 距下一次 daily_time（本地 HH:MM）的秒数；用 SQL 的 localtime 换算避免引时区依赖
-fn secs_until_next(db_path: &Path, daily_time: &str) -> u64 {
+async fn secs_until_next(db_path: &Path, daily_time: &str) -> u64 {
     let (h, m) = parse_hhmm(daily_time).unwrap_or((3, 0));
     let now = now_secs();
-    let midnight: i64 = crate::db::connect(db_path)
+    let midnight: i64 = async {
+        let mut c = crate::db::connect(db_path).await.ok()?;
+        c.query_row(
+            "SELECT CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
+            crate::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
         .ok()
-        .and_then(|c| {
-            c.query_row(
-                "SELECT CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
-                [],
-                |r| r.get(0),
-            )
-            .ok()
-        })
-        .unwrap_or(now - now % 86400);
+    }
+    .await
+    .unwrap_or(now - now % 86400);
     let mut target = midnight + (h as i64) * 3600 + (m as i64) * 60;
     if target <= now {
         target += 86400;
@@ -117,8 +120,8 @@ pub async fn run_once(deps: &ConsolidationDeps) {
     let started = Instant::now();
     info!("夜间归纳开始");
 
-    let today = today_str(&deps.db_path);
-    let chat_ids = list_chats(&deps.db_path);
+    let today = today_str(&deps.db_path).await;
+    let chat_ids = list_chats(&deps.db_path).await;
     let mut outcomes: Vec<ChatConsolidationOutcome> = Vec::new();
     for chat_id in &chat_ids {
         let outcome = process_chat(deps, chat_id, &today).await;
@@ -170,7 +173,7 @@ async fn process_chat(
         status: "ok".into(),
     };
 
-    let mut conn = match crate::db::connect(&deps.db_path) {
+    let mut conn = match crate::db::connect(&deps.db_path).await {
         Ok(c) => c,
         Err(e) => {
             warn!(chat_id, error = %e, "归纳失败：打开数据库");
@@ -183,8 +186,9 @@ async fn process_chat(
         .query_row(
             "SELECT value FROM state_kv WHERE key = ?1",
             params![stamp_key(chat_id, today)],
-            |r| r.get(0),
+            |r| r.try_get(0),
         )
+        .await
         .ok();
     if stamped.is_some() {
         outcome.status = "skipped_done".into();
@@ -198,18 +202,18 @@ async fn process_chat(
              FROM (SELECT msg_id, sender_pid, nickname, text, mentions, ts FROM messages
                    WHERE chat_id = ?1 ORDER BY msg_id DESC LIMIT ?2)
              ORDER BY msg_id ASC",
-        )
+        ).await
         .unwrap()
         .query_map(params![chat_id, WINDOW], |r| {
             Ok(MsgRow {
-                msg_id: r.get(0)?,
-                sender_pid: r.get(1)?,
-                nickname: r.get(2)?,
-                text: r.get(3)?,
-                mentions: r.get(4)?,
-                ts: r.get(5)?,
+                msg_id: r.try_get(0)?,
+                sender_pid: r.try_get(1)?,
+                nickname: r.try_get(2)?,
+                text: r.try_get(3)?,
+                mentions: r.try_get(4)?,
+                ts: r.try_get(5)?,
             })
-        })
+        }).await
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
@@ -221,9 +225,10 @@ async fn process_chat(
     let midnight: i64 = conn
         .query_row(
             "SELECT CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
-            [],
-            |r| r.get(0),
+            crate::db::params![],
+            |r| r.try_get(0),
         )
+        .await
         .unwrap_or(0);
     if !rows.iter().any(|r| r.ts >= midnight) {
         outcome.status = "no_new_today".into();
@@ -233,14 +238,16 @@ async fn process_chat(
     outcome.msg_end = rows.last().unwrap().msg_id;
 
     // 先行占位：同 chat 同日再跑直接 skipped_done（防 mention 双重计数）
-    let _ = conn.execute(
-        "INSERT INTO state_kv(key, value, updated_at) VALUES (?1, '1', ?2)
+    let _ = conn
+        .execute(
+            "INSERT INTO state_kv(key, value, updated_at) VALUES (?1, '1', ?2)
          ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
-        params![stamp_key(chat_id, today), now_secs()],
-    );
+            params![stamp_key(chat_id, today), now_secs()],
+        )
+        .await;
 
     // —— 通道一：@关系统计（纯 SQL，不经 LLM）——
-    let mention_pairs = apply_mention_stats(&mut conn, deps, chat_id, &rows, &outcome);
+    let mention_pairs = apply_mention_stats(&mut conn, deps, chat_id, &rows, &outcome).await;
     outcome.mention_pairs = mention_pairs;
 
     // —— LLM 提炼（decision 角色；未配置或两轮校验失败 → 本 chat 本轮跳过提炼）——
@@ -267,7 +274,7 @@ async fn process_chat(
     };
 
     // —— 通道二三四：summaries / long_memories / rel_events（单事务）——
-    match write_distilled(&mut conn, chat_id, today, &distill, &outcome) {
+    match write_distilled(&mut conn, chat_id, today, &distill, &outcome).await {
         Ok(facts) => outcome.facts_written = facts,
         Err(e) => {
             warn!(chat_id, error = %e, "提炼结果落库失败");
@@ -287,8 +294,8 @@ struct MsgRow {
 }
 
 /// @统计：同对按窗口聚合计数，单边单次 ≤0.05；@bot → 记 self→发送者的边
-fn apply_mention_stats(
-    conn: &mut rusqlite::Connection,
+async fn apply_mention_stats(
+    conn: &mut crate::db::Connection,
     deps: &ConsolidationDeps,
     chat_id: &str,
     rows: &[MsgRow],
@@ -323,7 +330,7 @@ fn apply_mention_stats(
         chat_id, outcome.msg_start, outcome.msg_end
     );
     let n = pairs.len();
-    let tx = match conn.transaction() {
+    let mut tx = match conn.transaction().await {
         Ok(t) => t,
         Err(e) => {
             warn!(error = %e, "@统计事务开启失败");
@@ -336,13 +343,13 @@ fn apply_mention_stats(
             "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at)
              VALUES (?1, ?2, 'mention', ?3, 0, ?4, ?5)",
             params![from, to, delta, evidence, now],
-        ) {
+        ).await {
             warn!(error = %e, "relationship_events 写入失败");
             continue;
         }
-        bump_edge(&tx, from, to, delta, 0.0, now);
+        bump_edge(&mut tx, from, to, delta, 0.0, now).await;
     }
-    if let Err(e) = tx.commit() {
+    if let Err(e) = tx.commit().await {
         warn!(error = %e, "@统计事务提交失败");
         return 0;
     }
@@ -350,8 +357,8 @@ fn apply_mention_stats(
 }
 
 /// edges 增量累加，clamp(0..1)
-fn bump_edge(
-    conn: &rusqlite::Connection,
+async fn bump_edge(
+    conn: &mut sqlx::SqliteConnection,
     from: &str,
     to: &str,
     d_familiar: f64,
@@ -362,8 +369,9 @@ fn bump_edge(
         .query_row(
             "SELECT trust, familiar FROM relationship_edges WHERE from_pid = ?1 AND to_pid = ?2",
             params![from, to],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         )
+        .await
         .ok();
     let (trust, familiar) = cur.unwrap_or((0.5, 0.0));
     let nt = (trust + d_trust).clamp(0.0, 1.0);
@@ -372,7 +380,7 @@ fn bump_edge(
         "INSERT INTO relationship_edges(from_pid, to_pid, trust, familiar, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(from_pid, to_pid) DO UPDATE SET trust = excluded.trust, familiar = excluded.familiar, updated_at = excluded.updated_at",
         params![from, to, nt, nf, now],
-    );
+    ).await;
 }
 
 // ---------- LLM 提炼 ----------
@@ -469,15 +477,15 @@ fn parse_distill(content: &str) -> std::result::Result<DistillOut, String> {
 }
 
 /// 提炼结果落库（单事务；敏感条目逐条拒收记日志）
-fn write_distilled(
-    conn: &mut rusqlite::Connection,
+async fn write_distilled(
+    conn: &mut crate::db::Connection,
     chat_id: &str,
     today: &str,
     d: &DistillOut,
     outcome: &ChatConsolidationOutcome,
 ) -> Result<usize> {
     let now = now_secs();
-    let tx = conn.transaction().context("归纳写入事务开启失败")?;
+    let mut tx = conn.transaction().await.context("归纳写入事务开启失败")?;
     let mut facts_written = 0usize;
 
     // chat 每日摘要（UPSERT 防重）
@@ -488,7 +496,7 @@ fn write_distilled(
              ON CONFLICT(owner_type, owner_id, period, date)
              DO UPDATE SET summary = excluded.summary, msg_id_start = excluded.msg_id_start, msg_id_end = excluded.msg_id_end",
             params![chat_id, today, d.chat_summary, outcome.msg_start, outcome.msg_end, now],
-        )?;
+        ).await?;
     } else {
         warn!(chat_id, "chat_summary 命中敏感拒收");
     }
@@ -499,11 +507,13 @@ fn write_distilled(
             "SELECT sender_pid, COALESCE(MAX(nickname),''), COUNT(*) FROM messages
              WHERE chat_id = ?1 AND msg_id BETWEEN ?2 AND ?3 AND sender_pid != 'self'
              GROUP BY sender_pid",
-        )?
+        )
+        .await?
         .query_map(params![chat_id, outcome.msg_start, outcome.msg_end], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?
-        .collect::<std::result::Result<Vec<(String, String, i64)>, rusqlite::Error>>()?;
+            Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?))
+        })
+        .await?
+        .collect::<std::result::Result<Vec<(String, String, i64)>, sqlx::Error>>()?;
     for (pid, _nick, msg_count) in &speakers {
         let facts: Vec<&str> = d
             .person_facts
@@ -534,7 +544,7 @@ fn write_distilled(
              ON CONFLICT(owner_type, owner_id, period, date)
              DO UPDATE SET summary = excluded.summary, msg_id_start = excluded.msg_id_start, msg_id_end = excluded.msg_id_end",
             params![pid, today, summary, outcome.msg_start, outcome.msg_end, now],
-        )?;
+        ).await?;
     }
 
     // person_facts → long_memories(owner=person, source=consolidation)
@@ -554,7 +564,7 @@ fn write_distilled(
             "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
              VALUES ('person', ?1, ?2, 'consolidation', ?3, ?3, ?4, ?5, ?6)",
             params![f.person_id, fact, now, chat_id, outcome.msg_start, outcome.msg_end],
-        )?;
+        ).await?;
         facts_written += 1;
     }
     // group_facts → long_memories(owner=chat)
@@ -571,19 +581,21 @@ fn write_distilled(
             "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
              VALUES ('chat', ?1, ?2, 'consolidation', ?3, ?3, ?1, ?4, ?5)",
             params![chat_id, fact, now, outcome.msg_start, outcome.msg_end],
-        )?;
+        ).await?;
         facts_written += 1;
     }
 
     for p in d.profile_updates.iter().take(100) {
         if let Err(e) = crate::memory::update_profile(
-            &tx,
+            &mut tx,
             &p.person_id,
             chat_id,
             outcome.msg_start,
             outcome.msg_end,
             &p.update,
-        ) {
+        )
+        .await
+        {
             warn!(error=%e,"归纳人物简档未通过来源校验");
         }
     }
@@ -607,41 +619,47 @@ fn write_distilled(
             "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at)
              VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
             params![ev.from, ev.to, ev.kind, delta, evidence, now],
-        )?;
-        bump_edge(&tx, &ev.from, &ev.to, 0.0, delta, now);
+        ).await?;
+        bump_edge(&mut tx, &ev.from, &ev.to, 0.0, delta, now).await;
     }
 
-    tx.commit().context("归纳写入事务提交失败")?;
+    tx.commit().await.context("归纳写入事务提交失败")?;
     Ok(facts_written)
 }
 
 // ---------- 工具 ----------
 
-fn list_chats(db_path: &Path) -> Vec<String> {
-    crate::db::connect(db_path)
-        .ok()
-        .and_then(|c| {
-            c.prepare("SELECT DISTINCT chat_id FROM messages")
-                .and_then(|mut st| {
-                    let rows = st.query_map([], |r| r.get(0))?;
-                    rows.collect::<std::result::Result<Vec<String>, _>>()
-                })
-                .ok()
-        })
-        .unwrap_or_default()
+async fn list_chats(db_path: &Path) -> Vec<String> {
+    async {
+        let mut c = crate::db::connect(db_path).await.ok()?;
+        let mut st = c
+            .prepare("SELECT DISTINCT chat_id FROM messages")
+            .await
+            .ok()?;
+        st.query_map(crate::db::params![], |r| r.try_get(0))
+            .await
+            .ok()?
+            .collect::<sqlx::Result<Vec<String>>>()
+            .ok()
+    }
+    .await
+    .unwrap_or_default()
 }
 
 /// 今日日期串（本地时区，经 SQL 换算）
-fn today_str(db_path: &Path) -> String {
-    crate::db::connect(db_path)
+async fn today_str(db_path: &Path) -> String {
+    async {
+        let mut c = crate::db::connect(db_path).await.ok()?;
+        c.query_row(
+            "SELECT strftime('%Y-%m-%d','now','localtime')",
+            crate::db::params![],
+            |r| r.try_get::<String, _>(0),
+        )
+        .await
         .ok()
-        .and_then(|c| {
-            c.query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .ok()
-        })
-        .unwrap_or_else(|| "1970-01-01".into())
+    }
+    .await
+    .unwrap_or_else(|| "1970-01-01".into())
 }
 
 fn now_secs() -> i64 {

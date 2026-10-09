@@ -5,15 +5,16 @@
 //! 同时维护 persons / identities / member_profiles 档案，然后 messages 落库并发布事件。
 
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
 use serde_json::Value;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
+use yuantuan_core::db::params;
+use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{Event, EventBus, MessageReceivedPayload};
 use yuantuan_core::prefilter::SelfMsgIds;
 
-pub fn ingest_message(
+pub async fn ingest_message(
     v: &Value,
     bus: &EventBus,
     db_path: &Path,
@@ -139,24 +140,25 @@ pub fn ingest_message(
         format!("p_{user_id}")
     };
     let display_name = if is_self { "云团" } else { display };
-    let mut conn = yuantuan_core::db::connect(db_path)?;
-    let tx = conn.transaction().context("开启摄取事务失败")?;
+    let mut conn = yuantuan_core::db::connect(db_path).await?;
+    let mut tx = conn.transaction().await.context("开启摄取事务失败")?;
     tx.execute(
         "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES (?1, ?2, ?3, ?3)
          ON CONFLICT(person_id) DO UPDATE SET last_seen = excluded.last_seen, display_name = excluded.display_name",
         params![person_id, display_name, ts],
-    )?;
+    ).await?;
     tx.execute(
         "INSERT INTO identities(person_id, platform, platform_uid) VALUES (?1, 'qq', ?2)
          ON CONFLICT(platform, platform_uid) DO NOTHING",
         params![person_id, user_id.to_string()],
-    )?;
+    )
+    .await?;
     if chat_type == "group" && !is_self {
         tx.execute(
             "INSERT INTO member_profiles(chat_id, person_id, card, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(chat_id, person_id) DO UPDATE SET card = excluded.card, updated_at = excluded.updated_at",
             params![chat_id, person_id, display, ts],
-        )?;
+        ).await?;
     }
     let mentions_json = serde_json::to_string(&mentions)?;
     tx.execute(
@@ -175,9 +177,9 @@ pub fn ingest_message(
             ts,
             napcat_msg_id
         ],
-    )?;
-    let msg_id = tx.last_insert_rowid();
-    tx.commit().context("提交摄取事务失败")?;
+    ).await?;
+    let msg_id = tx.last_insert_rowid().await?;
+    tx.commit().await.context("提交摄取事务失败")?;
 
     bus.publish(Event::MessageReceived(MessageReceivedPayload {
         msg_id,

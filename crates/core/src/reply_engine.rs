@@ -11,6 +11,8 @@
 //! 纯 ::meme 泡跳过不发送（仅 debug 日志），混合泡只发文字部分。TODO(单7)：接 meme_library 抽图发送。
 //! 系数/泡顶/节流等全部数值目前走代码默认，TODO(热配单)：入 config。
 
+use crate::db::params;
+use crate::db::SqliteExt;
 use crate::decision::DecisionOutput;
 use crate::event::{BubbleSentPayload, Event, EventBus, MessageReceivedPayload};
 use crate::prefilter::SelfMsgIds;
@@ -18,7 +20,6 @@ use crate::state::{MoodState, MoodValue};
 use crate::{context_builder, llm, meme};
 use anyhow::{anyhow, Context, Result};
 use rand::Rng;
-use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -538,7 +539,8 @@ async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note
                 "（图片）",
                 true,
                 data.get("message_id").and_then(|x| x.as_i64()),
-            );
+            )
+            .await;
             eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                 chat_id: job.chat_id.clone(),
                 bubble_index: 0,
@@ -597,9 +599,11 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
         if b.text.is_empty() && b.meme.is_some() {
             let memes_root = eng.db_path.parent().unwrap_or(Path::new(".")).join("memes");
             let cat = resolve_meme_category(b.meme.as_deref(), eng.mood.get());
-            match meme::pick(&eng.db_path, &memes_root, &cat)
-                .or_else(|| meme::pick(&eng.db_path, &memes_root, "misc"))
-            {
+            let picked = match meme::pick(&eng.db_path, &memes_root, &cat).await {
+                some @ Some(_) => some,
+                None => meme::pick(&eng.db_path, &memes_root, "misc").await,
+            };
+            match picked {
                 Some(path) => {
                     debug!(chat_id = %job.chat_id, category = %cat, "::meme 抽图发送");
                     process_image(eng, job, &path, "meme(::)").await;
@@ -653,7 +657,8 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                     &b.text,
                     false,
                     data.get("message_id").and_then(|x| x.as_i64()),
-                );
+                )
+                .await;
                 eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                     chat_id: job.chat_id.clone(),
                     bubble_index: i,
@@ -690,14 +695,14 @@ async fn send_with_retry(send: &SendFn, req: &SendRequest) -> Result<Value> {
     }
 }
 
-fn insert_self_message_ex(
+async fn insert_self_message_ex(
     db_path: &Path,
     job: &ReplyJob,
     text: &str,
     has_image: bool,
     external_msg_id: Option<i64>,
 ) {
-    let Ok(conn) = crate::db::connect(db_path) else {
+    let Ok(mut conn) = crate::db::connect(db_path).await else {
         return;
     };
     let now = now_secs();
@@ -709,13 +714,13 @@ fn insert_self_message_ex(
         "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self', '云团', ?1, ?1)
          ON CONFLICT(person_id) DO NOTHING",
         params![now],
-    );
+    ).await;
     if let Err(e) = conn.execute(
         "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts, external_msg_id,reply_anchor_id)
          VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5, ?6,
           (SELECT msg_id FROM messages WHERE msg_id=?7 AND chat_id=?1 AND chat_type=?2 AND sender_pid!='self'))",
         params![job.chat_id, chat_type, text, has_image as i64, now, external_msg_id,job.anchor_msg_id],
-    ) {
+    ).await {
         warn!(error = %e, "self 回复落库失败");
     }
 }
@@ -838,7 +843,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yt-drain-{}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("test.db");
-        crate::db::migrate(&mut crate::db::connect(&path).unwrap()).unwrap();
+        crate::db::migrate(&mut crate::db::connect(&path).await.unwrap())
+            .await
+            .unwrap();
         let cfg = Arc::new(std::sync::RwLock::new(ReplyCfg {
             total_budget_ms: 0,
             ..ReplyCfg::default()

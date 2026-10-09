@@ -2,23 +2,12 @@
 //! V0.1 表设计基线见 docs/reference/data-model.md；实际表结构以本文件的后续迁移为准。
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
-use std::path::Path;
-
-/// 打开数据库连接并统一 PRAGMA。
-/// WAL 是读路径与多连接写入（adapter / tracer / webui 各自持连接）的基础；
-/// busy_timeout 兜底单写者队列落地前的偶发 BUSY。
-pub fn connect(path: &Path) -> Result<Connection> {
-    let conn =
-        Connection::open(path).with_context(|| format!("打开数据库失败: {}", path.display()))?;
-    conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))
-        .context("设置 WAL 模式失败")?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .context("启用外键约束失败")?;
-    conn.pragma_update(None, "busy_timeout", 5000)
-        .context("设置 busy_timeout 失败")?;
-    Ok(conn)
-}
+mod access;
+pub use access::{
+    connect, database, params, params_from_iter, Connection, Database, OptionalExtension,
+    SqliteExt, Statement, ToValue, Value,
+};
+use sqlx::Row;
 
 /// V1 基线：data-model.md 全部 14 张表 + 索引
 const V1_SQL: &str = r#"
@@ -306,9 +295,12 @@ const MIGRATIONS: [(&str, &str); 7] = [
     ),
 ];
 
-pub fn migrate(conn: &mut Connection) -> Result<()> {
+pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
     let current: u32 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .query_row("PRAGMA user_version", crate::db::params![], |r| {
+            r.try_get(0)
+        })
+        .await
         .context("读取 user_version 失败")?;
     if current as usize >= MIGRATIONS.len() {
         tracing::info!(user_version = current, "迁移已是最新，幂等跳过");
@@ -321,30 +313,35 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         // 先持有写锁再检查版本和表结构，避免多个连接同时检查缺列后重复 ALTER，
         // 也避免使用启动时的旧版本覆盖另一个连接刚提交的 user_version。
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .context("开启迁移事务失败")?;
-        let locked_version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let mut tx = conn.begin_immediate().await.context("开启迁移事务失败")?;
+        let locked_version: u32 = tx
+            .query_row("PRAGMA user_version", crate::db::params![], |r| {
+                r.try_get(0)
+            })
+            .await?;
         if locked_version >= version {
             continue;
         }
         if version == 4 {
-            add_column_if_missing(&tx, "messages", "processed_at", "INTEGER")?;
+            add_column_if_missing(&mut tx, "messages", "processed_at", "INTEGER").await?;
         }
         if version == 6 {
-            add_column_if_missing(&tx, "messages", "external_msg_id", "INTEGER")?;
-            add_column_if_missing(&tx, "long_memories", "source_chat_id", "TEXT")?;
-            add_column_if_missing(&tx, "long_memories", "source_msg_id", "INTEGER")?;
-            add_column_if_missing(&tx, "long_memories", "source_end_msg_id", "INTEGER")?;
+            add_column_if_missing(&mut tx, "messages", "external_msg_id", "INTEGER").await?;
+            add_column_if_missing(&mut tx, "long_memories", "source_chat_id", "TEXT").await?;
+            add_column_if_missing(&mut tx, "long_memories", "source_msg_id", "INTEGER").await?;
+            add_column_if_missing(&mut tx, "long_memories", "source_end_msg_id", "INTEGER").await?;
         }
         if version == 7 {
-            add_column_if_missing(&tx, "messages", "reply_anchor_id", "INTEGER")?;
+            add_column_if_missing(&mut tx, "messages", "reply_anchor_id", "INTEGER").await?;
         }
         tx.execute_batch(sql)
+            .await
             .with_context(|| format!("执行迁移 v{version} 失败"))?;
-        tx.pragma_update(None, "user_version", version)
+        tx.execute_batch(&format!("PRAGMA user_version = {}", version))
+            .await
             .context("推进 user_version 失败")?;
         tx.commit()
+            .await
             .with_context(|| format!("提交迁移 v{version} 失败"))?;
         tracing::info!(user_version = version, desc, "迁移已应用");
     }
@@ -352,26 +349,34 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
 }
 
 /// 在调用方持有迁移写事务的前提下幂等加列。
-fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ty: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+async fn add_column_if_missing(
+    conn: &mut sqlx::SqliteConnection,
+    table: &str,
+    column: &str,
+    ty: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).await?;
     let cols: Vec<String> = stmt
-        .query_map([], |r| r.get::<_, String>(1))?
+        .query_map(crate::db::params![], |r| r.try_get::<String, _>(1))
+        .await?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     if cols.iter().any(|c| c == column) {
         return Ok(());
     }
     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"))
+        .await
         .with_context(|| format!("ALTER {table} ADD {column} 失败"))?;
     Ok(())
 }
 
 /// 列出用户表（排除 sqlite 内部表），供启动自检
-pub fn list_tables(conn: &Connection) -> Result<Vec<String>> {
+pub async fn list_tables(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    )?;
+    ).await?;
     let names = stmt
-        .query_map([], |r| r.get(0))?
+        .query_map(crate::db::params![], |r| r.try_get(0))
+        .await?
         .collect::<std::result::Result<Vec<String>, _>>()?;
     Ok(names)
 }
@@ -380,70 +385,90 @@ pub fn list_tables(conn: &Connection) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn v7_does_not_guess_old_reply_ownership_and_rolls_back_on_failure() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        v3_database(&conn);
-        migrate(&mut conn).unwrap();
+    #[tokio::test]
+    async fn v7_does_not_guess_old_reply_ownership_and_rolls_back_on_failure() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
+        migrate(&mut conn).await.unwrap();
         conn.execute_batch(
             "DROP INDEX idx_msg_reply_anchor; ALTER TABLE messages DROP COLUMN reply_anchor_id;
             PRAGMA user_version=6; CREATE TABLE idx_msg_reply_anchor(dummy INTEGER);",
         )
+        .await
         .unwrap();
-        assert!(migrate(&mut conn).is_err());
+        assert!(migrate(&mut conn).await.is_err());
         assert_eq!(
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            conn.query_row("PRAGMA user_version", crate::db::params![], |r| r
+                .try_get::<i64, _>(0))
+                .await
                 .unwrap(),
             6
         );
         assert!(!conn
             .prepare("PRAGMA table_info(messages)")
+            .await
             .unwrap()
-            .query_map([], |r| r.get::<_, String>(1))
+            .query_map(crate::db::params![], |r| r.try_get::<String, _>(1))
+            .await
             .unwrap()
             .any(|c| c.unwrap() == "reply_anchor_id"));
         conn.execute_batch("DROP TABLE idx_msg_reply_anchor")
+            .await
             .unwrap();
-        migrate(&mut conn).unwrap();
-        migrate(&mut conn).unwrap();
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
         assert_eq!(
-            conn.query_row("SELECT reply_anchor_id FROM messages", [], |r| r
-                .get::<_, Option<i64>>(0))
-                .unwrap(),
+            conn.query_row(
+                "SELECT reply_anchor_id FROM messages",
+                crate::db::params![],
+                |r| r.try_get::<Option<i64>, _>(0)
+            )
+            .await
+            .unwrap(),
             None
         );
         assert_eq!(
-            conn.query_row("SELECT text FROM messages", [], |r| r.get::<_, String>(0))
-                .unwrap(),
+            conn.query_row("SELECT text FROM messages", crate::db::params![], |r| {
+                r.try_get::<String, _>(0)
+            })
+            .await
+            .unwrap(),
             "旧消息"
         );
     }
 
-    fn v3_database(conn: &Connection) {
-        conn.execute_batch(V1_SQL).unwrap();
-        conn.execute_batch(V2_SQL).unwrap();
-        conn.execute_batch(V3_SQL).unwrap();
-        conn.pragma_update(None, "user_version", 3).unwrap();
+    async fn v3_database(conn: &mut sqlx::SqliteConnection) {
+        conn.execute_batch(V1_SQL).await.unwrap();
+        conn.execute_batch(V2_SQL).await.unwrap();
+        conn.execute_batch(V3_SQL).await.unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {}", 3))
+            .await
+            .unwrap();
         conn.execute_batch("INSERT INTO persons VALUES ('p_test', 'test', 1, 1, NULL);
             INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('g_test','group','p_test','旧消息',1);
             INSERT INTO tasks(task_id,goal,state,budget_max_calls,created_by_pid,chat_id,created_at)
-            VALUES ('t_test','旧任务','running',10,'p_test','g_test',1);").unwrap();
+            VALUES ('t_test','旧任务','running',10,'p_test','g_test',1);").await.unwrap();
     }
 
-    #[test]
-    fn migration_preserves_v3_rows_and_indexes_scheduler_and_lists() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        v3_database(&conn);
-        migrate(&mut conn).unwrap();
-        migrate(&mut conn).unwrap();
+    #[tokio::test]
+    async fn migration_preserves_v3_rows_and_indexes_scheduler_and_lists() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
         let row: (String, Option<i64>) = conn
-            .query_row("SELECT text, processed_at FROM messages", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT text, processed_at FROM messages",
+                crate::db::params![],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+            )
+            .await
             .unwrap();
         assert_eq!(row, ("旧消息".into(), None));
         assert_eq!(
-            conn.query_row("SELECT goal FROM tasks", [], |r| r.get::<_, String>(0))
+            conn.query_row("SELECT goal FROM tasks", crate::db::params![], |r| r
+                .try_get::<String, _>(0))
+                .await
                 .unwrap(),
             "旧任务"
         );
@@ -451,112 +476,143 @@ mod tests {
             ("SELECT task_id, chat_id, goal, used_calls FROM tasks WHERE state='running' ORDER BY created_at,task_id LIMIT 6", "idx_tasks_state_created"),
             ("SELECT * FROM tasks ORDER BY created_at DESC LIMIT 50", "idx_tasks_created"),
         ] {
-            let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
-                .query_map([], |r| r.get::<_, String>(3)).unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("\n");
+            let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {query}")).await.unwrap()
+                .query_map( crate::db::params![], |r| r.try_get::<String, _>(3)).await.unwrap()
+                .collect::<sqlx::Result<Vec<_>>>().unwrap().join("\n");
             assert!(plan.contains(index), "{plan}");
             assert!(!plan.contains("TEMP B-TREE"), "{plan}");
         }
     }
 
-    #[test]
-    fn concurrent_migrations_serialize_schema_changes() {
+    #[tokio::test]
+    async fn concurrent_migrations_serialize_schema_changes() {
         let path = std::env::temp_dir().join(format!(
             "yuantuan-migrate-{}-{}.db",
             std::process::id(),
             rand::random::<u64>()
         ));
-        let mut conn = connect(&path).unwrap();
-        v3_database(&conn);
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let mut conn = connect(&path).await.unwrap();
+        let database = conn.database();
+        v3_database(&mut conn).await;
+        drop(conn);
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
         let threads: Vec<_> = (0..4)
             .map(|_| {
                 let path = path.clone();
                 let barrier = barrier.clone();
-                std::thread::spawn(move || {
-                    let mut conn = connect(&path).unwrap();
-                    barrier.wait();
-                    migrate(&mut conn).unwrap();
+                tokio::spawn(async move {
+                    let mut conn = connect(&path).await.unwrap();
+                    barrier.wait().await;
+                    migrate(&mut conn).await.unwrap();
                 })
             })
             .collect();
         for thread in threads {
-            thread.join().unwrap();
+            thread.await.unwrap();
         }
-        migrate(&mut conn).unwrap();
+        let mut conn = connect(&path).await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&database, &conn.database()));
         assert_eq!(
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, usize>(0))
+            conn.query_row("PRAGMA user_version", crate::db::params![], |r| r
+                .try_get::<i64, _>(0))
+                .await
                 .unwrap(),
-            MIGRATIONS.len()
+            MIGRATIONS.len() as i64
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+            conn.query_row("SELECT COUNT(*) FROM messages", crate::db::params![], |r| r
+                .try_get::<i64, _>(0))
+                .await
                 .unwrap(),
             1
         );
         drop(conn);
+        database.close().await;
+        assert_eq!(database.pool().size(), 0);
         std::fs::remove_file(path).unwrap();
     }
 
-    #[test]
-    fn v6_preserves_legacy_memories_without_fabricating_sources_and_rolls_back_failure() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        v3_database(&conn);
-        add_column_if_missing(&conn, "messages", "processed_at", "INTEGER").unwrap();
-        conn.execute_batch(V4_SQL).unwrap();
-        conn.execute_batch(MIGRATIONS[4].1).unwrap();
-        conn.pragma_update(None, "user_version", 5).unwrap();
-        conn.execute_batch("INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at) VALUES ('person','p_test','旧记忆','explicit',1,1); CREATE TABLE idx_msg_external(dummy INTEGER);").unwrap();
-        assert!(migrate(&mut conn).is_err());
+    #[tokio::test]
+    async fn v6_preserves_legacy_memories_without_fabricating_sources_and_rolls_back_failure() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
+        add_column_if_missing(&mut conn, "messages", "processed_at", "INTEGER")
+            .await
+            .unwrap();
+        conn.execute_batch(V4_SQL).await.unwrap();
+        conn.execute_batch(MIGRATIONS[4].1).await.unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {}", 5))
+            .await
+            .unwrap();
+        conn.execute_batch("INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at) VALUES ('person','p_test','旧记忆','explicit',1,1); CREATE TABLE idx_msg_external(dummy INTEGER);").await.unwrap();
+        assert!(migrate(&mut conn).await.is_err());
         assert_eq!(
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            conn.query_row("PRAGMA user_version", crate::db::params![], |r| r
+                .try_get::<i64, _>(0))
+                .await
                 .unwrap(),
             5
         );
         assert!(conn
             .prepare("SELECT external_msg_id FROM messages")
+            .await
             .is_err());
-        conn.execute_batch("DROP TABLE idx_msg_external").unwrap();
-        migrate(&mut conn).unwrap();
-        migrate(&mut conn).unwrap();
+        conn.execute_batch("DROP TABLE idx_msg_external")
+            .await
+            .unwrap();
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
         let row: (String, Option<i64>, Option<String>) = conn
             .query_row(
                 "SELECT content,source_msg_id,source_chat_id FROM long_memories",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                crate::db::params![],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
             )
+            .await
             .unwrap();
         assert_eq!(row, ("旧记忆".into(), None, None));
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM person_profile_facts", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
+            conn.query_row(
+                "SELECT COUNT(*) FROM person_profile_facts",
+                crate::db::params![],
+                |r| r.try_get::<i64, _>(0)
+            )
+            .await
+            .unwrap(),
             0
         );
     }
 
-    #[test]
-    fn failed_v4_migration_rolls_back_added_column_and_version() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        v3_database(&conn);
+    #[tokio::test]
+    async fn failed_v4_migration_rolls_back_added_column_and_version() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
         // Index/table name collision fails after V4's ALTER TABLE.
         conn.execute_batch("CREATE TABLE idx_msg_pending(dummy INTEGER)")
+            .await
             .unwrap();
-        assert!(migrate(&mut conn).is_err());
+        assert!(migrate(&mut conn).await.is_err());
         let columns = conn
             .prepare("PRAGMA table_info(messages)")
+            .await
             .unwrap()
-            .query_map([], |r| r.get::<_, String>(1))
+            .query_map(crate::db::params![], |r| r.try_get::<String, _>(1))
+            .await
             .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
+            .collect::<sqlx::Result<Vec<_>>>()
             .unwrap();
         assert!(!columns.iter().any(|name| name == "processed_at"));
         assert_eq!(
-            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            conn.query_row("PRAGMA user_version", crate::db::params![], |r| r
+                .try_get::<i64, _>(0))
+                .await
                 .unwrap(),
             3
         );
-        conn.execute_batch("DROP TABLE idx_msg_pending").unwrap();
-        migrate(&mut conn).unwrap();
+        conn.execute_batch("DROP TABLE idx_msg_pending")
+            .await
+            .unwrap();
+        migrate(&mut conn).await.unwrap();
     }
 }

@@ -870,7 +870,7 @@ Provider 层统一抽象 OpenAI 兼容协议（chat/completions + tools），运
 
 选型：
 
-- SQLite（WAL 模式）内嵌数据库，无独立数据库服务
+- SQLite（WAL 模式）内嵌数据库，通过 SQLx 异步连接池访问，无独立数据库服务；连接/事务契约见[异步访问参考](../reference/sqlite-access.md)
 - 向量检索使用 sqlite-vec 扩展（随 Knowledge Base 一同可插拔，默认关闭）
 - Event Bus 为进程内 channel（tokio broadcast / mpsc），不依赖 Redis / MQ
 - WebUI 静态资源嵌入同一二进制
