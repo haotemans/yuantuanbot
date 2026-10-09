@@ -343,7 +343,10 @@ async fn reply_loop_sends_three_bubbles() {
     decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision.to_string()])),
-        chat: Mutex::new(VecDeque::from(vec!["".into(), "哈。‖确实不错。‖::at\n我去试试。".into()])),
+        chat: Mutex::new(VecDeque::from(vec![
+            "".into(),
+            "哈。‖确实不错。‖::at\n我去试试。".into(),
+        ])),
         inject_db: Mutex::new(Some(db_path.clone())),
         ..Default::default()
     });
@@ -398,7 +401,10 @@ async fn reply_loop_sends_three_bubbles() {
     let third = caps[2].1.as_array().unwrap();
     assert_eq!(third[0]["type"], "at");
     assert_eq!(third[0]["data"]["qq"], "2001");
-    assert_eq!(third[1]["data"]["text"], " 我去试试。", "::at 后也必须有间隔");
+    assert_eq!(
+        third[1]["data"]["text"], " 我去试试。",
+        "::at 后也必须有间隔"
+    );
     assert!(caps[1]
         .1
         .as_array()
@@ -433,6 +439,14 @@ async fn reply_loop_sends_three_bubbles() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(external_ids, vec![901, 902, 903]);
+    let linked: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND reply_anchor_id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(linked, 3, "每个成功气泡都保存真实回复归属");
     let profile: (String, i64) = conn
         .query_row(
             "SELECT content,source_msg_id FROM person_profile_facts WHERE person_id='p_2001'",
@@ -457,42 +471,138 @@ async fn reply_loop_sends_three_bubbles() {
     assert!(content.contains("云团觉得这个库怎么样"));
     assert!(!content.contains("等待期间出现的新话题"));
     assert_eq!(context["capabilities"]["tools_available"], false);
-    assert_eq!(context["capabilities"]["cross_chat_history_available"], false);
-    assert!(chat["messages"][0]["content"].as_str().unwrap().contains("本次回复长度：long"));
+    assert_eq!(
+        context["capabilities"]["cross_chat_history_available"],
+        false
+    );
+    assert!(chat["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("本次回复长度：long"));
     let chats: Vec<_> = requests.iter().filter(|r| r["model"] == "m-chat").collect();
     assert_eq!(chats.len(), 2, "空正文只重试一次");
-    assert_eq!(chats[0]["messages"], chats[1]["messages"], "重试保持同一上下文");
+    assert_eq!(
+        chats[0]["messages"], chats[1]["messages"],
+        "重试保持同一上下文"
+    );
     assert!(requests.iter().all(|r| r["tool_choice"] == "none"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
-    let path=temp_db();
-    let mut decision:Value=serde_json::from_str(&decision_json(true)).unwrap();
-    decision["reply_len"]=json!("short");
-    let queues=Arc::new(LlmQueues {
-        decision:Mutex::new(VecDeque::from([decision.to_string()])),
-        chat:Mutex::new(VecDeque::from(["::at这个库的‖性能不错。‖可以试试。‖::at".into()])),
+    let path = temp_db();
+    let mut decision: Value = serde_json::from_str(&decision_json(true)).unwrap();
+    decision["reply_len"] = json!("short");
+    let queues = Arc::new(LlmQueues {
+        decision: Mutex::new(VecDeque::from([decision.to_string()])),
+        chat: Mutex::new(VecDeque::from([
+            "::at这个库的‖性能不错。‖可以试试。‖::at".into()
+        ])),
         ..Default::default()
     });
-    let captures:Captures=Arc::new(Mutex::new(Vec::new()));
-    let _rig=build_rig(path.clone(),queues,vec![at_message(601,2001,"云团，这个库怎么样")],captures.clone(),Arc::new(Notify::new()),None,ReplyCfg::default()).await;
-    let deadline=Instant::now()+Duration::from_secs(30);
+    let captures: Captures = Arc::new(Mutex::new(Vec::new()));
+    let _rig = build_rig(
+        path.clone(),
+        queues,
+        vec![at_message(601, 2001, "云团，这个库怎么样")],
+        captures.clone(),
+        Arc::new(Notify::new()),
+        None,
+        ReplyCfg::default(),
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let conn=db::connect(&path).unwrap();
-        let count:i64=conn.query_row("SELECT COUNT(*) FROM messages WHERE sender_pid='self'",[],|r|r.get(0)).unwrap();
-        if count==1 { break; }
-        assert!(Instant::now()<deadline,"short 回复未发送");
+        let conn = db::connect(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='self'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if count == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "short 回复未发送");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let caps=captures.lock().unwrap();
-    assert_eq!(caps.len(),1);
-    assert_eq!(caps[0].1[0]["data"]["qq"],"2001");
-    assert_eq!(caps[0].1[1]["data"]["text"]," 这个库的性能不错。\n可以试试。");
+    let caps = captures.lock().unwrap();
+    assert_eq!(caps.len(), 1);
+    assert_eq!(caps[0].1[0]["data"]["qq"], "2001");
+    assert_eq!(
+        caps[0].1[1]["data"]["text"],
+        " 这个库的性能不错。\n可以试试。"
+    );
 }
 
 // ---------- 用例 2：插话不打断 ----------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
+    let path = temp_db();
+    let decision = json!({"action":"start_task","mood":"calm","mention":false,"reply_len":"long",
+        "task_goal":"查询过去执行结果","reason":"模拟过度接单","reply_mode":"answer",
+        "assessment":{"audience":"bot","intent":"question","continuity":"new_topic","confidence":"high",
+            "benefit":"medium","novelty":"new","evidence":"missing","evidence_msg_ids":[1]}});
+    let queues = Arc::new(LlmQueues {
+        decision: Mutex::new(VecDeque::from([decision.to_string()])),
+        chat: Mutex::new(VecDeque::from(["当前没有执行记录，无法确认。".into()])),
+        ..Default::default()
+    });
+    let captures: Captures = Arc::new(Mutex::new(Vec::new()));
+    let _rig = build_rig(
+        path.clone(),
+        queues.clone(),
+        vec![at_message(701, 2001, "之前跑过测试了吗")],
+        captures.clone(),
+        Arc::new(Notify::new()),
+        None,
+        ReplyCfg::default(),
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let conn = db::connect(&path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='self'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if count == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "参与策略后的回复未发送");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let conn = db::connect(&path).unwrap();
+    let payload: String = conn
+        .query_row(
+            "SELECT payload FROM events WHERE kind='DecisionMade' ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let trace: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(trace["policy"]["suggested_action"], "start_task");
+    assert_eq!(trace["action"], "reply");
+    assert_eq!(trace["policy"]["evidence_valid"], true);
+    assert_eq!(trace["reply_mode"], "state_uncertainty");
+    assert!(!trace["policy"]["notes"].as_array().unwrap().is_empty());
+    let task_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(task_count, 0, "询问过去记录不能直接触发工具");
+    let requests = queues.requests.lock().unwrap();
+    let chat = requests.iter().find(|r| r["model"] == "m-chat").unwrap();
+    let system = chat["messages"][0]["content"].as_str().unwrap();
+    assert!(system.contains(yuantuan_core::engagement::ReplyMode::StateUncertainty.instruction()));
+    assert!(system.contains("本次回复长度：short"));
+    assert_eq!(captures.lock().unwrap().len(), 1);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn new_message_preserves_remaining_bubbles_and_reply_target() {
@@ -565,8 +675,11 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
     let caps = captures.lock().unwrap().clone();
-    let texts: Vec<_> = caps.iter().map(|(_,s)| s[0]["data"]["text"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(texts, ["第一。","第二。","第三。"]);
+    let texts: Vec<_> = caps
+        .iter()
+        .map(|(_, s)| s[0]["data"]["text"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(texts, ["第一。", "第二。", "第三。"]);
     let conn = db::connect(&db_path).unwrap();
     let interrupted: i64 = conn
         .query_row(

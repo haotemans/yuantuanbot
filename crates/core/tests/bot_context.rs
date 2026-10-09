@@ -135,6 +135,149 @@ async fn model_cannot_start_tasks_without_a_source_request() {
 }
 
 #[test]
+fn dialogue_links_only_recent_replies_to_the_same_person_and_chat() {
+    let rig = Rig::new();
+    let a = rig.message("p_a", "123", "帮我选语言", None, None);
+    let qa = rig.message("self", "123", "你打算用哪种语言？", Some(901), None);
+    let b = rig.message("p_b", "123", "帮我选框架", None, None);
+    let qb = rig.message("self", "123", "你准备选哪个框架？", Some(902), None);
+    let conn = db::connect(&rig.path).unwrap();
+    conn.execute(
+        "UPDATE messages SET reply_anchor_id=?1 WHERE msg_id=?2",
+        params![a.msg_id, qa.msg_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE messages SET reply_anchor_id=?1 WHERE msg_id=?2",
+        params![b.msg_id, qb.msg_id],
+    )
+    .unwrap();
+    rig.message("self", "123", "旧消息没有归属不能猜", None, None);
+    let followup = rig.message("p_a", "123", "Python", None, None);
+    let snap = capture_reply_snapshot(
+        &rig.path,
+        &followup,
+        followup.msg_id,
+        &ContextCfg::default(),
+    )
+    .unwrap();
+    assert_eq!(snap.dialogue["last_reply_to_sender"]["msg_id"], qa.msg_id);
+    assert_eq!(snap.dialogue["reply_target_person_id"], "p_a");
+    let elsewhere = rig.message("p_a", "456", "Python", None, None);
+    let snap = capture_reply_snapshot(
+        &rig.path,
+        &elsewhere,
+        elsewhere.msg_id,
+        &ContextCfg::default(),
+    )
+    .unwrap();
+    assert!(snap.dialogue["last_reply_to_sender"].is_null());
+    conn.execute("UPDATE messages SET ts=-201 WHERE msg_id=?1", [qa.msg_id])
+        .unwrap();
+    let snap = capture_reply_snapshot(
+        &rig.path,
+        &followup,
+        followup.msg_id,
+        &ContextCfg::default(),
+    )
+    .unwrap();
+    assert!(
+        snap.dialogue["last_reply_to_sender"].is_null(),
+        "超过5分钟不默认是承接"
+    );
+    for (id, person, chat) in [
+        ("t1", "p_a", "123"),
+        ("t2", "p_b", "123"),
+        ("t3", "p_a", "456"),
+    ] {
+        conn.execute("INSERT INTO tasks(task_id,goal,state,budget_max_calls,created_by_pid,chat_id,created_at) VALUES (?1,'进行中的任务','running',10,?2,?3,1)",params![id,person,chat]).unwrap();
+    }
+    let snap = capture_reply_snapshot(
+        &rig.path,
+        &followup,
+        followup.msg_id,
+        &ContextCfg::default(),
+    )
+    .unwrap();
+    assert_eq!(snap.active_tasks.len(), 1);
+    assert_eq!(snap.active_tasks[0]["task_id"], "t1");
+}
+
+#[test]
+fn participation_load_does_not_mix_private_chat_with_same_group_number() {
+    let rig = Rig::new();
+    let private = rig.message("self", "123", "私聊回复", None, None);
+    let conn = db::connect(&rig.path).unwrap();
+    conn.execute(
+        "UPDATE messages SET chat_type='private' WHERE msg_id=?1",
+        [private.msg_id],
+    )
+    .unwrap();
+    let anchor = rig.message("p_a", "123", "群里消息", None, None);
+    let snap =
+        capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &ContextCfg::default()).unwrap();
+    assert_eq!(snap.scene["my_replies_last_5min"], 0);
+    assert_eq!(snap.scene["human_messages_last_30s"], 1);
+    assert!(snap.scene["seconds_since_my_reply"].is_null());
+}
+
+#[tokio::test]
+async fn semantic_evidence_must_survive_decision_context_pruning() {
+    use serde_json::json;
+    let rig = Rig::new();
+    let old = rig.message("p_a", "123", "原先的 Docker 问题", None, None);
+    for i in 0..10 {
+        rig.fact(
+            "person",
+            "p_a",
+            &format!("Docker {i} {}", "历史资料".repeat(190)),
+            i,
+        );
+    }
+    let anchor = rig.message("p_a", "123", "Docker 怎么配置", None, None);
+    let snapshot = capture_reply_snapshot(
+        &rig.path,
+        &anchor,
+        anchor.msg_id,
+        &ContextCfg {
+            roster_mem_per: 10,
+            ..ContextCfg::default()
+        },
+    )
+    .unwrap();
+    let app = axum::Router::new().route("/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<Value>| async move {
+        let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(ctx["context_pruned"], true);
+        assert!(ctx["recent_messages"].as_array().unwrap().is_empty());
+        let out = json!({"action":"reply","mood":"calm","mention":false,"reply_len":"short","reason":"引用已裁剪的消息",
+            "assessment":{"audience":"bot","intent":"question","continuity":"new_topic","confidence":"high","benefit":"high","novelty":"new","evidence":"sufficient","evidence_msg_ids":[ctx["anchor"]["msg_id"],old.msg_id]}});
+        axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let path = rig.dir.join("providers.toml");
+    std::fs::write(&path, format!("[provider.mock]\nbase_url=\"http://{addr}\"\napi_key_env=\"\"\n[roles]\ndecision={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+    let gateway = yuantuan_core::llm::LlmGateway::load(&path).unwrap();
+    let out = yuantuan_core::decision::decide(
+        &rig.path,
+        &gateway,
+        &yuantuan_core::event::EventBus::default(),
+        &yuantuan_core::state::MoodState::default(),
+        &anchor,
+        None,
+        &snapshot,
+    )
+    .await;
+    assert!(!out.fallback);
+    assert_eq!(out.output.action.as_str(), "ignore");
+    assert_eq!(out.policy.evidence_valid, Some(false));
+    server.abort();
+}
+
+#[test]
 fn profile_requires_own_exact_evidence_and_new_sources_win() {
     let rig = Rig::new();
     let old = rig.message("p_a", "g1", "我长期使用 Rust", Some(900), None);

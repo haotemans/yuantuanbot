@@ -266,7 +266,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 6] = [
+const MIGRATIONS: [(&str, &str); 7] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
@@ -300,6 +300,10 @@ const MIGRATIONS: [(&str, &str); 6] = [
         );
     "#,
     ),
+    (
+        "V0.7 Bot 回复归属",
+        "CREATE INDEX IF NOT EXISTS idx_msg_reply_anchor ON messages(reply_anchor_id,msg_id);",
+    ),
 ];
 
 pub fn migrate(conn: &mut Connection) -> Result<()> {
@@ -332,6 +336,9 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
             add_column_if_missing(&tx, "long_memories", "source_chat_id", "TEXT")?;
             add_column_if_missing(&tx, "long_memories", "source_msg_id", "INTEGER")?;
             add_column_if_missing(&tx, "long_memories", "source_end_msg_id", "INTEGER")?;
+        }
+        if version == 7 {
+            add_column_if_missing(&tx, "messages", "reply_anchor_id", "INTEGER")?;
         }
         tx.execute_batch(sql)
             .with_context(|| format!("执行迁移 v{version} 失败"))?;
@@ -372,6 +379,45 @@ pub fn list_tables(conn: &Connection) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v7_does_not_guess_old_reply_ownership_and_rolls_back_on_failure() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v3_database(&conn);
+        migrate(&mut conn).unwrap();
+        conn.execute_batch(
+            "DROP INDEX idx_msg_reply_anchor; ALTER TABLE messages DROP COLUMN reply_anchor_id;
+            PRAGMA user_version=6; CREATE TABLE idx_msg_reply_anchor(dummy INTEGER);",
+        )
+        .unwrap();
+        assert!(migrate(&mut conn).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert!(!conn
+            .prepare("PRAGMA table_info(messages)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .any(|c| c.unwrap() == "reply_anchor_id"));
+        conn.execute_batch("DROP TABLE idx_msg_reply_anchor")
+            .unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT reply_anchor_id FROM messages", [], |r| r
+                .get::<_, Option<i64>>(0))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            conn.query_row("SELECT text FROM messages", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "旧消息"
+        );
+    }
 
     fn v3_database(conn: &Connection) {
         conn.execute_batch(V1_SQL).unwrap();

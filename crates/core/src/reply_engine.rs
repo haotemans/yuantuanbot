@@ -711,9 +711,10 @@ fn insert_self_message_ex(
         params![now],
     );
     if let Err(e) = conn.execute(
-        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts, external_msg_id)
-         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5, ?6)",
-        params![job.chat_id, chat_type, text, has_image as i64, now, external_msg_id],
+        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts, external_msg_id,reply_anchor_id)
+         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5, ?6,
+          (SELECT msg_id FROM messages WHERE msg_id=?7 AND chat_id=?1 AND chat_type=?2 AND sender_pid!='self'))",
+        params![job.chat_id, chat_type, text, has_image as i64, now, external_msg_id,job.anchor_msg_id],
     ) {
         warn!(error = %e, "self 回复落库失败");
     }
@@ -751,7 +752,8 @@ pub async fn prepare_and_enqueue(
             "本次回复长度：long。按问题需要展开，避免重复和无依据扩写。"
         }
     };
-    let reserve = length_hint.chars().count() + 1;
+    let mode_hint = out.reply_mode.instruction();
+    let reserve = length_hint.chars().count() + mode_hint.chars().count() + 2;
     let budget = context_builder::ContextCfg {
         budget_chars: ctx_cfg.budget_chars.saturating_sub(reserve),
         ..*ctx_cfg
@@ -759,6 +761,8 @@ pub async fn prepare_and_enqueue(
     let mut ctx = context_builder::render_bot_context(snapshot, mood.get(), &budget)?;
     ctx.system.push('\n');
     ctx.system.push_str(length_hint);
+    ctx.system.push('\n');
+    ctx.system.push_str(mode_hint);
     let started = Instant::now();
     let mut raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)

@@ -78,7 +78,7 @@ enabled=false
         assert "WAL checkpoint 完成" in logs
         with sqlite3.connect(target) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            assert version == 6, version
+            assert version == 7, version
             assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             after = {t: db.execute("SELECT COUNT(*) FROM " + t).fetchone()[0] for t in before}
             assert before == after, (before, after)

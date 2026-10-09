@@ -41,6 +41,9 @@ pub struct DecisionMadePayload {
     pub fallback: bool,
     pub retries: u32,
     pub elapsed_ms: u64,
+    pub assessment: Option<crate::engagement::Assessment>,
+    pub reply_mode: crate::engagement::ReplyMode,
+    pub policy: crate::engagement::PolicyTrace,
 }
 
 /// BubbleSent 载荷（每泡一条：ok=false 时 note 说明原因——发送失败跳过 / 角色未配置等）

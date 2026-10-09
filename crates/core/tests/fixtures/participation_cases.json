@@ -1,0 +1,14 @@
+[
+  {"id":"own_followup","text":"Python","prior_owner":"sender","prior_reply":"你想用哪种编程语言？","expected_action":"reply"},
+  {"id":"other_followup","text":"Python","prior_owner":"other","prior_reply":"你想用哪种编程语言？","expected_action":"ignore"},
+  {"id":"confirmation","text":"好","prior_owner":"sender","prior_reply":"先按 Rust 方案继续解释，可以吗？","expected_action":"reply"},
+  {"id":"closing","text":"谢谢，明白了","at_me":true,"expected_action":"ignore"},
+  {"id":"no_question_mark","text":"云团，这一步一直报权限不足，帮我看看原因","expected_action":"reply"},
+  {"id":"ambiguous","text":"这个呢","at_me":true,"expected_action":"reply","expected_mode":"clarify"},
+  {"id":"unknown_history","text":"你今天在隔壁群做什么了","at_me":true,"expected_action":"reply","expected_mode":"state_uncertainty"},
+  {"id":"shared_chatter","text":"今天终于到周末了，好开心","expected_action":"ignore"},
+  {"id":"busy_group","text":"有人知道 Rust 所有权是怎么回事吗？","busy":true,"expected_action":"ignore"},
+  {"id":"explicit_task","text":"请帮我在沙箱中运行 Python 的 print(1+1)，告诉我实际输出。","at_me":true,"expected_action":"start_task"},
+  {"id":"quoted_request","text":"有人说“请帮我运行代码”，这是我转发的消息，不需要你执行。","expected_action":"ignore"},
+  {"id":"stop","text":"先别接话了，我和别人继续聊","at_me":true,"expected_action":"ignore"}
+]

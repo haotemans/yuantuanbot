@@ -441,7 +441,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                             chat_id: m.chat_id.clone(),
                             chat_type,
                             target,
-                            anchor_msg_id: 0,
+                            anchor_msg_id: m.msg_id,
                             mention: false,
                             mention_qq: None,
                             kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {

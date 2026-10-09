@@ -27,13 +27,15 @@ Bot 的 user 输入是结构化 JSON，消息正文中的换行/引号会被转�
 | `topic_memories` | 当前对象/当前会话的相关记忆，默认最多 3 条，上限 10；正文最多 800 字，明确标记截断 |
 | `recent_messages` | 当前 chat/type、消息上界以内的最近 K 条，默认 20，上限 100；每条最多 2,000 字 |
 | `participants` | 锚点/引用/近期对话涉及的人，按 person_id 区分，附当时名片和关系分 |
+| `dialogue` | 同 chat/type 近 5 分钟内，确实回复过当前人的最后一条 Bot 消息；正文最多 300 字，旧消息不猜归属 |
+| `active_tasks` | 当前 chat_id、当前创建者的最多 3 个 running 任务状态，目标最多 160 字；不是已执行结果 |
 | `limitations` | 无人物简档、无相关记忆、引用缺失/有歧义、引用链未完整展开等提示 |
 
-每条消息携带本地 ID、person_id、昵称、时间、外部引用编号和 `speaker_kind`；Bot 旧回答只作衔接，不当作独立事实依据。
+每条消息携带本地 ID、person_id、昵称、时间、外部引用编号、`reply_anchor_id` 和 `speaker_kind`；Bot 旧回答只作衔接，不当作独立事实依据。对话承接与任务状态的具体使用见[语义参与框架](decision-framework.md)。
 
-Bot 的 system + user 默认最多 40,000 **字符**。超出时先将近期对话减少到 5 条，再删减相关记忆和人物简档，必要时继续移除近期对话/名册；`optional_context_pruned=true` 表示可选资料被删减。锚点、引用和缺失提示仍在，放不下就返回错误，发送路径不调用 bot_chat。这个限制不是 tokenizer 的 token 预算。
+Bot 的 system + user 默认最多 40,000 **字符**。超出时先将近期对话减少到 5 条，再删减相关记忆和人物简档，必要时继续移除近期对话/名册/任务状态；`optional_context_pruned=true` 表示可选资料被删减。锚点、引用、承接证据和缺失提示仍在，放不下就返回错误，发送路径不调用 bot_chat。reply_len 和 reply_mode 的 system 提示也预留在该预算中。这个限制不是 tokenizer 的 token 预算。
 
-Decision 使用同一快照的精简投影：anchor 500 字、每条窗口消息 160 字、每条引用 300 字；额外带窗口前最多 6 条近期消息、每条约 160 字，按需减少近期消息/窗口消息/记忆/简档，将结构化 state 限制在 8,000 字符内。系统 prompt 和模型 tokenizer 的完整 8,192-token 校验仍未实现；窗口内全部高优先级消息＋最后 30 条普通消息的完整筛选也未在本轮补齐。
+Decision 使用同一快照的精简投影：anchor 500 字、每条窗口消息 160 字、每条引用 300 字；额外带窗口前最多 6 条近期消息、每条约 160 字，按需减少近期消息/窗口消息/记忆/简档/任务状态，将结构化 state 限制在 8,000 字符内。系统 prompt 和模型 tokenizer 的完整 8,192-token 校验仍未实现；窗口内全部高优先级消息＋最后 30 条普通消息的完整筛选也未在本轮补齐。
 
 ## 人物简档如何产生
 
@@ -68,6 +70,8 @@ V6 为消息增加 `external_msg_id`；接收消息和发送成功回执都保�
 
 V6 同时增加长期记忆的 `source_chat_id`、`source_msg_id`、`source_end_msg_id` 和人物简档表。旧消息、记忆、每日摘要均保留；不编造旧来源。显式写入补源消息，归纳写入补源窗口。迁移在原有 IMMEDIATE 事务中完成并支持失败回滚，详见[数据模型](data-model.md)。新表包含在现有数据库备份里。
 
+V7 增加成功发送气泡的本地 `reply_anchor_id`，用来定位当时的回复对象。旧 NULL 保留，不利用邻近时间或昵称回填。人物身份继续按 `p_<QQ>` 归并，改名不产生新身份。
+
 配置仍使用 `[context] budget_chars / k / roster_mem_per`。`roster_mem_per` 是兼容保留的旧键名，含义现在是当前对象/会话的话题记忆总条数；面板标签已改为“话题记忆条数”。这些配置按本轮开始时取值；不需要新模型、API key 或外部检索服务。
 
 ## 验证
@@ -81,3 +85,5 @@ V6 同时增加长期记忆的 `source_chat_id`、`source_msg_id`、`source_end_
 ## 2026-10-10 可靠性补充
 
 默认人格初始化、无执行依据时的正文规则、reply_len 提示、空正文重试和 Decision 请求约束见[可靠性参考](decision-reliability.md)。这些增量继续使用同一快照，不据小样本声称杜绝幻觉。
+
+后续同日补充的参与判断、真实回复归属、reply_mode、V7 隔离验收与真实模型评测见[语义参与框架](decision-framework.md)和[后端工作记录](../changes/backend-hardening-workbench.md)；上方 113 项测试是 V6 轮次的历史记录。

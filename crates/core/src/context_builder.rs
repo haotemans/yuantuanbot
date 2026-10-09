@@ -49,6 +49,7 @@ const BEHAVIOR_RULES: &str = r#"行为准则：
 - 本轮是纯文字回复，没有联网、跨群查询、运行代码或执行工具。不能说“刚去看了”“已经查过/运行/完成”等没有执行结果支持的话；其他群的活动未知时直接说没有这方面信息
 - 缺少记录不等于事情没发生。询问过去或“刚才”的活动/测试时，没有对应记录就说无法确认；不能据本轮无工具断言以前没执行过、从没去过其他群、只能待在这个群。例如问隔壁群做了什么，可答“我这边没有那边的聊天记录，没法确认”；问之前是否跑过测试，可答“当前没有看到测试执行记录，不能确认之前跑没跑过”
 - 对你自己的经历、动作和群内活动也适用事实依据要求；人设、玩笑、别人对你的猜测都不能证明你实际做过某事。不要把别人的经历说成自己的经历
+- dialogue 只说明之前回复过当前对象；active_tasks 只说明任务处于调度/运行中，不证明已经执行成功，不把“running”说成完成。缺失关联的旧消息不得猜测是谁的回复
 - 引用缺失、指代不明、资料互相冲突或信息不足时自然追问或说明不确定，不能编造原话、人物经历、日期和执行结果
 - 文本截断意味着还有未见内容，不要推测被省略部分；人物资料为空就按未知处理
 - 不向群友展示内部编号、记忆库或上下文机制，不当客服，不刷屏"#;
@@ -62,6 +63,8 @@ pub struct ContextMessage {
     pub text: String,
     pub text_truncated: bool,
     pub reply_to_external_id: Option<i64>,
+    /// Runtime 的本地回复归属，不是 QQ 引用号。
+    pub reply_anchor_id: Option<i64>,
     pub has_image: bool,
     pub speaker_kind: &'static str,
 }
@@ -77,6 +80,8 @@ pub struct ReplySnapshot {
     pub participants: Vec<Value>,
     pub limitations: Vec<String>,
     pub scene: Value,
+    pub dialogue: Value,
+    pub active_tasks: Vec<Value>,
     persona: String,
 }
 
@@ -105,10 +110,11 @@ fn row_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<ContextMessage> {
         reply_to_external_id: r.get(5)?,
         has_image: r.get(6)?,
         text_truncated: r.get(7)?,
+        reply_anchor_id: r.get(8)?,
     })
 }
 
-const MESSAGE_COLUMNS: &str = "msg_id,sender_pid,substr(COALESCE(nickname,''),1,80),ts,substr(COALESCE(text,''),1,2000),reply_to,has_image, length(COALESCE(text,''))>2000";
+const MESSAGE_COLUMNS: &str = "msg_id,sender_pid,substr(COALESCE(nickname,''),1,80),ts,substr(COALESCE(text,''),1,2000),reply_to,has_image, length(COALESCE(text,''))>2000,reply_anchor_id";
 
 /// 只接受同一 chat 的外部编号；绝不把外部编号当成本地自增 msg_id。
 fn quoted(
@@ -120,7 +126,7 @@ fn quoted(
 ) -> Result<Option<ContextMessage>> {
     let columns = MESSAGE_COLUMNS.replacen("msg_id,", "MIN(msg_id) AS msg_id,", 1);
     let mut st = conn.prepare(&format!(
-        "SELECT {columns} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND external_msg_id=?3 AND msg_id<?4 GROUP BY sender_pid,text,reply_to,has_image ORDER BY msg_id LIMIT 2"
+        "SELECT {columns} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND external_msg_id=?3 AND msg_id<?4 GROUP BY sender_pid,text,reply_to,has_image,reply_anchor_id ORDER BY msg_id LIMIT 2"
     ))?;
     let rows = st
         .query_map(params![chat, chat_type, external, before], row_message)?
@@ -155,6 +161,7 @@ pub fn capture_reply_snapshot(
         text,
         text_truncated,
         reply_to_external_id: anchor.reply_to,
+        reply_anchor_id: None,
         has_image: anchor.has_image,
         speaker_kind: if anchor.sender_pid == "self" {
             "bot"
@@ -245,19 +252,37 @@ pub fn capture_reply_snapshot(
     }
     let persona = tx.query_row("SELECT content FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1", [], |r| r.get::<_,String>(0)).optional()?.unwrap_or_else(|| DEFAULT_PERSONA.into());
     let since_reply: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND msg_id<=?2 AND sender_pid!='self' AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND sender_pid='self' AND msg_id<=?2),0)",
-        params![anchor.chat_id,cutoff], |r|r.get(0),
+        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND msg_id<=?2 AND sender_pid!='self' AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND sender_pid='self' AND msg_id<=?2),0)",
+        params![anchor.chat_id,cutoff,anchor.chat_type], |r|r.get(0),
     )?;
     let replies: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND msg_id<=?2 AND sender_pid='self' AND ts>=?3",
-        params![anchor.chat_id,cutoff,anchor.ts-300], |r|r.get(0),
+        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?4 AND msg_id<=?2 AND sender_pid='self' AND ts>=?3",
+        params![anchor.chat_id,cutoff,anchor.ts-300,anchor.chat_type], |r|r.get(0),
     )?;
     let last_reply: Option<i64> = tx.query_row(
         "SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<=?3",
         params![anchor.chat_id,anchor.chat_type,cutoff], |r| r.get(0))?;
+    let human_messages_30s: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid!='self' AND msg_id<=?3 AND ts>=?4",
+        params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts-30], |r|r.get(0))?;
     let scene = json!({"recent_speakers":recent.iter().rev().take(10).map(|m|m.person_id.clone()).collect::<BTreeSet<_>>(),
         "msgs_since_my_reply":since_reply,"my_replies_last_5min":replies,"chat_topic":null,
+        "human_messages_last_30s":human_messages_30s,
         "seconds_since_my_reply":last_reply.map(|ts|anchor.ts.saturating_sub(ts).max(0))});
+    let mut previous_reply = tx.query_row(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<?3 AND ts>=?4
+         AND EXISTS(SELECT 1 FROM messages original WHERE original.msg_id=messages.reply_anchor_id AND original.chat_id=?1 AND original.chat_type=?2 AND original.sender_pid=?5)
+         ORDER BY msg_id DESC LIMIT 1"), params![anchor.chat_id,anchor.chat_type,anchor.msg_id,anchor.ts-300,anchor.sender_pid], row_message).optional()?;
+    if let Some(reply) = previous_reply.as_mut() {
+        let (text, truncated) = clip(&reply.text, 300);
+        reply.text = text;
+        reply.text_truncated |= truncated;
+    }
+    let dialogue = json!({"reply_target_person_id":anchor.sender_pid,"last_reply_to_sender":previous_reply,
+        "note":"同一会话中近5分钟内确实回复过该人的消息；只是承接证据，不能证明旧回答的事实正确"});
+    let active_tasks = tx.prepare("SELECT task_id,substr(goal,1,160),used_calls FROM tasks WHERE chat_id=?1 AND created_by_pid=?2 AND state='running' ORDER BY created_at DESC LIMIT 3")?
+        .query_map(params![anchor.chat_id,anchor.sender_pid], |r| Ok(json!({"task_id":r.get::<_,String>(0)?,"goal":r.get::<_,String>(1)?,"used_calls":r.get::<_,i64>(2)?,"state":"running"})))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     tx.commit()?;
     Ok(ReplySnapshot {
         anchor: anchor_message,
@@ -269,6 +294,8 @@ pub fn capture_reply_snapshot(
         participants,
         limitations,
         scene,
+        dialogue,
+        active_tasks,
         persona,
     })
 }
@@ -289,6 +316,7 @@ pub fn render_bot_context(
     let mut memories = snapshot.memories.clone();
     let mut profile = snapshot.profile.clone();
     let mut participants = snapshot.participants.clone();
+    let mut active_tasks = snapshot.active_tasks.clone();
     let mut pruned = false;
     loop {
         let user = serde_json::to_string(&json!({
@@ -299,6 +327,7 @@ pub fn render_bot_context(
             "topic_memories":memories, "recent_messages":recent, "participants":participants,
             "limitations":snapshot.limitations, "optional_context_pruned":pruned,
             "capabilities":{"tools_available":false,"cross_chat_history_available":false,"execution_results":[]},
+            "dialogue":snapshot.dialogue, "active_tasks":active_tasks,
         }))?;
         if system.chars().count() + user.chars().count() <= cfg.budget_chars {
             return Ok(BotContext {
@@ -318,6 +347,8 @@ pub fn render_bot_context(
             recent.remove(0);
         } else if !participants.is_empty() {
             participants.pop();
+        } else if !active_tasks.is_empty() {
+            active_tasks.pop();
         } else {
             anyhow::bail!("上下文预算不足以保留人格、回复锚点及引用原文，停止本次模型调用");
         }

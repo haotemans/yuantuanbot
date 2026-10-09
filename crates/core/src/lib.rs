@@ -8,6 +8,7 @@ pub mod consolidation;
 pub mod context_builder;
 pub mod db;
 pub mod decision;
+pub mod engagement;
 pub mod event;
 pub mod llm;
 pub mod mcp;

@@ -6,6 +6,8 @@
 
 > 本文记录消息处理实现及其边界，对照[运行时设计](../design/runtime-design.md)与[决策台账](../decision-log.md)。历史实现描述保留；本次明确核对的裁决及差距见文末，不以局部实现替代完整验收。
 
+2026-10-10 增量：Decision → Runtime 参与策略 → BotChat 的当前契约见[语义参与框架](decision-framework.md)。同一快照新增真实回复承接与任务状态，DecisionMade 保留建议/最终动作和限制原因；成功发送气泡以 V7 `reply_anchor_id` 保存本地归属。它不替代原有窗口、任务执行与发送队列，也不表示已补齐高优先级窗口或精确 token 预算。
+
 ## 一、事件总线（Event Bus）职责边界
 
 **形态**：单例 tokio broadcast，容量 1024；`EventBus::default()` 在 main 装配时创建。

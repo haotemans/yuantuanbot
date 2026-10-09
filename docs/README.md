@@ -9,6 +9,7 @@
 | 产品目标、系统边界与总体方案 | [总体架构](design/architecture-v0.1.md) | 设计目标，包含尚未落地的能力 |
 | 启动、并发、WebUI 与 QQ 通讯设计 | [运行时设计](design/runtime-design.md) | 设计约束，不以其中的历史进度描述判断完成情况 |
 | 消息实际如何流转、实现有哪些缺口 | [信息流实现参考](reference/message-flow-rules.md) | 实现记录与已知差距，附代码来源和核对范围 |
+| Bot 如何理解接话、决定参与或保持安静 | [语义参与决策框架](reference/decision-framework.md) | 决策输入输出、回复承接、依据校验、自适应冷却与 Trace |
 | Decision 输出、任务误触发、回复失败与停机 | [可靠性参考](reference/decision-reliability.md) | 远端日志依据、修复约束和验证入口 |
 | 回复时如何使用人物资料、记忆和对话 | [Bot 上下文](reference/bot-context.md)、[术语](../CONTEXT.md) | 带出处的简档、话题检索、引用与回复快照 |
 | Agent 如何执行代码、使用 Git/Python/Bun | [开发沙箱](reference/agent-sandbox.md) | Docker 工具、Linux 部署、任务工作卷和验证边界 |

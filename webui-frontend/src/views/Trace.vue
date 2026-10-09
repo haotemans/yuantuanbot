@@ -43,6 +43,14 @@
               <n-tag v-if="sel.payload.fallback" size="small" round type="error">fallback</n-tag>
             </n-space>
             <n-alert type="info" style="margin-bottom: 10px">reason · {{ sel.payload.reason }}</n-alert>
+            <template v-if="sel.payload.policy">
+              <n-space size="small" style="margin-bottom: 8px">
+                <n-tag size="small">模型建议 · {{ sel.payload.policy.suggested_action }}</n-tag>
+                <n-tag size="small">回复方式 · {{ sel.payload.reply_mode }}</n-tag>
+                <n-tag v-if="sel.payload.policy.evidence_valid === false" size="small" type="warning">消息依据未通过</n-tag>
+              </n-space>
+              <n-alert v-if="sel.payload.policy.notes?.length" type="warning" style="margin-bottom: 10px">{{ sel.payload.policy.notes.join('；') }}</n-alert>
+            </template>
           </template>
           <json-view :data="sel.payload" />
         </template>
