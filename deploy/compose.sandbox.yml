@@ -1,0 +1,11 @@
+# 与 compose.yml 合用；YUANTUAN_DOCKER_SOCKET 指向专用 rootless Docker socket。
+services:
+  yuantuan:
+    build:
+      target: sandbox-runtime
+    environment:
+      DOCKER_HOST: unix:///run/sandbox-docker.sock
+    volumes:
+      - type: bind
+        source: ${YUANTUAN_DOCKER_SOCKET:?set the dedicated rootless Docker socket path}
+        target: /run/sandbox-docker.sock

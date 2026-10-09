@@ -46,6 +46,15 @@
 
 ## 历史状态
 
+### 2026-10-09：Agent Docker 开发工具第一版
+
+- 用户确认 Linux 服务器 + Docker 部署方向；实现和边界统一维护在[开发沙箱参考](../reference/agent-sandbox.md)。未修改当前运行配置，未部署服务器。
+- 新增 `sandbox_exec`、独立 Git/Python/Bun 镜像、可选后端 Docker CLI target 和 Compose overlay。运行时按 task_id 隔离命名卷；命令有进程/内存/CPU/输出/时间限制，正常完成与取消均请求清理临时容器。
+- Tool 参数 schema 进入 Agent 目录并转发 MCP inputSchema；沙箱命令及有界结果进入任务回放。配置默认关闭，非法沙箱配置写回前拒绝，有效修改标记重启生效。原有 Agent 10 轮/3 并发/120 秒契约保持。
+- `cargo test --workspace`：104 个测试通过；真实 Docker 验收需显式运行（本机无 Docker），既有 supervisor 文档测试继续 ignored。新增 Docker 测试覆盖文件保留/隔离、工具版本、输出截断、超时、取消清理和限额配置，不能据测试文件存在宣称已完成 Linux 验收。
+- `cargo check --workspace --all-targets` 与 `cargo clippy --workspace --all-targets --message-format short` 通过；Clippy 保留已有告警。核心改动 rustfmt、Git 空白差异检查通过；未改前端文件。
+- 后续重点：Linux/rootless 实测、工作卷磁盘配额与保留回收、产物导出/备份、私有仓凭据及面板配置。没有吞吐或冷启动基准，不声称性能提升比例。
+
 - status: implementing → verifying
 - owner: kimi + hsb
 - last-grill: 2026-10-07

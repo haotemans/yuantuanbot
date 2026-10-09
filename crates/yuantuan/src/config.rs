@@ -20,6 +20,7 @@ pub struct Config {
     pub backup: yuantuan_core::backup::BackupCfg,
     pub mcp: yuantuan_core::mcp::McpConfig,
     pub pipeline: PipelineSection,
+    pub sandbox: yuantuan_core::tools::sandbox::SandboxConfig,
 }
 
 /// [pipeline] 消息管线调优参数（G008 裁决：可调非设计裁决，走热应用）
@@ -90,6 +91,7 @@ impl Default for Config {
             backup: yuantuan_core::backup::BackupCfg::default(),
             mcp: yuantuan_core::mcp::McpConfig::default(),
             pipeline: PipelineSection::default(),
+            sandbox: yuantuan_core::tools::sandbox::SandboxConfig::default(),
         }
     }
 }
@@ -352,6 +354,19 @@ pat_env = "YUANTUAN_BACKUP_PAT"
 daily_time = "03:00"
 # 本地 backups/ 保留天数（>0；超期文件启动新备份时删除）
 keep_days = 7
+
+[sandbox]
+# Linux Docker 开发沙箱；先按 docs/reference/agent-sandbox.md 构建镜像并接通 Docker。
+# 修改后重启生效；关闭时不注册工具、不调用 Docker。
+enabled = false
+image = "yuantuan-sandbox:local"
+namespace = "yuantuan"
+network = "none"
+memory_mb = 512
+cpus = 1.0
+pids_limit = 128
+timeout_secs = 60
+max_output_bytes = 16384
 
 [log]
 level = "info"

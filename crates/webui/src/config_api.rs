@@ -120,6 +120,15 @@ pub async fn post_config(State(state): State<AppState>, Json(body): Json<WriteBo
         let toml_text = to_toml_text(&cfg_clean)?;
         let back: toml::Value = toml::from_str(&toml_text)
             .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("config TOML 回读解析失败: {e}") }))))?;
+        if let Some(sandbox) = cfg_clean.get("sandbox") {
+            let sandbox: yuantuan_core::tools::sandbox::SandboxConfig = serde_json::from_value(sandbox.clone())
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("sandbox 配置错误: {e}")}))))?;
+            sandbox.validate()
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))))?;
+        }
+        if cfg_clean.get("sandbox") != orig.get("sandbox") {
+            requires_restart.push("sandbox 开发沙箱（重启生效）".into());
+        }
         std::fs::write(&state.extras.config_path, &toml_text)
             .map_err(|e| err(&format!("写 config.toml 失败: {e}")))?;
 

@@ -157,6 +157,12 @@ async fn main() -> Result<()> {
     //     当前加载：plugins/<name>/enabled 存在则其 register() / skills() 被调用，
     //     返回的 Tool / Skill 分别进 Registry / SkillRegistry
     let tools_registry = yuantuan_core::tools::Registry::new();
+    if cfg.sandbox.enabled {
+        let sandbox = yuantuan_core::tools::sandbox::SandboxExecTool::new(cfg.sandbox.clone())?;
+        sandbox.check_available().await?;
+        tools_registry.register(sandbox);
+        info!(image = %cfg.sandbox.image, "Docker 开发沙箱已就绪");
+    }
     let skill_registry = yuantuan_core::skills::SkillRegistry::new();
     let enabled_plugins = load_enabled_plugins(&tools_registry, &skill_registry);
     if !enabled_plugins.is_empty() {

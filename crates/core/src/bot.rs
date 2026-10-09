@@ -363,6 +363,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                     }
                 };
                 let ctx = crate::tools::ToolCtx {
+                    task_id: None,
                     chat_id: m.chat_id.clone(),
                     chat_type: m.chat_type.clone(),
                     sender_pid: m.sender_pid.clone(),

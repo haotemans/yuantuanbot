@@ -81,6 +81,8 @@ docs/          文档入口、设计、实现参考、工作记录与归档
 
 ## 文档
 
+Agent 可选用 Docker 开发沙箱运行 Git、Python、Bun。默认关闭，配置及 Linux 部署见[开发沙箱指南](docs/reference/agent-sandbox.md)。
+
 完整入口见 [docs/README.md](docs/README.md)，其中按用途区分设计目标、实现参考、进行中的工作与历史归档。
 
 - [总体架构](docs/design/architecture-v0.1.md)与[运行时设计](docs/design/runtime-design.md)：了解目标与系统约束。

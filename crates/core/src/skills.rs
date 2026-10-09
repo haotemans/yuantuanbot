@@ -260,6 +260,7 @@ mod tests {
     async fn default_invoke_renders_template() {
         let skill = make_skill("test", "测试");
         let ctx = ToolCtx {
+            task_id: None,
             chat_id: "c1".into(),
             chat_type: "group".into(),
             sender_pid: "p1".into(),

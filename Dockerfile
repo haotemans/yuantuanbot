@@ -30,7 +30,7 @@ COPY plugins/ plugins/
 RUN cargo build --release --locked -p yuantuan
 
 # ── 阶段 2: 运行时 ────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -54,3 +54,11 @@ EXPOSE 8085 6199
 
 # 容器内不 fork、不 detach;Rust 进程 PID 1 镜像(用 tini 可换)
 ENTRYPOINT ["/usr/local/bin/yuantuan"]
+
+# 可选后端 target：仅增加 Docker CLI；开发工具始终位于独立沙箱镜像。
+FROM docker:27-cli AS docker-cli
+FROM runtime AS sandbox-runtime
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+# 普通构建保持原运行时；沙箱部署显式选择 sandbox-runtime。
+FROM runtime AS default

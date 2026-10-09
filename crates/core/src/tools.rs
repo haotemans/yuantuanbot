@@ -2,10 +2,7 @@
 //!
 //! Tool = 可被 Agent / 命令直派调用的最小能力单元；Registry 持有全部已注册 Tool。
 //!
-//! 当前阶段（MOD-022 系列）：
-//! - 注册第一个真工具：`media_image`（Q007/Q016，生图；协议细节见 `tools::media`）
-//! - Tool 抽象刻意保守：还没接 Agent 循环（Q004），先让命令直派链路稳定用
-//! - 后续 Q004 落地时，Tool trait 会扩 parameters_schema（OpenAI/Anthropic function calling）
+//! Agent 通过相同注册表读取工具描述、参数 schema 并执行工具。
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,12 +11,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod media;
+pub mod sandbox;
 
 /// 工具调用上下文：调用方所需的运行资料注入。
 /// 命令直派场景下：chat_id / sender_pid 用于配额与权限校验；send_fn 用于把产物段发回 NapCat。
-/// Agent 循环场景（Q004 未来）：还会有 task_id / working_memory 等。
+/// task_id 由执行器注入，不能由模型通过工具参数选择其他任务的工作区。
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
+    pub task_id: Option<String>,
     pub chat_id: String,
     pub chat_type: String,
     pub sender_pid: String,
@@ -47,6 +46,16 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     /// 一句中文描述（给 WebUI 展示与 LLM prompt 用）
     fn description(&self) -> &'static str;
+
+    /// 给 Agent 的 JSON Schema；旧插件可逐步补充，实际参数仍由工具校验。
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    /// 可选的任务回放数据；实现者必须限制体积，调用方勿在命令中携带凭据。
+    fn audit_details(&self, _args: &Value, _output: &ToolOutput) -> Option<Value> {
+        None
+    }
 
     /// 执行。
     /// - `ctx` 是调用上下文（chat/sender 等）

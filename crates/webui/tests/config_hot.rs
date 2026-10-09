@@ -29,6 +29,29 @@ struct Rig {
     extras: Extras,
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sandbox_config_validates_before_write_and_requires_restart() {
+    let rig = start().await;
+    let before = rig.get_config().await;
+    for sandbox in [json!({"network":"host"}), json!({"timeout_secs":121}), json!({"cpus":0})] {
+        let (status, _) = rig.post_config(json!({"sandbox":sandbox})).await;
+        assert_eq!(status, 400);
+        assert_eq!(rig.get_config().await, before, "invalid sandbox config must not overwrite file");
+    }
+    let config = json!({"sandbox":{"enabled":false,"network":"none","timeout_secs":30}});
+    let (status, result) = rig.post_config(config.clone()).await;
+    assert_eq!(status, 200, "{result}");
+    assert!(result["requires_restart"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("sandbox")));
+    assert!(result["applied"].as_array().unwrap().is_empty());
+    assert_eq!(rig.get_config().await["config"], config);
+    let (status, result) = rig.post_config(config).await;
+    assert_eq!(status, 200);
+    assert!(result["requires_restart"].as_array().unwrap().is_empty());
+    let (status, result) = rig.post_config(json!({"log":{"level":"info"}})).await;
+    assert_eq!(status, 200);
+    assert!(result["requires_restart"].as_array().unwrap().iter().any(|v| v.as_str().unwrap().contains("sandbox")));
+}
+
 async fn start() -> Rig {
     let dir = temp_dir("rig");
     let db_path = dir.join("yuantuan.db");

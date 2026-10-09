@@ -183,6 +183,7 @@ mod tests {
         let skill_name = out.skill_name.as_deref().unwrap();
         let s = skill_reg.get(skill_name).expect("skill must be registered");
         let ctx = ToolCtx {
+            task_id: None,
             chat_id: "g_1".into(),
             chat_type: "group".into(),
             sender_pid: "p_10001".into(),

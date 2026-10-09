@@ -564,9 +564,10 @@ impl yuantuan_core::tools::Tool for HelloToolForTest {
     }
     async fn call(
         &self,
-        _ctx: &yuantuan_core::tools::ToolCtx,
+        ctx: &yuantuan_core::tools::ToolCtx,
         args: serde_json::Value,
     ) -> anyhow::Result<yuantuan_core::tools::ToolOutput> {
+        assert!(ctx.task_id.as_ref().is_some_and(|id| !id.is_empty()));
         let who = args.get("who").and_then(|v| v.as_str()).unwrap_or("world");
         Ok(yuantuan_core::tools::ToolOutput {
             summary: format!("hello, {who}!"),

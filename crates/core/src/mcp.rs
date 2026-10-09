@@ -237,6 +237,10 @@ pub struct McpToolAdapter {
 
 #[async_trait::async_trait]
 impl Tool for McpToolAdapter {
+    fn parameters_schema(&self) -> Value {
+        self.descriptor.input_schema.clone()
+    }
+
     fn name(&self) -> &'static str {
         // 注意：McpToolAdapter 的 stable_name 是 String，但 Tool trait 要求 &'static str。
         // 妥协：stable_name 用 Box::leak 转为 'static（插件生命周期内不释放，进程结束时回收）。
