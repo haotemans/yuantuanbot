@@ -46,6 +46,13 @@
 
 ## 历史状态
 
+### 2026-10-10：165 服务器 Docker 验收
+
+- 用户授权远端测试后，在 `165.154.182.21` 的独立源码目录构建沙箱镜像，以限额编译容器生成测试程序；生产配置和服务未改动。
+- `aba9087` 的两个真实 Docker 集成测试均通过，测试容器/三个工作卷无残留。工具版本、内核限额读数、环境与日志位置统一记录在[开发沙箱验证状态](../reference/agent-sandbox.md#验证状态)。
+- 新增 `deploy/sandbox/verify.sh`，支持普通 Docker 服务器在不安装宿主 Rust 的情况下复验；`.sandbox-verify/` 缓存忽略，脚本固定 LF。远端 Bash 语法与 Compose 合并校验通过。
+- 仍未验证 rootless daemon 和生产后端容器启动，未部署生产沙箱。原有 `yuantuan` 在连接前已停止（137，非 Docker 标记 OOM），本轮没有恢复它。
+
 ### 2026-10-09：Agent Docker 开发工具第一版
 
 - 用户确认 Linux 服务器 + Docker 部署方向；实现和边界统一维护在[开发沙箱参考](../reference/agent-sandbox.md)。未修改当前运行配置，未部署服务器。

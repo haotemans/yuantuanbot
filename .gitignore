@@ -1,4 +1,5 @@
 target/
+.sandbox-verify/
 data/
 webui-frontend/node_modules/
 webui-frontend/dist/

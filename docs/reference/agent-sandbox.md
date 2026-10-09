@@ -65,7 +65,7 @@ max_output_bytes = 16384
 
 3. 如果直接运行 Linux 后端二进制：为该进程安装 Docker CLI，设置同一个 `DOCKER_HOST`，配置 `[sandbox]` 后启动即可。
 
-当前工作副本没有修改已有运行配置，也没有连接或部署服务器。
+既有生产配置保持原样；远端验收使用独立源码目录和测试资源，结果见下方“验证状态”。
 
 ## 验收与使用
 
@@ -77,6 +77,14 @@ DOCKER_HOST="unix://${YUANTUAN_DOCKER_SOCKET}" \
 ```
 
 测试验证三种开发工具、同任务文件与 Git 状态保留、跨任务隔离、非 root 身份、根文件系统只读、非零退出码、大输出截断、超时、取消清理与 Docker 限额配置。测试使用随机命名空间，只清理本次的测试卷。默认 `cargo test --workspace` 不要求 Docker，真实容器测试显式标记 ignored；不能把普通测试通过等同于容器验收通过。限额字段验收不替代服务器实际压力测试。
+
+服务器未安装 Rust、使用普通 Docker 时，可在独立源码副本执行：
+
+```bash
+bash deploy/sandbox/verify.sh
+```
+
+该[脚本](../../deploy/sandbox/verify.sh)构建 `yuantuan-sandbox:local`，在 1 核/1.5 GiB/256 进程上限的 Rust 1.92 容器内编译测试，再由当前 Linux 用户执行测试程序；编译容器不挂 Docker socket。缓存留在 `.sandbox-verify/`（已忽略），测试串行运行。使用现有同名镜像的环境应先选择独立测试 daemon，避免覆盖生产沙箱镜像。该无 Rust 入口的 rootless 编译路径尚未验证。
 
 模型可调用：
 
@@ -103,4 +111,14 @@ DOCKER_HOST="unix://${YUANTUAN_DOCKER_SOCKET}" \
 
 ## 验证状态
 
-本地为 Windows，未安装 Docker；Linux 镜像构建、真实容器隔离/限额、rootless socket 权限与 Compose 部署均待服务器验收。本轮 Rust 检查结果见[后端工作记录](../changes/backend-hardening-workbench.md)。
+### 2026-10-10 记录：165 服务器实测
+
+- 授权来源：用户明确允许到“165 那台服务器”测试。环境：`165.154.182.21`，Ubuntu 24.04 / Linux 6.8，2 核、约 3.8 GiB 内存，Docker 29.1.3，普通 rootful daemon，cgroup v2/systemd。
+- 测试代码为 `aba9087`，独立目录 `/home/ubuntu/yuantuan-sandbox-verify-aba9087`；入口为本轮新增 `deploy/sandbox/verify.sh`。构建测试耗时 2 分 44 秒，两个真实 Docker 集成测试均通过（0 失败、0 忽略，执行 4.82 秒）。日志与退出码保留为该目录的 `verify.log`、`verify.exit`，退出码 0。
+- 镜像成功构建，大小 119,366,008 字节；镜像 ID `sha256:ecf49c0ca25778f308bde1bf587d06b8f351f94758cd5bfeb25155b3104f792b`。工具实测：Git 2.39.5、Python 3.12.15、Bun 1.3.0。
+- 通过：文件/Git 状态跨调用保留、跨任务隔离、非 root 身份、只读根目录、未挂宿主配置或 Docker socket、非零退出码、stdout/stderr 截断、超时与取消清理。结束后按标签检查无遗留测试容器，三个测试命名卷均已删除；镜像、独立源码、编译缓存和日志保留用于复验。
+- 独立容器探测读取 cgroup 文件：`memory.max=536870912`、`cpu.max=100000 100000`、`pids.max=128`；默认禁网无路由。此证据确认内核约束已设置，不代表做过 OOM/持续负载压力测试。
+- `bash -n deploy/sandbox/verify.sh` 和两份 Compose 合并的 `config --quiet` 检查通过。未启用生产沙箱、未重启现有服务；后端 `sandbox-runtime` 镜像启动与 rootless socket 权限/Compose 实际部署仍待验收。
+- 连接时原有 `yuantuan` 已处于 `Exited (137)`，`OOMKilled=false`；没有据退出码推断原因，也未在本次测试中恢复该服务。
+
+此前本地 Rust 验证见[后端工作记录](../changes/backend-hardening-workbench.md)。
