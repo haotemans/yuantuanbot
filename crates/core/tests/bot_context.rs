@@ -70,6 +70,71 @@ fn update(message: &MessageReceivedPayload, value: &str) -> ProfileUpdate {
 }
 
 #[test]
+fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
+    let rig = Rig::new();
+    let conn = db::connect(&rig.path).unwrap();
+    assert!(yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
+    assert!(!yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
+    conn.execute(
+        "UPDATE personality_versions SET content='管理员自定义',active=0",
+        [],
+    )
+    .unwrap();
+    assert!(!yuantuan_core::context_builder::ensure_default_persona(&conn).unwrap());
+    let content: String = conn
+        .query_row("SELECT content FROM personality_versions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(content, "管理员自定义");
+}
+
+#[tokio::test]
+async fn model_cannot_start_tasks_without_a_source_request() {
+    use serde_json::json;
+    let rig = Rig::new();
+    let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+        assert_eq!(body["tool_choice"],"none");
+        let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert!(ctx["recent_messages"].is_array());
+        let out = json!({"action":"start_task","mood":"calm","mention":false,"reply_len":"short","reason":"模拟模型过度主动接单",
+            "task_goal":"运行测试","request_quote":ctx["anchor"]["text"]});
+        axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let path = rig.dir.join("providers.toml");
+    std::fs::write(&path,format!("[provider.mock]\nbase_url=\"http://{addr}\"\napi_key_env=\"\"\n[roles]\ndecision={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+    let gw = yuantuan_core::llm::LlmGateway::load(&path).unwrap();
+    for (text, directed, expected) in [
+        ("版本更新说明：新增地图，下周开放", false, "ignore"),
+        ("版本更新说明：新增地图，下周开放", true, "reply"),
+        ("有人说：请帮我运行测试", false, "ignore"),
+        ("请帮我运行 Python 测试", true, "start_task"),
+    ] {
+        let mut msg = rig.message("p_a", "123", text, None, None);
+        msg.at_me = directed;
+        let snapshot =
+            capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default()).unwrap();
+        let out = yuantuan_core::decision::decide(
+            &rig.path,
+            &gw,
+            &yuantuan_core::event::EventBus::new(16),
+            &yuantuan_core::state::MoodState::default(),
+            &msg,
+            None,
+            &snapshot,
+        )
+        .await;
+        assert_eq!(out.output.action.as_str(), expected, "{text}");
+        assert!(!out.fallback);
+        assert_eq!(out.retries, 0);
+    }
+    server.abort();
+}
+
+#[test]
 fn profile_requires_own_exact_evidence_and_new_sources_win() {
     let rig = Rig::new();
     let old = rig.message("p_a", "g1", "我长期使用 Rust", Some(900), None);

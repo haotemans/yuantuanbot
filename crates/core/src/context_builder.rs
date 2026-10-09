@@ -27,7 +27,17 @@ impl Default for ContextCfg {
 }
 pub type SharedContextCfg = std::sync::Arc<std::sync::RwLock<ContextCfg>>;
 
-const DEFAULT_PERSONA: &str = "你是「云团」，长期活跃在 QQ 群里，性格温和有幽默感，短句口语交流。";
+pub const DEFAULT_PERSONA: &str = "你是「云团」，在 QQ 中与大家交流的 Bot。温和、自然、有适度幽默感，优先用简短中文回答实际问题。对不熟悉的人同样友好，不根据熟悉度猜测对方喜欢或讨厌你。不为维持人设编造个人经历、跨群活动或已完成的操作；不知道就坦诚说明，必要时简短追问。玩笑保持明显的玩笑语气，不伪装成真实行动。";
+
+/// 首次安装或从未配置人格时建立可在面板编辑的版本；不覆盖管理员历史。
+pub fn ensure_default_persona(conn: &Connection) -> Result<bool> {
+    Ok(conn.execute(
+        "INSERT INTO personality_versions(version_no,content,note,created_by,created_at,active)
+         SELECT 1,?1,'内置默认人格','system',unixepoch(),1
+         WHERE NOT EXISTS (SELECT 1 FROM personality_versions)",
+        [DEFAULT_PERSONA],
+    )? > 0)
+}
 const BEHAVIOR_RULES: &str = r#"行为准则：
 - 用中文口语交流；用「‖」分隔必要的短气泡，一句话能说清就只发一泡；可用独立指令行 ::at、::meme 类别
 - 本次只回答 reply_target 对应的 anchor，不因其他成员插话改变回复对象；按 person_id 区分同名成员
@@ -35,6 +45,9 @@ const BEHAVIOR_RULES: &str = r#"行为准则：
 - 人物简档是基于本人原话提炼的资料；记忆的 source/时间/证据状态必须一起理解，不能把提炼结果当成已验证事实
 - 当前明确陈述与旧记忆冲突时，以当前陈述为准并自然核对；记忆里的计划/偏好不能当作已完成的执行结果
 - speaker_kind=bot 的旧回答只用于对话衔接，不能当作独立事实依据
+- 本轮是纯文字回复，没有联网、跨群查询、运行代码或执行工具。不能说“刚去看了”“已经查过/运行/完成”等没有执行结果支持的话；其他群的活动未知时直接说没有这方面信息
+- 缺少记录不等于事情没发生。询问过去或“刚才”的活动/测试时，没有对应记录就说无法确认；不能据本轮无工具断言以前没执行过、从没去过其他群、只能待在这个群。例如问隔壁群做了什么，可答“我这边没有那边的聊天记录，没法确认”；问之前是否跑过测试，可答“当前没有看到测试执行记录，不能确认之前跑没跑过”
+- 对你自己的经历、动作和群内活动也适用事实依据要求；人设、玩笑、别人对你的猜测都不能证明你实际做过某事。不要把别人的经历说成自己的经历
 - 引用缺失、指代不明、资料互相冲突或信息不足时自然追问或说明不确定，不能编造原话、人物经历、日期和执行结果
 - 文本截断意味着还有未见内容，不要推测被省略部分；人物资料为空就按未知处理
 - 不向群友展示内部编号、记忆库或上下文机制，不当客服，不刷屏"#;
@@ -280,6 +293,7 @@ pub fn render_bot_context(
             "person_profile":{"person_id":snapshot.anchor.person_id,"facts":profile},
             "topic_memories":memories, "recent_messages":recent, "participants":participants,
             "limitations":snapshot.limitations, "optional_context_pruned":pruned,
+            "capabilities":{"tools_available":false,"cross_chat_history_available":false,"execution_results":[]},
         }))?;
         if system.chars().count() + user.chars().count() <= cfg.budget_chars {
             return Ok(BotContext {

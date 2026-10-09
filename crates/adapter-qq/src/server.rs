@@ -63,6 +63,7 @@ async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, StatusCode> {
+    if !state.handle.is_receiving() { return Err(StatusCode::SERVICE_UNAVAILABLE); }
     // 每次连接都读最新 token，热应用立即生效
     let expected_token = state.cfg.token.read().unwrap().clone();
     if !expected_token.is_empty() {
@@ -122,7 +123,9 @@ async fn session(socket: WebSocket, state: ServerState) {
             }
         }
         // 握手期混入的帧照常处理；此时自身号未知，at_me 退化
-        let _ = handle_frame(&v, &state.bus, &state.db_path, 0, &pending, &state.self_ids);
+        if state.handle.is_receiving() {
+            let _ = handle_frame(&v, &state.bus, &state.db_path, 0, &pending, &state.self_ids);
+        }
     };
     state.handle.store_self_qq(self_qq);
     state.handle.store_connected(true);
@@ -149,6 +152,7 @@ async fn session(socket: WebSocket, state: ServerState) {
                         continue;
                     }
                 };
+                if !state.handle.is_receiving() && v.get("echo").is_none() { continue; }
                 if let Err(e) = handle_frame(&v, &state.bus, &state.db_path, self_qq, &pending, &state.self_ids) {
                     warn!(error = %e, "帧处理失败");
                 }

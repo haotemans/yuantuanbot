@@ -3,7 +3,7 @@
 //! - Bubbleizer：‖ 分泡、::at/::meme 指令行、3 泡封顶（超出并最后泡）、无分隔符单泡、
 //!   单泡超 500 字按标点机械切、解析失败整段单泡
 //! - 延时模拟：首泡 300~800ms；后续 clamp(0.6s+字数×40ms±30%, 0.8s, 4s)；整段总预算 8s，超预算不再延时
-//! - 异步作废：每泡发送前核对该 chat 最新外来 msg_id，变了→作废剩余 + ReplyInterrupted 事件
+//! - 回复始终绑定 anchor；普通插话不取消已入队的回答（ADR-0007）
 //! - 单泡失败退避重试 1 次，仍失败跳过该泡记 BubbleSent(ok=false)，回复整体不失踪
 //! - 发送成功的泡落 messages（sender_pid='self'）保持会话连贯；napcat message_id 记 SelfMsgIds
 //!
@@ -256,13 +256,33 @@ impl Default for ReplyCfg {
 
 #[derive(Clone)]
 pub struct EngineHandle {
-    tx: mpsc::UnboundedSender<ReplyJob>,
+    tx: mpsc::UnboundedSender<EngineCommand>,
+    abort: tokio::task::AbortHandle,
+}
+
+enum EngineCommand {
+    Enqueue(ReplyJob),
+    Shutdown(tokio::sync::oneshot::Sender<()>),
 }
 
 impl EngineHandle {
     pub fn enqueue(&self, job: ReplyJob) {
-        if self.tx.send(job).is_err() {
+        if self.tx.send(EngineCommand::Enqueue(job)).is_err() {
             warn!("回复引擎已停止，任务丢弃");
+        }
+    }
+
+    /// 关闭入口并等待已入队消息发送完成；超时取消所有发送 worker。
+    pub async fn shutdown(&self, timeout: Duration) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.tx.send(EngineCommand::Shutdown(tx)).is_err() {
+            return true;
+        }
+        if matches!(tokio::time::timeout(timeout, rx).await, Ok(Ok(()))) {
+            true
+        } else {
+            self.abort.abort();
+            false
         }
     }
 
@@ -314,15 +334,25 @@ impl ReplyEngine {
     /// 派遣器：每个 chat 一个 worker（mpsc 串行）；折叠卡与普通回复同队列（稳定六条②）
     pub fn spawn(self) -> EngineHandle {
         let engine = Arc::new(self);
-        let (tx, mut rx) = mpsc::unbounded_channel::<ReplyJob>();
-        tokio::spawn(async move {
+        let (tx, mut rx) = mpsc::unbounded_channel::<EngineCommand>();
+        let dispatcher = tokio::spawn(async move {
             let mut workers: HashMap<String, mpsc::UnboundedSender<ReplyJob>> = HashMap::new();
-            while let Some(job) = rx.recv().await {
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut shutdown_waiters = Vec::new();
+            while let Some(command) = rx.recv().await {
+                let job = match command {
+                    EngineCommand::Enqueue(job) => job,
+                    EngineCommand::Shutdown(done) => {
+                        rx.close();
+                        shutdown_waiters.push(done);
+                        continue;
+                    }
+                };
                 let entry = workers.entry(job.chat_id.clone()).or_insert_with(|| {
                     let (wtx, mut wrx) = mpsc::unbounded_channel::<ReplyJob>();
                     let eng = engine.clone();
                     let chat = job.chat_id.clone();
-                    tokio::spawn(async move {
+                    tasks.spawn(async move {
                         while let Some(j) = wrx.recv().await {
                             process_job(&eng, j).await;
                         }
@@ -332,25 +362,18 @@ impl ReplyEngine {
                 });
                 let _ = entry.send(job);
             }
+            drop(workers);
+            while tasks.join_next().await.is_some() {}
+            for done in shutdown_waiters {
+                let _ = done.send(());
+            }
         });
         info!("回复形态引擎已启动");
-        EngineHandle { tx }
+        EngineHandle {
+            tx,
+            abort: dispatcher.abort_handle(),
+        }
     }
-}
-
-/// 本 chat 最新外来消息版本（self 泡不改变上下文版本，防自己作废自己）
-fn latest_incoming(db_path: &Path, chat_id: &str) -> i64 {
-    crate::db::connect(db_path)
-        .ok()
-        .and_then(|c| {
-            c.query_row(
-                "SELECT COALESCE(MAX(msg_id), 0) FROM messages WHERE chat_id = ?1 AND sender_pid != 'self'",
-                params![chat_id],
-                |r| r.get::<_, i64>(0),
-            )
-            .ok()
-        })
-        .unwrap_or(0)
 }
 
 async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
@@ -417,7 +440,6 @@ fn resolve_meme_category(cat: Option<&str>, mood: MoodValue) -> String {
 async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubble]) {
     let cfg = *eng.cfg.read().unwrap(); // 热应用：每泡取当前参数
     let started = Instant::now();
-    let base_version = latest_incoming(&eng.db_path, &job.chat_id);
     let total = bubbles.len();
 
     for (i, b) in bubbles.iter().enumerate() {
@@ -433,12 +455,6 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                 let d = (raw + jitter).clamp(cfg.min_delay_ms as f64, cfg.max_delay_ms as f64);
                 tokio::time::sleep(Duration::from_millis(d as u64)).await;
             }
-        }
-        // 异步作废：上下文已变动 → 作废剩余泡
-        if latest_incoming(&eng.db_path, &job.chat_id) > base_version {
-            info!(chat_id = %job.chat_id, sent = i, "上下文变动，作废剩余泡");
-            eng.bus.publish(Event::ReplyInterrupted);
-            return;
         }
         // 纯 ::meme 泡：按类别（缺省按 mood 映射）抽图直接发图片；混合泡只发文字部分
         if b.text.is_empty() && b.meme.is_some() {
@@ -587,12 +603,38 @@ pub async fn prepare_and_enqueue(
     ctx_cfg: &context_builder::ContextCfg,
     reply_cfg: &ReplyCfg,
 ) -> Result<()> {
-    let ctx = context_builder::render_bot_context(snapshot, mood.get(), ctx_cfg)?;
+    let length_hint = match out.reply_len {
+        crate::decision::ReplyLen::Short => {
+            "本次回复长度：short。优先一句到两句，约80字以内，一泡能说明就不分泡。"
+        }
+        crate::decision::ReplyLen::Medium => {
+            "本次回复长度：medium。先直接回答，再补必要说明，通常200字以内。"
+        }
+        crate::decision::ReplyLen::Long => {
+            "本次回复长度：long。按问题需要展开，避免重复和无依据扩写。"
+        }
+    };
+    let reserve = length_hint.chars().count() + 1;
+    let budget = context_builder::ContextCfg {
+        budget_chars: ctx_cfg.budget_chars.saturating_sub(reserve),
+        ..*ctx_cfg
+    };
+    let mut ctx = context_builder::render_bot_context(snapshot, mood.get(), &budget)?;
+    ctx.system.push('\n');
+    ctx.system.push_str(length_hint);
     let started = Instant::now();
-    let raw = llm
+    let mut raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
         .await
         .context("bot_chat 调用失败")?;
+    // 只对空正文重试一次，保留原快照；不重试工具调用、拒绝或网络错误。
+    if raw.trim().is_empty() {
+        warn!(chat_id=%msg.chat_id, anchor_msg_id=msg.msg_id, "bot_chat 正文为空，使用同一上下文重试一次");
+        raw = llm
+            .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
+            .await
+            .context("bot_chat 空正文重试失败")?;
+    }
     debug!(
         k_used = ctx.k_used,
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -639,6 +681,84 @@ pub(crate) fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_drains_jobs_and_cancels_stalled_senders() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("yt-drain-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("test.db");
+        crate::db::migrate(&mut crate::db::connect(&path).unwrap()).unwrap();
+        let cfg = Arc::new(std::sync::RwLock::new(ReplyCfg {
+            total_budget_ms: 0,
+            ..ReplyCfg::default()
+        }));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let send_count = sent.clone();
+        let send: SendFn = Arc::new(move |_| {
+            let n = send_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(json!({"message_id":n+1})) })
+        });
+        let make_job = || ReplyJob {
+            chat_id: "123".into(),
+            chat_type: ChatType::Group,
+            target: 123,
+            anchor_msg_id: 1,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Bubbles(vec![Bubble {
+                text: "正常回答".into(),
+                at: false,
+                meme: None,
+            }]),
+        };
+        let engine = ReplyEngine::new(
+            path.clone(),
+            EventBus::default(),
+            send,
+            SelfMsgIds::default(),
+            cfg.clone(),
+            MoodState::default(),
+        )
+        .spawn();
+        engine.enqueue(make_job());
+        engine.enqueue(make_job());
+        assert!(engine.shutdown(Duration::from_secs(2)).await);
+        assert_eq!(sent.load(Ordering::SeqCst), 2);
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let sender = Arc::new(std::sync::Mutex::new(Some(dropped_tx)));
+        let stalled: SendFn = Arc::new(move |_| {
+            let guard = OnDrop(sender.lock().unwrap().take());
+            Box::pin(async move {
+                let _guard = guard;
+                std::future::pending().await
+            })
+        });
+        let engine = ReplyEngine::new(
+            path,
+            EventBus::default(),
+            stalled,
+            SelfMsgIds::default(),
+            cfg,
+            MoodState::default(),
+        )
+        .spawn();
+        engine.enqueue(make_job());
+        assert!(!engine.shutdown(Duration::from_millis(100)).await);
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn split_bubbles_by_marker() {

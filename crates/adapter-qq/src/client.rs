@@ -41,6 +41,7 @@ pub struct AdapterHandle {
     current: Arc<AsyncMutex<Option<NapcatSender>>>,
     self_qq: Arc<AtomicU64>,
     connected: Arc<std::sync::atomic::AtomicBool>,
+    receiving: Arc<std::sync::atomic::AtomicBool>,
     last_active: Arc<Mutex<Instant>>,
 }
 
@@ -50,12 +51,18 @@ impl Default for AdapterHandle {
             current: Arc::new(AsyncMutex::new(None)),
             self_qq: Arc::new(AtomicU64::new(0)),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            receiving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_active: Arc::new(Mutex::new(Instant::now())),
         }
     }
 }
 
 impl AdapterHandle {
+    /// 停止接收新业务消息，保留当前连接处理发送回执以便排空。
+    pub fn stop_receiving(&self) { self.receiving.store(false, Ordering::Release); }
+
+    pub(crate) fn is_receiving(&self) -> bool { self.receiving.load(Ordering::Acquire) }
+
     pub async fn sender(&self) -> Option<NapcatSender> {
         self.current.lock().await.clone()
     }

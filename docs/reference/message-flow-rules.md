@@ -90,7 +90,7 @@ bot_chat LLM 输出 → reply_engine::prepare_and_enqueue → Bubbleizer 分泡 
 
 18. **打字延时**：每泡有 base_delay + per_char_ms * 字数 + jitter，模拟真人输入。ReplyCfg 热应用。
 
-19. **作废核对**：发送前检查是否有新消息到来使回复过时（ReplyInterrupted）。⚠️ 部分实现（仅检测，不取消已入队的泡）。
+19. **回复归属**：2026-10-10 起落实 ADR-0007，普通插话不取消已入队的气泡，发送仍绑定原 anchor。明确取消/更正和高优先级窗口调度尚未补齐。停机时发送队列限时排空，详见[可靠性参考](decision-reliability.md)。
 
 ## 五、任务执行（agent）
 
@@ -151,7 +151,7 @@ Decision.profile_updates → person_profile_facts（本人原话校验）
 
 30. **长活组件包 supervisor**：tracer / pipeline / task_runner / steal_listener 4 个组件由 `core::supervisor::Supervisor` 包裹启动；任一 panic / 异常退出后以指数退避自动拉起（1s → 60s 封顶，MAX_RESTARTS = 20）。取消 supervisor 协程会同时取消被监督组件，避免只丢弃 JoinHandle 而让组件继续运行。adapter-qq 不包（有自己的 WS 重连），consolidation / backup 不包（一次性定时器,语义不同）。
 
-31. **优雅停机路径**：`tokio::signal::ctrl_c()` 与 `webui_serve` 在 main 末尾 `tokio::select!` 竞争；Ctrl+C 触发时:① 停止接新(webui 退出) ② 5s 排空 ③ `PRAGMA wal_checkpoint(TRUNCATE)` ④ `exit(0)`。Windows 下仅前台终端按 Ctrl+C 有效,从外部进程/脚本发信号到 yuantuan pid 到不了(Windows 信号语义差异)。
+31. **优雅停机路径**：启动回放前注册 Unix SIGTERM/SIGINT，Windows 使用 Ctrl+C；停止入口和生产组件，发送队列最多排空 5 秒，MCP 最多收尾 1 秒，然后检查 WAL checkpoint 并退出。超时取消 worker 并记录未排空，详见[可靠性参考](decision-reliability.md)。
 
 32. **Q55 回放窗口**：`REPLAY_WINDOW_SECS = 3600`。启动回放前先把窗口外未处理消息的 `processed_at` 写为当前时间，标记放弃，再 SELECT `ts >= now - 3600` 升序回放，防历史脏数据雪崩。
 
@@ -192,9 +192,11 @@ Decision.profile_updates → person_profile_facts（本人原话校验）
 
 窗口连续处理故障已有复现与修复验证，详见[后端加固工作记录](../changes/backend-hardening-workbench.md)。这不代表 Q54–Q64 全部完成：独立高优先级请求、窗口上下文预算、tokenizer 上限和发送归属仍按上表追踪。
 
-聚合批次尚无总消息/字节上限；长时间下游阻塞仍可能积累批次。`bot.rs` 的 per-chat worker 队列满时同步保底处理可能破坏串行约束，且这些 worker 的生命周期尚未全部纳入监督树。本轮未改变这些路径，不能把聚合器的顺序测试扩展为整个发送链路的保序保证。
+聚合批次尚无总消息/字节上限；长时间下游阻塞仍可能积累批次。`bot.rs` 的 per-chat worker 队列满时同步保底处理可能破坏串行约束，worker 现通过 JoinSet 随 dispatcher 取消。本轮未改变这些路径，不能把聚合器的顺序测试扩展为整个发送链路的保序保证。
 
 ## 修订记录
 
 - 2026-10-09：修复连续窗口及突发丢消息，补充 Agent 有界调度、失败恢复、事务收尾与监督取消的实际行为；验证证据见后端工作记录。
 - 2026-10-09：移入实现参考目录；补充代码来源和核对范围，修正 Q59/Q63/Q64 的对应关系，将窗口与输入契约的未完成部分显式列出。
+
+- 2026-10-10：依据远端日志修复模型工具调用误返回、任务误触发、插话截断和 SIGTERM 停机，新增[可靠性参考](decision-reliability.md)。

@@ -1,6 +1,6 @@
 //! 集成测试：聊天闭环——@消息 → decision(reply) → bot_chat('哈‖确实不错‖我去试试') →
 //! 三次 send_group_msg（首泡带 at 段、非零延时、合计 ≤8s）→ self 回复落库。
-//! 第二用例：首泡发出后注入新群消息 → 剩余泡作废 + ReplyInterrupted 落表。
+//! 第二用例：首泡发出后注入新群消息 → 继续回复原对象，保留全部气泡。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -135,7 +135,7 @@ fn free_port() -> u16 {
 }
 
 /// mock NapCat：反向 WS 形态，主动 connect /ws → 登录握手 → 推初始事件 → 捕获 send_*_msg action（记录时刻+段数组，回 echo ok）
-/// inject_after_first：首个 action 响应完成后等 150ms 注入该事件（异步作废测试用）
+/// inject_after_first：首个 action 响应完成后等 150ms 注入该事件（插话保留测试用）
 async fn mock_napcat(
     port: u16,
     initial: Vec<Value>,
@@ -343,7 +343,7 @@ async fn reply_loop_sends_three_bubbles() {
     decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision.to_string()])),
-        chat: Mutex::new(VecDeque::from(vec!["哈‖确实不错‖::at\n我去试试".into()])),
+        chat: Mutex::new(VecDeque::from(vec!["".into(), "哈‖确实不错‖::at\n我去试试".into()])),
         inject_db: Mutex::new(Some(db_path.clone())),
         ..Default::default()
     });
@@ -456,12 +456,19 @@ async fn reply_loop_sends_three_bubbles() {
     assert_eq!(context["reply_target"]["person_id"], "p_2001");
     assert!(content.contains("云团觉得这个库怎么样"));
     assert!(!content.contains("等待期间出现的新话题"));
+    assert_eq!(context["capabilities"]["tools_available"], false);
+    assert_eq!(context["capabilities"]["cross_chat_history_available"], false);
+    assert!(chat["messages"][0]["content"].as_str().unwrap().contains("本次回复长度：short"));
+    let chats: Vec<_> = requests.iter().filter(|r| r["model"] == "m-chat").collect();
+    assert_eq!(chats.len(), 2, "空正文只重试一次");
+    assert_eq!(chats[0]["messages"], chats[1]["messages"], "重试保持同一上下文");
+    assert!(requests.iter().all(|r| r["tool_choice"] == "none"));
 }
 
-// ---------- 用例 2：异步作废 ----------
+// ---------- 用例 2：插话不打断 ----------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
-async fn new_message_voids_remaining_bubbles() {
+async fn new_message_preserves_remaining_bubbles_and_reply_target() {
     let db_path = temp_db();
     let ignore = json!({
         "action": "ignore", "mood": "calm", "mention": false, "reply_len": "short",
@@ -483,7 +490,7 @@ async fn new_message_voids_remaining_bubbles() {
         notify,
         Some(plain_group_message(402, 2009, "插入新消息")),
         ReplyCfg {
-            // 加大后续泡延时下限，给高负载下的摄取+作废留出确定性余量（防测试时序抖动）
+            // 加大后续泡延时下限，给高负载下的摄取新消息留出确定性余量（防测试时序抖动）
             min_delay_ms: 2500,
             ..ReplyCfg::default()
         },
@@ -523,34 +530,16 @@ async fn new_message_voids_remaining_bubbles() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // 等 ReplyInterrupted 落表（作废的确定性信号），而不是赌固定秒数
-    let conn0 = db::connect(&db_path).unwrap();
-    let deadline2 = Instant::now() + Duration::from_secs(60);
-    loop {
-        let n: i64 = conn0
-            .query_row(
-                "SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if n >= 1 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline2,
-            "Duration 内未见 ReplyInterrupted"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // 三个泡全部完成，普通插话不能取消原回复。
+    let deadline2 = Instant::now() + Duration::from_secs(30);
+    while captures.lock().unwrap().len() < 3 {
+        assert!(Instant::now() < deadline2, "原回答应发完整");
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(
-        captures.lock().unwrap().len(),
-        1,
-        "剩余泡应被作废，仅发出首泡"
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await; // 防作废后还有在途延时
-    assert_eq!(captures.lock().unwrap().len(), 1);
-
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let caps = captures.lock().unwrap().clone();
+    let texts: Vec<_> = caps.iter().map(|(_,s)| s[0]["data"]["text"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(texts, ["第一","第二","第三"]);
     let conn = db::connect(&db_path).unwrap();
     let interrupted: i64 = conn
         .query_row(
@@ -559,7 +548,7 @@ async fn new_message_voids_remaining_bubbles() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(interrupted, 1, "ReplyInterrupted 应落表");
+    assert_eq!(interrupted, 0, "普通插话不触发 ReplyInterrupted");
     let self_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE sender_pid = 'self'",
@@ -567,7 +556,7 @@ async fn new_message_voids_remaining_bubbles() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(self_count, 1);
+    assert_eq!(self_count, 3);
     // 注入的新消息自身也正常落库决策（ignore）
     let incoming: i64 = conn
         .query_row(

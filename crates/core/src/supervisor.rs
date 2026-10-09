@@ -38,6 +38,7 @@ pub struct Supervisor {
 struct Inner {
     /// 全局重启计数(观测)
     total_restarts: AtomicU64,
+    handles: std::sync::Mutex<Vec<(&'static str, tokio::task::AbortHandle)>>,
 }
 
 impl Supervisor {
@@ -49,6 +50,20 @@ impl Supervisor {
         self.inner.total_restarts.load(Ordering::Relaxed)
     }
 
+    pub fn stop(&self, name: &str) {
+        for (component, handle) in self.inner.handles.lock().unwrap().iter() {
+            if *component == name {
+                handle.abort();
+            }
+        }
+    }
+
+    pub fn stop_all(&self) {
+        for (_, handle) in self.inner.handles.lock().unwrap().drain(..) {
+            handle.abort();
+        }
+    }
+
     /// 挂一个长活组件到 supervisor。`factory` 在首次以及每次重启时调用。
     /// 返回的 JoinHandle 是 supervisor 协程本身;组件 panic 不会让 caller 看到 Err。
     pub fn spawn<F>(&self, name: &'static str, mut factory: F) -> JoinHandle<()>
@@ -56,7 +71,7 @@ impl Supervisor {
         F: FnMut() -> JoinHandle<()> + Send + 'static,
     {
         let sup = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut restarts: u32 = 0;
             let mut backoff = Duration::from_millis(BACKOFF_BASE_MS);
             loop {
@@ -92,7 +107,13 @@ impl Supervisor {
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_millis(BACKOFF_CAP_MS));
             }
-        })
+        });
+        self.inner
+            .handles
+            .lock()
+            .unwrap()
+            .push((name, handle.abort_handle()));
+        handle
     }
 }
 

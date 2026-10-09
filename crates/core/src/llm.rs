@@ -107,7 +107,9 @@ impl ResolvedRole {
 /// 否则视为环境变量名。
 pub fn looks_like_direct_key(value: &str) -> bool {
     value.starts_with("sk-")
-        || value.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        || value
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
 }
 
 /// 解析 api_key_env 字段 → 实际的 key。空 → None;直接密钥 → 自身;
@@ -341,7 +343,10 @@ impl LlmGateway {
         let status = resp.status();
         let text = resp.text().await.context("读取 provider 响应失败")?;
         if !status.is_success() {
-            bail!("provider HTTP {status}: {}", &text[..text.floor_char_boundary(200)]);
+            bail!(
+                "provider HTTP {status}: {}",
+                &text[..text.floor_char_boundary(200)]
+            );
         }
         let v: Value = serde_json::from_str(&text).context("provider 响应非 JSON")?;
         v.pointer("/choices/0/message/content")
@@ -375,7 +380,11 @@ impl LlmGateway {
             .ok_or_else(|| anyhow!("响应缺 data 数组"))?;
         let mut out: Vec<String> = arr
             .iter()
-            .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+            .filter_map(|m| {
+                m.get("id")
+                    .and_then(|id| id.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         out.sort();
         out.dedup();
@@ -383,7 +392,13 @@ impl LlmGateway {
     }
 
     /// chat/completions 调用：先过成本闸，再占全局并发槽（Q53）；json_mode 时带 response_format=json_object
-    pub async fn chat(&self, role: Role, system: &str, user: &str, json_mode: bool) -> Result<String> {
+    pub async fn chat(
+        &self,
+        role: Role,
+        system: &str,
+        user: &str,
+        json_mode: bool,
+    ) -> Result<String> {
         let r = self
             .roles
             .get(&role)
@@ -404,6 +419,9 @@ impl LlmGateway {
                 {"role": "user", "content": user},
             ],
             "temperature": if role == Role::Decision { 0.2 } else { 0.7 },
+            // 本接口没有声明任何工具。上游编码代理可能擅自返回 bash 调用，
+            // 必须显式禁用；Agent 的工具协议由 agent.rs 自己处理 JSON。
+            "tool_choice": "none",
         });
         if json_mode {
             body["response_format"] = json!({"type": "json_object"});
@@ -415,31 +433,70 @@ impl LlmGateway {
         if let Some(k) = &r.api_key {
             req = req.bearer_auth(k);
         }
-        let resp = req.send().await.with_context(|| format!("角色 {role} 请求失败"))?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("角色 {role} 请求失败"))?;
         let status = resp.status();
         let text = resp.text().await.context("读取 LLM 响应体失败")?;
         if !status.is_success() {
-            bail!("角色 {role} HTTP {status}: {}", &text[..text.floor_char_boundary(300)]);
+            bail!(
+                "角色 {role} HTTP {status}: {}",
+                &text[..text.floor_char_boundary(300)]
+            );
         }
         let v: Value = serde_json::from_str(&text).context("LLM 响应非 JSON")?;
-        let content = v
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("LLM 响应缺 choices[0].message.content"))?;
         // 用量统计：有 sink 就上报；没 sink 或响应不带 usage 都静默
         if let Some(sink) = &self.usage_sink {
-            let usage = v.get("usage").map(|u| LlmUsage {
-                prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                completion_tokens: u.get("completion_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-            }).unwrap_or_default();
+            let usage = v
+                .get("usage")
+                .map(|u| LlmUsage {
+                    prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                    completion_tokens: u
+                        .get("completion_tokens")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                    total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                })
+                .unwrap_or_default();
             if usage.total_tokens > 0 {
-                sink(LlmUsageRecord { role, model: r.model.clone(), usage });
+                sink(LlmUsageRecord {
+                    role,
+                    model: r.model.clone(),
+                    usage,
+                });
             }
         }
-        Ok(content)
+        response_text(&v)
     }
+}
+
+fn response_text(v: &Value) -> Result<String> {
+    let choice = v.pointer("/choices/0").context("LLM 响应缺 choices[0]")?;
+    let message = &choice["message"];
+    if choice["finish_reason"] == "tool_calls"
+        || choice["finish_reason"] == "function_call"
+        || message["tool_calls"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        || !message["function_call"].is_null()
+    {
+        bail!("provider 返回了未授权的工具调用（已请求 tool_choice=none），未执行；请检查模型路由");
+    }
+    if choice["finish_reason"] == "length" {
+        bail!("provider 输出被长度限制截断，拒绝使用不完整回答");
+    }
+    if message["refusal"]
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty())
+        || choice["finish_reason"] == "content_filter"
+    {
+        bail!("provider 拒绝生成本次回答");
+    }
+    message["content"]
+        .as_str()
+        .map(str::to_owned)
+        .context("LLM 响应缺 choices[0].message.content")
 }
 
 /// providers.toml 默认模板（配置缺失时写出，key 从环境变量读，永不上库）
@@ -463,11 +520,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unexpected_tools_and_incomplete_answers_never_become_text() {
+        let tool = json!({"choices":[{"finish_reason":"tool_calls","message":{"content":"", "tool_calls":[{"function":{"name":"bash","arguments":"{\"command\":\"pwd\"}"}}]}}]});
+        assert!(response_text(&tool)
+            .unwrap_err()
+            .to_string()
+            .contains("未授权的工具调用"));
+        let mixed = json!({"choices":[{"finish_reason":"stop","message":{"content":"已经做完了", "tool_calls":[{}]}}]});
+        assert!(response_text(&mixed).is_err());
+        for reason in ["length", "content_filter"] {
+            assert!(response_text(
+                &json!({"choices":[{"finish_reason":reason,"message":{"content":"部分内容"}}]})
+            )
+            .is_err());
+        }
+        assert_eq!(response_text(&json!({"choices":[{"finish_reason":"stop","message":{"content":"回答","refusal":null}}]})).unwrap(), "回答");
+    }
+
+    #[test]
     fn descriptor_never_exposes_key_fragments() {
-        for key in ["sk-demo", "sk-placeholder-key-for-tests", "测试密钥测试密钥测试密钥"] {
+        for key in [
+            "sk-demo",
+            "sk-placeholder-key-for-tests",
+            "测试密钥测试密钥测试密钥",
+        ] {
             let role = ResolvedRole {
-                provider: "mock".into(), model: "mock".into(),
-                base_url: "http://localhost".into(), api_key: Some(key.into()),
+                provider: "mock".into(),
+                model: "mock".into(),
+                base_url: "http://localhost".into(),
+                api_key: Some(key.into()),
             };
             let descriptor = role.debug_descriptor();
             assert!(!descriptor.contains(key));
@@ -479,26 +560,42 @@ mod tests {
 
     #[tokio::test]
     async fn unicode_http_errors_propagate_from_all_gateway_paths() {
-        use axum::{http::StatusCode, routing::{get, post}, Router};
+        use axum::{
+            http::StatusCode,
+            routing::{get, post},
+            Router,
+        };
         async fn failure() -> (StatusCode, String) {
             (StatusCode::BAD_GATEWAY, format!("a{}", "中".repeat(120)))
         }
-        let app = Router::new().route("/chat/completions", post(failure)).route("/models", get(failure));
+        let app = Router::new()
+            .route("/chat/completions", post(failure))
+            .route("/models", get(failure));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let path = std::env::temp_dir().join(format!("yt-llm-error-{}.toml", rand::random::<u64>()));
-        std::fs::write(&path, format!(r#"
+        let path =
+            std::env::temp_dir().join(format!("yt-llm-error-{}.toml", rand::random::<u64>()));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
 [provider.mock]
 base_url = "{url}"
 api_key_env = ""
 [roles]
 agent_exec = {{ provider = "mock", model = "mock" }}
-"#)).unwrap();
+"#
+            ),
+        )
+        .unwrap();
         let gateway = LlmGateway::load(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         let errors = [
-            gateway.chat(Role::AgentExec, "system", "user", true).await.unwrap_err(),
+            gateway
+                .chat(Role::AgentExec, "system", "user", true)
+                .await
+                .unwrap_err(),
             gateway.test_chat(Role::AgentExec).await.unwrap_err(),
             gateway.fetch_models("mock").await.unwrap_err(),
         ];

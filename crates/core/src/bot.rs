@@ -152,6 +152,8 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         info!("Decision 管线已启动（Q52 per-chat 并发 + Q54 10s 窗口聚合）");
         let deps = Arc::new(deps);
         let mut lanes = ChatLanes::new();
+        // 取消 dispatcher 时同时取消其 worker，防止停机后继续生成/入队。
+        let mut workers = tokio::task::JoinSet::new();
 
         // Q54 窗口聚合器:
         //   固定 10s 窗口,同 chat 普通消息追加,不重复开窗;anchor 固定为第一条;
@@ -212,7 +214,7 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                             )>(cap.max(1));
                             let deps2 = Arc::clone(&deps);
                             let chat = m.chat_id.clone();
-                            tokio::spawn(async move {
+                            workers.spawn(async move {
                                 while let Some((mm, cutoff)) = lane_rx.recv().await {
                                     handle_at(&deps2, &mm, cutoff).await;
                                 }
@@ -238,7 +240,7 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                             tokio::sync::mpsc::channel::<(MessageReceivedPayload, i64)>(cap.max(1));
                         let deps2 = Arc::clone(&deps);
                         let chat = m.chat_id.clone();
-                        tokio::spawn(async move {
+                        workers.spawn(async move {
                             while let Some((mm, cutoff)) = lane_rx.recv().await {
                                 handle_at(&deps2, &mm, cutoff).await;
                             }

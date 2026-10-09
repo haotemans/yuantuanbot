@@ -2,6 +2,7 @@
 
 mod config;
 mod db;
+mod shutdown;
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ async fn main() -> Result<()> {
     }
     tracing_subscriber::fmt().with_target(false).init();
     info!("云团骨架启动");
+    let mut shutdown_signal = shutdown::Signal::new()?;
 
     // a. 配置：不存在则生成默认模板并继续使用默认值
     let cfg = config::load_or_default("config.toml")?;
@@ -47,6 +49,9 @@ async fn main() -> Result<()> {
     let mut conn = db::open(&cfg.data.dir)?;
     info!(db = %data_root.join("yuantuan.db").display(), "SQLite 已打开（WAL）");
     yuantuan_core::db::migrate(&mut conn)?;
+    if yuantuan_core::context_builder::ensure_default_persona(&conn)? {
+        info!("已初始化默认人格，可在面板中编辑");
+    }
 
     let tables = yuantuan_core::db::list_tables(&conn)?;
     info!(count = tables.len(), "迁移完成，库内表清单");
@@ -249,7 +254,14 @@ async fn main() -> Result<()> {
 
     // h''. Q55 恢复消费：把上次进程退出前来不及处理的 messages 回放进管线
     //      （跳过 /image 直派命令；自身消息 ingest 时已标记不扫入）
-    match yuantuan_core::bot::replay_pending(&pipeline_deps).await {
+    let replay = tokio::select! {
+        result = yuantuan_core::bot::replay_pending(&pipeline_deps) => result,
+        signal = shutdown_signal.wait() => {
+            info!(signal = signal?, "启动回放期间收到停止信号");
+            return finish_shutdown(&db_path, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await;
+        }
+    };
+    match replay {
         Ok(n) if n > 0 => info!(count = n, "Q55 重启回放完成"),
         Ok(_) => {}
         Err(e) => warn!(error = %e, "Q55 回放扫描失败（不阻断启动）"),
@@ -375,7 +387,7 @@ async fn main() -> Result<()> {
         reply_slot,
         ctx_slot,
         steal_slot,
-        consolidation: consolidation_handle,
+        consolidation: consolidation_handle.clone(),
         self_qq: self_qq.clone(),
         mood: mood.clone(),
         adapter_connected: adapter
@@ -402,36 +414,48 @@ async fn main() -> Result<()> {
     };
     let webui_serve = yuantuan_webui::serve(db_path.clone(), &cfg.webui.host, cfg.webui.port, extras);
 
-    // MOD-B11 优雅停机(runtime-design 三章「SIGTERM → 停止接收 → 排空 → checkpoint → 退出」)
-    // Windows 无 SIGTERM,用 Ctrl+C(tokio::signal::ctrl_c 跨平台):
-    //   ① 停 adapter(不再接受新消息) → ② 等 5s 让在飞消息发完 → ③ WAL checkpoint → ④ exit(0)
+    // 同时接收 Docker SIGTERM 与终端 SIGINT；信号处理在启动回放前已注册。
     tokio::select! {
         res = webui_serve => {
             info!(result = ?res, "WebUI 退出(服务自然结束)");
             res
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("收到 Ctrl+C,启动优雅停机序列");
-            // ① adapter: drop handle 触发其内部关闭(若实现);这里只记日志——真正停止接消息靠进程退出
-            info!("① 停止接收消息(adapter 将随进程退出)");
-            // ② 等 5s 让回复引擎把在飞泡发完(目前没有暴露 drain API,用固定窗口)
-            info!("② 等待 5s 发送队列排空");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            // ③ WAL checkpoint:把 -wal 合并回主 db 文件,避免下次启动恢复慢
-            info!("③ SQLite WAL checkpoint");
-            match yuantuan_core::db::connect(&db_path) {
-                Ok(conn) => {
-                    match conn.pragma_update(None, "wal_checkpoint", "TRUNCATE") {
-                        Ok(_) => info!("WAL checkpoint 完成"),
-                        Err(e) => warn!(error = %e, "WAL checkpoint 失败(不影响退出)"),
-                    }
-                }
-                Err(e) => warn!(error = %e, "打开 db 做 checkpoint 失败"),
-            }
-            info!("④ 优雅停机完成,退出");
-            Ok(())
+        signal = shutdown_signal.wait() => {
+            info!(signal = signal?, "收到停止信号，开始优雅停机");
+            _backup_scheduler.abort();
+            if let Some(handle) = consolidation_handle.lock().unwrap().take() { handle.abort(); }
+            finish_shutdown(&db_path, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await
         }
     }
+}
+
+async fn finish_shutdown(
+    db_path: &std::path::Path,
+    adapter: Option<&yuantuan_adapter_qq::AdapterHandle>,
+    reply: &yuantuan_core::reply_engine::EngineHandle,
+    supervisor: &yuantuan_core::supervisor::Supervisor,
+    mcp: &yuantuan_core::mcp::McpManager,
+) -> Result<()> {
+    use std::time::Duration;
+    if let Some(adapter) = adapter { adapter.stop_receiving(); }
+    for name in ["pipeline", "task_runner", "steal_listener"] { supervisor.stop(name); }
+    tokio::task::yield_now().await;
+    let drained = reply.shutdown(Duration::from_secs(5)).await;
+    info!(drained, "发送队列关闭");
+    let _ = tokio::time::timeout(Duration::from_secs(1), mcp.shutdown_all()).await;
+    supervisor.stop_all();
+    let db_path = db_path.to_owned();
+    let result = tokio::task::spawn_blocking(move || -> Result<(i64, i64, i64)> {
+        let conn = rusqlite::Connection::open(db_path)?;
+        conn.busy_timeout(Duration::from_millis(500))?;
+        Ok(conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?)
+    }).await;
+    match result {
+        Ok(Ok((0, _, _))) => info!("WAL checkpoint 完成"),
+        result => warn!(?result, "WAL checkpoint 未完成，下次启动由 SQLite 恢复"),
+    }
+    info!("优雅停机完成");
+    Ok(())
 }
 
 /// 扫描 plugins/<name>/enabled 标记：启用的插件调用其 register() 把 Tool 注册进 Registry
