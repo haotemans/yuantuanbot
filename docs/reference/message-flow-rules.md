@@ -66,7 +66,7 @@ Event::MessageReceived
 
 11. **Decision 并发（Q52 ✅）**：dispatcher + per-chat worker 拓扑——dispatcher 订阅 broadcast 按 chat_id 派发到 mpsc（cap 32)，每 chat 一个 worker 串行 handle；不同 chat 并发互不堵塞；单 chat 瞬时洪峰超过 32 时降级同步 handle 保底不丢。
 
-12. **10 秒窗口聚合（Q54，部分实现）**：dispatcher 经 `WindowAggregator` 把首条消息作为 anchor，同窗口普通消息作为 others；从收到 anchor 起固定等待 10 秒后将 anchor 交给 worker，others 标记为已处理。连续窗口可复用，消息直接进入批次，消除了原先 64 条中转队列满时丢弃的问题。同 chat 回调串行，慢回调不延长后续窗口的收集期限；空闲 lane 回收，聚合器销毁会取消其计时与回调任务。Decision 仍从数据库构建上下文，尚未接入完整的 `anchor` / `window_messages` 输入契约；高优先级独立窗口仍有缺口。
+12. **10 秒窗口聚合（Q54，部分实现）**：dispatcher 经 `WindowAggregator` 把首条消息作为 anchor，同窗口普通消息作为 others；固定等待 10 秒后，将 anchor 和该窗口消息 ID 上界交给 worker，others 标记为已处理。连续窗口、批次保留、回调顺序和取消机制保持。2026-10-10 起 worker 获取一次回复快照，Decision 携带显式 anchor、窗口消息的精简投影、引用及相关资料，bot_chat 共用快照。完整的全部高优先级消息/末尾 30 条筛选和独立高优先级窗口仍有缺口，详见 [Bot 上下文](bot-context.md)。
 
 13. **成本闸 + 全局并发（Q53 ✅）**：`LlmGateway::chat` 两道闸——① `CostGate` 滑动窗口（decision 30/min 可调，超限排队）;② 全局 `tokio::Semaphore` 4 许可，三角色共享，超出排队。正交不替代。
 
@@ -116,15 +116,16 @@ Decision(start_task + task_goal) → agent::create_task → INSERT tasks + TaskC
 **链路**：
 
 ```text
-Decision.memory_write → long_memories 表（explicit）
-夜间归纳 consolidation::spawn_scheduler → summaries 表 + ConsolidationDone 事件
+Decision.memory_write → long_memories 表（explicit + 源消息）
+Decision.profile_updates → person_profile_facts（本人原话校验）
+夜间归纳 → summaries + long_memories（源窗口）+ 人物简档 + 关系事件
 ```
 
 **规则**：
 
 23. **memory_write 只写显式事实**：Decision 产出的 memory_write 字段经敏感词过滤后写 long_memories。
 
-24. **归纳是只读侧路**：consolidation 读 messages → 写 summaries，不影响实时管线。
+24. **归纳是后台侧路**：读取 messages，写每日摘要、长期记忆、通过出处校验的人物简档及关系变化；更新会影响后续回复快照，不改写已生成的本轮快照，也不改人格。
 
 ## 七、配置热应用
 
@@ -166,12 +167,12 @@ Decision.memory_write → long_memories 表（explicit）
 | Q53 | 全局 LLM 并发最多 4，速率限制独立 | 已有共享 Semaphore 和成本闸 | [llm.rs](../../crates/core/src/llm.rs) |
 | Q54 | 固定 10 秒窗口、原请求归属与独立请求 | 部分实现；连续窗口、突发消息保留和回调顺序已补测试；独立高优先级窗口仍有差距 | [window.rs](../../crates/core/src/window.rs)、[bot.rs](../../crates/core/src/bot.rs) |
 | Q55 | 消息流水可恢复，trace 可缺失 | 已有持久化处理标记和最近 1 小时启动回放；不承诺恰好一次或无限期回放 | [bot.rs](../../crates/core/src/bot.rs)、[db.rs](../../crates/core/src/db.rs) |
-| Q56 | 不可变 anchor 与 window_messages 输入契约 | 部分实现；WindowBatch 有 anchor，Decision 输入尚未实现完整契约 | [window.rs](../../crates/core/src/window.rs)、[decision.rs](../../crates/core/src/decision.rs) |
+| Q56 | 不可变 anchor 与 window_messages 输入契约 | 已有共享回复快照及显式 anchor/窗口消息投影；完整窗口筛选仍待补齐 | [Bot 上下文](bot-context.md)、[decision.rs](../../crates/core/src/decision.rs) |
 | Q57–Q58 | 窗口优先级、@/引用独立开窗 | 独立高优先级窗口未实现 | [window.rs](../../crates/core/src/window.rs) |
 | Q59 | 同 chat 按窗口创建顺序进入发送队列 | 部分实现；已有队列按入队顺序发送，独立窗口调度约束未完整落实 | [bot.rs](../../crates/core/src/bot.rs)、[reply_engine.rs](../../crates/core/src/reply_engine.rs) |
 | Q60 | 保留指定窗口消息并限制输入 | 完整窗口消息筛选和预算约束未实现 | [window.rs](../../crates/core/src/window.rs)、[decision.rs](../../crates/core/src/decision.rs) |
 | Q61 | 普通消息合入等待窗口，独立请求另开 | 部分实现；普通消息合入与后续窗口已有回归测试，独立请求仍需处理 | [window.rs](../../crates/core/src/window.rs) |
-| Q62 | Decision 字符预算与 tokenizer 硬上限 | 完整双重预算未实现 | [decision.rs](../../crates/core/src/decision.rs) |
+| Q62 | Decision 字符预算与 tokenizer 硬上限 | 已限制结构化 state 为 8,000 字符；完整模板/schema 的 tokenizer 校验未实现 | [decision.rs](../../crates/core/src/decision.rs) |
 | Q63 | 高优先级窗口优先获取全局 LLM 槽 | 未实现；普通 Semaphore 不等于业务优先级调度 | [llm.rs](../../crates/core/src/llm.rs) |
 | Q64 | 每窗口至多一次可配置失败提示 | 未实现完整契约；现有失败回退或日志不能视为该能力 | [decision.rs](../../crates/core/src/decision.rs)、[bot.rs](../../crates/core/src/bot.rs) |
 | Q65 | 通过 MCP 接入专用 decide 服务 | 原工作记录中暂缓，继续使用 OpenAI 兼容路径 | [后端工作记录](../changes/backend-hardening-workbench.md) |

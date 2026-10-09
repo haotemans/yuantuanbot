@@ -29,7 +29,8 @@ const SELF_QQ: u64 = 10001;
 fn temp_dir(prefix: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-        + (std::process::id() as u128) << 16;
+        + (std::process::id() as u128)
+        << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -46,6 +47,8 @@ fn temp_db() -> PathBuf {
 struct LlmQueues {
     decision: Mutex<VecDeque<String>>,
     chat: Mutex<VecDeque<String>>,
+    requests: Mutex<Vec<Value>>,
+    inject_db: Mutex<Option<PathBuf>>,
 }
 
 /// 裸 TCP HTTP mock：读完整请求体，按 model 字段分派到对应角色的响应队列
@@ -58,11 +61,22 @@ async fn mock_llm(listener: TcpListener, queues: Arc<LlmQueues>) {
         let queues = queues.clone();
         tokio::spawn(async move {
             let body = read_body(&mut s).await.unwrap_or_default();
+            queues
+                .requests
+                .lock()
+                .unwrap()
+                .push(serde_json::from_slice(&body).unwrap());
             let model = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|v| v["model"].as_str().map(|s| s.to_string()))
                 .unwrap_or_default();
             let content = if model == "m-decision" {
+                // 模型已经收到本轮上下文后，模拟另一人在等待期间的新话题。
+                if let Some(path)=queues.inject_db.lock().unwrap().take() {
+                    let conn=db::connect(&path).unwrap();
+                    conn.execute_batch("INSERT OR IGNORE INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_2002','小明',1,1);
+                        INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts) VALUES ('555666','group','p_2002','小明','等待期间出现的新话题',1759400001);").unwrap();
+                }
                 queues.decision.lock().unwrap().pop_front()
             } else {
                 queues.chat.lock().unwrap().pop_front()
@@ -150,7 +164,11 @@ async fn mock_napcat(
         .await
         .unwrap();
     for ev in initial {
-        w.lock().await.send(Message::Text(ev.to_string().into())).await.unwrap();
+        w.lock()
+            .await
+            .send(Message::Text(ev.to_string().into()))
+            .await
+            .unwrap();
     }
 
     // 注入任务
@@ -160,7 +178,11 @@ async fn mock_napcat(
         tokio::spawn(async move {
             notify2.notified().await;
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let _ = w2.lock().await.send(Message::Text(ev.to_string().into())).await;
+            let _ = w2
+                .lock()
+                .await
+                .send(Message::Text(ev.to_string().into()))
+                .await;
         });
     }
 
@@ -224,7 +246,15 @@ struct Rig {
     _handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
-async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Value>, captures: Captures, notify: Arc<Notify>, inject: Option<Value>, engine_cfg: ReplyCfg) -> Rig {
+async fn build_rig(
+    db_path: PathBuf,
+    queues: Arc<LlmQueues>,
+    nap_events: Vec<Value>,
+    captures: Captures,
+    notify: Arc<Notify>,
+    inject: Option<Value>,
+    engine_cfg: ReplyCfg,
+) -> Rig {
     // mock LLM
     let ll = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ll_port = ll.local_addr().unwrap().port();
@@ -275,16 +305,24 @@ async fn build_rig(db_path: PathBuf, queues: Arc<LlmQueues>, nap_events: Vec<Val
         self_qq: adapter.self_qq_shared(),
         self_ids,
         mood: MoodState::default(),
-        prefilter: Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config::default())),
+        prefilter: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::prefilter::Config::default(),
+        )),
         reply: Some(engine),
         reply_cfg: reply_slot,
-        ctx_cfg: Arc::new(std::sync::RwLock::new(yuantuan_core::context_builder::ContextCfg::default())),
+        ctx_cfg: Arc::new(std::sync::RwLock::new(
+            yuantuan_core::context_builder::ContextCfg::default(),
+        )),
         memes_dir: temp_dir("reply-memes"),
         media_ctx: None,
         skill_registry: None,
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
-    Rig { _db_path: db_path, _bus: bus, _handles: vec![h1, h2, pipeline, _t] }
+    Rig {
+        _db_path: db_path,
+        _bus: bus,
+        _handles: vec![h1, h2, pipeline, _t],
+    }
 }
 
 fn decision_json(mention: bool) -> String {
@@ -300,16 +338,25 @@ fn decision_json(mention: bool) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn reply_loop_sends_three_bubbles() {
     let db_path = temp_db();
+    let mut decision: Value = serde_json::from_str(&decision_json(true)).unwrap();
+    decision["memory_write"] = json!("长期使用 Rust");
+    decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
     let queues = Arc::new(LlmQueues {
-        decision: Mutex::new(VecDeque::from(vec![decision_json(true)])),
+        decision: Mutex::new(VecDeque::from(vec![decision.to_string()])),
         chat: Mutex::new(VecDeque::from(vec!["哈‖确实不错‖我去试试".into()])),
+        inject_db: Mutex::new(Some(db_path.clone())),
+        ..Default::default()
     });
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
     let rig = build_rig(
         db_path.clone(),
-        queues,
-        vec![at_message(301, 2001, "云团觉得这个库怎么样")],
+        queues.clone(),
+        vec![at_message(
+            301,
+            2001,
+            "我长期使用 Rust，云团觉得这个库怎么样",
+        )],
         captures.clone(),
         notify,
         None,
@@ -347,7 +394,12 @@ async fn reply_loop_sends_three_bubbles() {
     let first = caps[0].1.as_array().unwrap();
     assert_eq!(first[0]["type"], "at");
     assert_eq!(first[0]["data"]["qq"], "2001");
-    assert!(caps[1].1.as_array().unwrap().iter().all(|s| s["type"] != "at"));
+    assert!(caps[1]
+        .1
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["type"] != "at"));
 
     // 延时：二、三泡相对前泡有非零延时；首末合计 ≤8s
     let d21 = caps[1].0.duration_since(caps[0].0);
@@ -368,6 +420,37 @@ async fn reply_loop_sends_three_bubbles() {
         .map(|r| r.unwrap())
         .collect();
     assert_eq!(self_texts, vec!["哈", "确实不错", "我去试试"]);
+    let external_ids: Vec<i64> = conn
+        .prepare("SELECT external_msg_id FROM messages WHERE sender_pid='self' ORDER BY msg_id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(external_ids, vec![901, 902, 903]);
+    let profile: (String, i64) = conn
+        .query_row(
+            "SELECT content,source_msg_id FROM person_profile_facts WHERE person_id='p_2001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(profile, ("长期使用 Rust".into(), 1));
+    let provenance: (String, i64) = conn
+        .query_row(
+            "SELECT source_chat_id,source_msg_id FROM long_memories WHERE owner_id='p_2001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(provenance, ("555666".into(), 1));
+    let requests = queues.requests.lock().unwrap();
+    let chat = requests.iter().find(|r| r["model"] == "m-chat").unwrap();
+    let content = chat["messages"][1]["content"].as_str().unwrap();
+    let context: Value = serde_json::from_str(content).unwrap();
+    assert_eq!(context["reply_target"]["person_id"], "p_2001");
+    assert!(content.contains("云团觉得这个库怎么样"));
+    assert!(!content.contains("等待期间出现的新话题"));
 }
 
 // ---------- 用例 2：异步作废 ----------
@@ -383,6 +466,7 @@ async fn new_message_voids_remaining_bubbles() {
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision_json(false), ignore])),
         chat: Mutex::new(VecDeque::from(vec!["第一‖第二‖第三".into()])),
+        ..Default::default()
     });
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
     let notify = Arc::new(Notify::new());
@@ -417,11 +501,20 @@ async fn new_message_voids_remaining_bubbles() {
             let evs: Vec<String> = c
                 .prepare("SELECT id, kind FROM events ORDER BY id")
                 .unwrap()
-                .query_map([], |r| Ok(format!("{}|{}", r.get::<_,i64>(0)?, r.get::<_,String>(1)?)))
+                .query_map([], |r| {
+                    Ok(format!(
+                        "{}|{}",
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?
+                    ))
+                })
                 .unwrap()
                 .map(|r| r.unwrap())
                 .collect();
-            panic!("首泡未发出。messages={msgs:?} events={evs:?} captures={:?}", captures.lock().unwrap().len());
+            panic!(
+                "首泡未发出。messages={msgs:?} events={evs:?} captures={:?}",
+                captures.lock().unwrap().len()
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -430,30 +523,53 @@ async fn new_message_voids_remaining_bubbles() {
     let deadline2 = Instant::now() + Duration::from_secs(60);
     loop {
         let n: i64 = conn0
-            .query_row("SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         if n >= 1 {
             break;
         }
-        assert!(Instant::now() < deadline2, "Duration 内未见 ReplyInterrupted");
+        assert!(
+            Instant::now() < deadline2,
+            "Duration 内未见 ReplyInterrupted"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(captures.lock().unwrap().len(), 1, "剩余泡应被作废，仅发出首泡");
+    assert_eq!(
+        captures.lock().unwrap().len(),
+        1,
+        "剩余泡应被作废，仅发出首泡"
+    );
     tokio::time::sleep(Duration::from_millis(500)).await; // 防作废后还有在途延时
     assert_eq!(captures.lock().unwrap().len(), 1);
 
     let conn = db::connect(&db_path).unwrap();
     let interrupted: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'ReplyInterrupted'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(interrupted, 1, "ReplyInterrupted 应落表");
     let self_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM messages WHERE sender_pid = 'self'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE sender_pid = 'self'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(self_count, 1);
     // 注入的新消息自身也正常落库决策（ignore）
     let incoming: i64 = conn
-        .query_row("SELECT COUNT(*) FROM messages WHERE sender_pid = 'p_2009'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE sender_pid = 'p_2009'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(incoming, 1);
 }

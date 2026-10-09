@@ -8,7 +8,13 @@
 
 ## 后续迁移说明（2026-10-09）
 
-当前迁移版本为 V5；本页下方继续保留 V0.1 基线。V5 只新增 `tasks(state, created_at, task_id)` 与 `tasks(created_at)` 索引，分别服务有界任务调度/状态筛选和按时间倒序的任务列表，无删列或数据重写。V3→V5 的旧消息、任务保留及查询计划均有 `db.rs` 测试。
+当前迁移版本为 V6；本页下方继续保留 V0.1 基线。V5 新增任务调度/列表索引；2026-10-10 的 V6 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 增加：
+
+- `messages.external_msg_id INTEGER NULL` 和 `(chat_id, chat_type, external_msg_id)`、`(chat_id, msg_id)` 索引。`reply_to` 为外部消息编号，不是本地 msg_id。
+- `long_memories.source_chat_id TEXT NULL`、`source_msg_id INTEGER NULL`、`source_end_msg_id INTEGER NULL`。显式事实引用一条消息；归纳事实引用窗口；旧 NULL 来源不回填猜测。
+- `person_profile_facts(person_id, field, content, source_msg_id, evidence_quote, updated_at)`，主键 `(person_id, field)`，person_id 引用 persons。保存简档当前字段及本人原话出处，不替代每日 summaries。
+
+没有删除或重写旧业务行。人物资料、检索和来源校验详见 [Bot 上下文](bot-context.md)。V6 失败回滚、旧数据保留和并发幂等迁移有 `db.rs` 测试。
 
 每步迁移使用 `BEGIN IMMEDIATE`，取得写锁后重新读取 `user_version`；V4 的列存在性检查、加列、索引和版本更新位于同一事务。迁移失败一起回滚，多个连接启动时串行推进版本。任务创建、收尾及事件序号语义见[Agent 持久化参考](message-flow-rules.md#agent-任务执行与持久化2026-10-09-加固)。
 

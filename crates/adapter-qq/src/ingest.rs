@@ -82,11 +82,16 @@ pub fn ingest_message(
         .unwrap_or_default();
     for seg in &segments {
         match seg.get("type").and_then(|t| t.as_str()) {
-            Some("text") => {
-                text.push_str(seg.pointer("/data/text").and_then(|t| t.as_str()).unwrap_or(""))
-            }
+            Some("text") => text.push_str(
+                seg.pointer("/data/text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or(""),
+            ),
             Some("at") => {
-                let qq = seg.pointer("/data/qq").and_then(|q| q.as_str()).unwrap_or("");
+                let qq = seg
+                    .pointer("/data/qq")
+                    .and_then(|q| q.as_str())
+                    .unwrap_or("");
                 if qq == "all" {
                     debug!("忽略 @全体成员");
                 } else if let Ok(n) = qq.parse::<u64>() {
@@ -155,8 +160,8 @@ pub fn ingest_message(
     }
     let mentions_json = serde_json::to_string(&mentions)?;
     tx.execute(
-        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, reply_to, at_me, has_image, ts)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, reply_to, at_me, has_image, ts, external_msg_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             chat_id,
             chat_type,
@@ -167,7 +172,8 @@ pub fn ingest_message(
             reply_to,
             at_me as i64,
             has_image as i64,
-            ts
+            ts,
+            napcat_msg_id
         ],
     )?;
     let msg_id = tx.last_insert_rowid();

@@ -29,11 +29,11 @@
               <n-form-item label="会话窗口 K（条）">
                 <n-input-number v-model:value="f.context.k" :min="5" :max="100" style="width: 160px" />
               </n-form-item>
-              <n-form-item label="名册记忆条数">
+              <n-form-item label="话题记忆条数">
                 <n-input-number v-model:value="f.context.roster_mem_per" :min="0" :max="10" style="width: 160px" />
               </n-form-item>
             </n-form>
-            <p class="param-hint">budget_chars 是 40k tokens 的字符代理值；超预算先缩 K 再裁记忆，花名册与锚点不动。</p>
+            <p class="param-hint">按字符控制本轮上下文；超预算先减少近期对话，再减少记忆和人物资料。当前问题与引用优先保留，必要内容放不下时停止生成。</p>
           </n-card>
 
           <n-card title="节流" size="small" style="margin-top: 14px">

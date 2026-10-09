@@ -18,7 +18,8 @@ const SELF_QQ: u64 = 10001;
 fn temp_db() -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-        + (std::process::id() as u128) << 16;
+        + (std::process::id() as u128)
+        << 16;
     let dir = std::env::temp_dir().join(format!("yt-adapter-test-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("yuantuan.db");
@@ -57,21 +58,33 @@ async fn mock_napcat(port: u16) {
     .unwrap();
 
     let t = 1759400000i64;
-    let group_msg = |id: u64, uid: u64, card: &str, nick: &str, msg: Value| json!({
-        "post_type": "message", "message_type": "group", "time": t, "message_id": id,
-        "group_id": 555666, "user_id": uid,
-        "sender": {"user_id": uid, "nickname": nick, "card": card},
-        "message": msg
-    });
+    let group_msg = |id: u64, uid: u64, card: &str, nick: &str, msg: Value| {
+        json!({
+            "post_type": "message", "message_type": "group", "time": t, "message_id": id,
+            "group_id": 555666, "user_id": uid,
+            "sender": {"user_id": uid, "nickname": nick, "card": card},
+            "message": msg
+        })
+    };
     // 1. 群纯文本
-    let g1 = group_msg(111, 2001, "小明", "明",
-        json!([{"type": "text", "data": {"text": "大家早上好"}}]));
+    let g1 = group_msg(
+        111,
+        2001,
+        "小明",
+        "明",
+        json!([{"type": "text", "data": {"text": "大家早上好"}}]),
+    );
     // 2. 群 @bot + 文本
-    let g2 = group_msg(112, 2002, "", "阿强",
+    let g2 = group_msg(
+        112,
+        2002,
+        "",
+        "阿强",
         json!([
             {"type": "at", "data": {"qq": SELF_QQ.to_string()}},
             {"type": "text", "data": {"text": " 在吗"}}
-        ]));
+        ]),
+    );
     // 3. 私聊：文本 + 图片
     let p1 = json!({
         "post_type": "message", "message_type": "private", "time": t, "message_id": 113,
@@ -120,53 +133,95 @@ async fn ingest_group_and_private_messages() {
         if msgs == 3 && evs == 3 {
             break;
         }
-        assert!(Instant::now() < deadline, "超时未摄取完成：messages={msgs} events={evs}");
+        assert!(
+            Instant::now() < deadline,
+            "超时未摄取完成：messages={msgs} events={evs}"
+        );
         drop(conn);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     let conn = db::connect(&db_path).unwrap();
     // g1：群文本，名片取 card
+    let external: Option<i64> = conn
+        .query_row(
+            "SELECT external_msg_id FROM messages WHERE msg_id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        external.is_some(),
+        "必须保留协议消息编号，不能依赖本地自增 ID 解析引用"
+    );
     let (text, chat_type, chat_id, nick, at_me, has_image): (String, String, String, String, i64, i64) =
         conn.query_row(
             "SELECT text, chat_type, chat_id, nickname, at_me, has_image FROM messages WHERE msg_id = 1",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         ).unwrap();
-    assert_eq!((text.as_str(), chat_type.as_str(), chat_id.as_str(), nick.as_str(), at_me, has_image),
-               ("大家早上好", "group", "555666", "小明", 0, 0));
+    assert_eq!(
+        (
+            text.as_str(),
+            chat_type.as_str(),
+            chat_id.as_str(),
+            nick.as_str(),
+            at_me,
+            has_image
+        ),
+        ("大家早上好", "group", "555666", "小明", 0, 0)
+    );
 
     // g2：@bot → at_me=1，mentions 为 person_id 列表
-    let (mentions, at_me2, nick2): (String, i64, String) = conn.query_row(
-        "SELECT mentions, at_me, nickname FROM messages WHERE msg_id = 2",
-        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
+    let (mentions, at_me2, nick2): (String, i64, String) = conn
+        .query_row(
+            "SELECT mentions, at_me, nickname FROM messages WHERE msg_id = 2",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(mentions, json!([format!("p_{SELF_QQ}")]).to_string());
     assert_eq!(at_me2, 1);
     assert_eq!(nick2, "阿强"); // card 为空回落 nickname
 
     // p1：私聊 dm_ 前缀，has_image=1
-    let (chat_id3, chat_type3, has_image3): (String, String, i64) = conn.query_row(
-        "SELECT chat_id, chat_type, has_image FROM messages WHERE msg_id = 3",
-        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
-    assert_eq!((chat_id3.as_str(), chat_type3.as_str(), has_image3), ("dm_2001", "private", 1));
+    let (chat_id3, chat_type3, has_image3): (String, String, i64) = conn
+        .query_row(
+            "SELECT chat_id, chat_type, has_image FROM messages WHERE msg_id = 3",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (chat_id3.as_str(), chat_type3.as_str(), has_image3),
+        ("dm_2001", "private", 1)
+    );
 
     // 档案：两个发言人建档；QQ 号反查 person 稳定
-    let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0)).unwrap();
+    let person_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(person_count, 2);
-    let pid: String = conn.query_row(
-        "SELECT person_id FROM identities WHERE platform = 'qq' AND platform_uid = '2001'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let pid: String = conn
+        .query_row(
+            "SELECT person_id FROM identities WHERE platform = 'qq' AND platform_uid = '2001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(pid, "p_2001");
-    let card: String = conn.query_row(
-        "SELECT card FROM member_profiles WHERE chat_id = '555666' AND person_id = 'p_2001'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let card: String = conn
+        .query_row(
+            "SELECT card FROM member_profiles WHERE chat_id = '555666' AND person_id = 'p_2001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(card, "小明");
 
     // 事件：tracer 落库 3 条 MessageReceived，payload 为含 chat_id 的 JSON
-    let mut stmt = conn.prepare("SELECT kind, payload FROM events ORDER BY id").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT kind, payload FROM events ORDER BY id")
+        .unwrap();
     let rows: Vec<(String, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap()

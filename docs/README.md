@@ -9,6 +9,7 @@
 | 产品目标、系统边界与总体方案 | [总体架构](design/architecture-v0.1.md) | 设计目标，包含尚未落地的能力 |
 | 启动、并发、WebUI 与 QQ 通讯设计 | [运行时设计](design/runtime-design.md) | 设计约束，不以其中的历史进度描述判断完成情况 |
 | 消息实际如何流转、实现有哪些缺口 | [信息流实现参考](reference/message-flow-rules.md) | 实现记录与已知差距，附代码来源和核对范围 |
+| 回复时如何使用人物资料、记忆和对话 | [Bot 上下文](reference/bot-context.md)、[术语](../CONTEXT.md) | 带出处的简档、话题检索、引用与回复快照 |
 | Agent 如何执行代码、使用 Git/Python/Bun | [开发沙箱](reference/agent-sandbox.md) | Docker 工具、Linux 部署、任务工作卷和验证边界 |
 | 数据布局、表结构与 Decision 输入 | [数据模型](reference/data-model.md) | V0.1 设计基线；实际迁移以 `db.rs` 为准 |
 | 为什么做出某个决定 | [决策台账](decision-log.md)、[ADR 索引](adr/README.md) | 按时间保留决定、改判与被否方案 |

@@ -25,6 +25,8 @@ pub struct DecisionOutput {
     pub meme_type: Option<String>,
     pub task_goal: Option<String>,
     pub memory_write: Option<String>,
+    #[serde(default)]
+    pub profile_updates: Vec<crate::memory::ProfileUpdate>,
     /// action=invoke_skill 时必填：触发哪个 Skill
     #[serde(default)]
     pub skill_name: Option<String>,
@@ -76,6 +78,7 @@ const SYSTEM_PROMPT_BASE: &str = r#"你是云团的 Decision 小脑：一个分�
   "meme_type": "类别标签；仅 action=send_meme 时填，否则 null",
   "task_goal": "一句话任务目标；仅 action=start_task 时填，否则 null",
   "memory_write": "提炼出的显式事实字符串，无则 null",
+  "profile_updates": [{"field":"preferred_name|technical_preferences|ongoing_projects|communication_style","value":"该字段的简短完整现状，200字内","evidence_msg_id":100,"evidence_quote":"本次发送者消息中的连续原话，4–240字"}],
   "skill_name": "已注册 Skill 名；仅 action=invoke_skill 时必填，否则 null",
   "skill_slots": "传给 Skill 的槽位对象，通常至少含 user_text；仅 action=invoke_skill 时可填，否则 null",
   "reason": "一句话中文理由（只进 trace，不展示给用户）"
@@ -84,6 +87,7 @@ const SYSTEM_PROMPT_BASE: &str = r#"你是云团的 Decision 小脑：一个分�
 规则：
 - 拿不准就 ignore；主动插话与被动回复由你同一裁决
 - memory_write 只在消息包含值得长期记住的新事实时填写，提炼成陈述句
+- profile_updates 仅在 anchor 本人明确陈述或更正稳定称呼、技术偏好、长期项目、交流习惯时填；否则 []。不提取玩笑、假设、他人评价、临时情绪；不从 Bot 旧回答推断人物事实。引文必须逐字来自 anchor，字段更新保留仍然适用的已有信息
 - 是否回复、回复长度、情绪 mood 由场景与你的判断决定
 - 当消息请求某个已注册 Skill 的能力时（如"整理一下"、"翻译"、"会议纪要"），优先返回 action=invoke_skill 而非 reply；skill_name 必须从可用 Skills 列表里挑
 "#;
@@ -110,16 +114,48 @@ pub async fn decide(
     mood: &MoodState,
     msg: &MessageReceivedPayload,
     skills: Option<&crate::skills::SkillRegistry>,
+    snapshot: &crate::context_builder::ReplySnapshot,
 ) -> DecisionOutcome {
     let started = Instant::now();
-    let ctx = build_context(db_path, mood, msg);
-    let user_prompt = serde_json::to_string_pretty(&ctx).unwrap_or_else(|_| "{}".into());
+    let mut ctx = build_context(mood, msg, snapshot);
+    ctx["anchor"] = compact_message(&snapshot.anchor, 500);
+    ctx["window_messages"] = json!(snapshot
+        .recent_messages
+        .iter()
+        .filter(|m| m.msg_id >= msg.msg_id)
+        .map(|m| compact_message(m, 160))
+        .collect::<Vec<_>>());
+    ctx["quoted_messages"] = json!(snapshot
+        .quoted_messages
+        .iter()
+        .map(|m| compact_message(m, 300))
+        .collect::<Vec<_>>());
+    ctx["person_profile"] = json!(snapshot.profile);
+    ctx["memory_hints"] = json!(snapshot.memories);
+    ctx["context_limitations"] = json!(snapshot.limitations);
+    // 先限制结构化 state 的字符数；模型 tokenizer 的完整 8192-token 契约仍待接入。
+    for key in ["window_messages", "memory_hints", "person_profile"] {
+        while ctx.to_string().chars().count() > 8000 {
+            if ctx[key].as_array_mut().is_none_or(|a| a.pop().is_none()) {
+                break;
+            }
+            ctx["context_pruned"] = json!(true);
+        }
+    }
+    let user_prompt = ctx.to_string();
     let catalog: Vec<(String, String)> = skills
         .map(|r| r.describe_for_decision())
         .unwrap_or_default();
     let sys_prompt = build_system_prompt(&catalog);
 
-    let raw = llm.chat(Role::Decision, &sys_prompt, &user_prompt, true).await;
+    let raw = if user_prompt.chars().count() > 8000 {
+        Err(anyhow::anyhow!(
+            "Decision 必要上下文超过 8000 字符，停止本次请求"
+        ))
+    } else {
+        llm.chat(Role::Decision, &sys_prompt, &user_prompt, true)
+            .await
+    };
     let mut retries = 0u32;
     let mut parsed: Option<DecisionOutput> = None;
     match raw {
@@ -134,7 +170,10 @@ pub async fn decide(
                 let retry_user = format!(
                     "{user_prompt}\n\n上一次你的输出未通过 Schema 校验：{err}\n请严格按 Schema 重新输出，只输出 JSON。"
                 );
-                match llm.chat(Role::Decision, &sys_prompt, &retry_user, true).await {
+                match llm
+                    .chat(Role::Decision, &sys_prompt, &retry_user, true)
+                    .await
+                {
                     Ok(content2) => match parse_decision(&content2) {
                         Ok(o) => parsed = Some(o),
                         Err(err2) => {
@@ -211,10 +250,18 @@ fn fallback_output() -> DecisionOutput {
         meme_type: None,
         task_goal: None,
         memory_write: None,
+        profile_updates: vec![],
         skill_name: None,
         skill_slots: None,
         reason: "模型输出未通过 Schema 校验，兜底 ignore".into(),
     }
+}
+
+fn compact_message(message: &crate::context_builder::ContextMessage, limit: usize) -> Value {
+    let mut value = json!(message);
+    value["text"] = json!(truncate_chars(&message.text, limit));
+    value["text_truncated"] = json!(message.text_truncated || message.text.chars().count() > limit);
+    value
 }
 
 /// 输出 Schema 校验（纯函数，单测直测）：容忍 ```json 围栏，其余严格 serde
@@ -233,117 +280,40 @@ fn strip_fence(s: &str) -> String {
     s.to_string()
 }
 
-/// Decision Context 组装（data-model 第十章）；摘要优先于原始消息，各字段有界
-fn build_context(db_path: &Path, mood: &MoodState, msg: &MessageReceivedPayload) -> Value {
-    let conn = crate::db::connect(db_path).ok();
-    let now = now_secs();
-    let sender = conn.as_ref().map(|c| {
-        let (trust, familiar): (f64, f64) = c
-            .query_row(
-                "SELECT trust, familiar FROM relationship_edges WHERE from_pid = 'self' AND to_pid = ?1",
-                params![msg.sender_pid],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0.5, 0.0));
-        let nickname: String = c
-            .query_row(
-                "SELECT COALESCE(display_name, '') FROM persons WHERE person_id = ?1",
-                params![msg.sender_pid],
-                |r| r.get(0),
-            )
-            .unwrap_or_default();
-        let affinity: f64 = c
-            .query_row(
-                "SELECT familiar FROM relationship_edges WHERE from_pid = 'self' AND to_pid = ?1",
-                params![msg.sender_pid],
-                |r| r.get(0),
-            )
-            .unwrap_or(0.0);
-        json!({
-            "person_id": msg.sender_pid,
-            "nickname": nickname,
-            "trust": trust,
-            "familiar": familiar,
-            "affinity_self": affinity,
-        })
-    }).unwrap_or_else(|| json!({
-        "person_id": msg.sender_pid, "nickname": "", "trust": 0.5, "familiar": 0.0, "affinity_self": 0.0
-    }));
-
-    let scene = conn.as_ref().map(|c| {
-        let recent_speakers: Vec<String> = c
-            .prepare(
-                "SELECT DISTINCT sender_pid FROM (
-                   SELECT sender_pid FROM messages WHERE chat_id = ?1 ORDER BY msg_id DESC LIMIT 10
-                 ) LIMIT 10",
-            )
-            .and_then(|mut st| {
-                let rows = st.query_map(params![msg.chat_id], |r| r.get(0))?;
-                rows.collect::<std::result::Result<Vec<String>, _>>()
-            })
-            .unwrap_or_default();
-        let msgs_since_my_reply: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND sender_pid != 'self' AND msg_id > COALESCE(
-                   (SELECT MAX(msg_id) FROM messages WHERE chat_id = ?1 AND sender_pid = 'self'), 0)",
-                params![msg.chat_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let my_replies_last_5min: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND sender_pid = 'self' AND ts >= ?2",
-                params![msg.chat_id, now - 300],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        json!({
-            "recent_speakers": recent_speakers,
-            "msgs_since_my_reply": msgs_since_my_reply,
-            "my_replies_last_5min": my_replies_last_5min,
-            "chat_topic": Value::Null,
-        })
-    }).unwrap_or_else(|| json!({
-        "recent_speakers": [], "msgs_since_my_reply": 0, "my_replies_last_5min": 0, "chat_topic": Value::Null
-    }));
-
-    let memory_hints: Vec<String> = conn.as_ref().map(|c| {
-        c.prepare(
-            "SELECT content FROM long_memories
-             WHERE (owner_type = 'person' AND owner_id = ?1) OR (owner_type = 'chat' AND owner_id = ?2)
-             ORDER BY updated_at DESC LIMIT 3",
-        )
-        .and_then(|mut st| {
-            let rows = st.query_map(params![msg.sender_pid, msg.chat_id], |r| r.get(0))?;
-            rows.collect::<std::result::Result<Vec<String>, _>>()
-        })
-        .unwrap_or_default()
-    }).unwrap_or_default();
-
+/// Decision 与 bot_chat 共享已经捕获的资料，不再访问最新数据库状态。
+fn build_context(
+    mood: &MoodState,
+    msg: &MessageReceivedPayload,
+    snapshot: &crate::context_builder::ReplySnapshot,
+) -> Value {
+    let sender = snapshot
+        .participants
+        .iter()
+        .find(|p| p["person_id"].as_str() == Some(msg.sender_pid.as_str()))
+        .cloned()
+        .unwrap_or_else(|| json!({"person_id":msg.sender_pid,"nickname":snapshot.anchor.nickname}));
     json!({
-        "message": {
-            "text": truncate_chars(&msg.text, 500),
-            "chat_type": msg.chat_type,
-            "at_me": msg.at_me,
-            "reply_to_me": msg.reply_to.is_some(),
-            "has_image": msg.has_image,
-            "mentions": Value::Null,
-        },
-        "sender": sender,
-        "scene": scene,
-        "memory_hints": memory_hints,
-        "mood": mood.get().as_str(),
-        "active_task": Value::Null,
+        "message":{"text":truncate_chars(&msg.text,500),"chat_type":msg.chat_type,"at_me":msg.at_me,
+            "reply_to_me":snapshot.quoted_messages.first().is_some_and(|m|m.person_id=="self"),
+            "has_image":msg.has_image,"mentions":null},
+        "sender":sender,"scene":snapshot.scene,"mood":mood.get().as_str(),"active_task":null,
     })
 }
-
-fn apply_side_effects(db_path: &Path, bus: &EventBus, mood: &MoodState, msg: &MessageReceivedPayload, out: &DecisionOutput) {
+fn apply_side_effects(
+    db_path: &Path,
+    bus: &EventBus,
+    mood: &MoodState,
+    msg: &MessageReceivedPayload,
+    out: &DecisionOutput,
+) {
     // mood 写回（仅变化时记 MoodChanged）
     if mood.set(out.mood) {
         bus.publish(Event::MoodChanged);
     }
     // memory_write → long_memories（owner=person，source=explicit）；敏感/空串拒收
-    if let Some(fact) = out.memory_write.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(fact) = out.memory_write.as_ref().map(|s| s.trim()).filter(|s| {
+        !s.is_empty() && s.chars().count() <= 800 && !crate::consolidation::is_sensitive(s)
+    }) {
         let conn = match crate::db::connect(db_path) {
             Ok(c) => c,
             Err(e) => {
@@ -353,15 +323,36 @@ fn apply_side_effects(db_path: &Path, bus: &EventBus, mood: &MoodState, msg: &Me
         };
         let now = now_secs();
         match conn.execute(
-            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at)
-             VALUES ('person', ?1, ?2, 'explicit', ?3, ?3)",
-            params![msg.sender_pid, fact, now],
+            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id)
+             VALUES ('person', ?1, ?2, 'explicit', ?3, ?3, ?4, ?5)",
+            params![msg.sender_pid, fact, now, msg.chat_id, msg.msg_id],
         ) {
             Ok(_) => {
                 debug!(person = %msg.sender_pid, "显式记忆已写入");
                 bus.publish(Event::MemoryWritten);
             }
             Err(e) => warn!(error = %e, "memory_write 落库失败"),
+        }
+    }
+    if !out.profile_updates.is_empty() {
+        match crate::db::connect(db_path) {
+            Ok(conn) => {
+                for update in out.profile_updates.iter().take(4) {
+                    match crate::memory::update_profile(
+                        &conn,
+                        &msg.sender_pid,
+                        &msg.chat_id,
+                        msg.msg_id,
+                        msg.msg_id,
+                        update,
+                    ) {
+                        Ok(true) => bus.publish(Event::MemoryWritten),
+                        Ok(false) => {}
+                        Err(e) => warn!(error=%e,"人物简档更新未通过来源校验"),
+                    }
+                }
+            }
+            Err(e) => warn!(error=%e,"人物简档数据库不可用"),
         }
     }
 }
@@ -424,7 +415,8 @@ mod tests {
 
     #[test]
     fn schema_rejects_missing_field() {
-        let bad = valid_json().replace("true, \"reply_len\"", "true, \"reply_len2\"")
+        let bad = valid_json()
+            .replace("true, \"reply_len\"", "true, \"reply_len2\"")
             .replace("\"mention\": true", "");
         assert!(parse_decision(&bad).is_err());
     }
@@ -465,9 +457,7 @@ mod tests {
 
     #[test]
     fn system_prompt_appends_skill_catalog() {
-        let p = build_system_prompt(&[
-            ("meeting_notes".to_string(), "整理会议纪要".to_string()),
-        ]);
+        let p = build_system_prompt(&[("meeting_notes".to_string(), "整理会议纪要".to_string())]);
         assert!(p.contains("可用 Skills"));
         assert!(p.contains("meeting_notes"));
     }

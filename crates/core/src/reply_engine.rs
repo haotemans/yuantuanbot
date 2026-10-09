@@ -156,11 +156,26 @@ fn mechanical_split(b: &Bubble, max: usize) -> Vec<Bubble> {
             .find(|&i| {
                 matches!(
                     chars[i - 1],
-                    '。' | '！' | '？' | '!' | '?' | '.' | '，' | '；' | '：' | ';' | ':' | ',' | '\n'
+                    '。' | '！'
+                        | '？'
+                        | '!'
+                        | '?'
+                        | '.'
+                        | '，'
+                        | '；'
+                        | '：'
+                        | ';'
+                        | ':'
+                        | ','
+                        | '\n'
                 )
             })
             .unwrap_or(window_end);
-        let chunk: String = chars[start..cut_at].iter().collect::<String>().trim().to_string();
+        let chunk: String = chars[start..cut_at]
+            .iter()
+            .collect::<String>()
+            .trim()
+            .to_string();
         if !chunk.is_empty() {
             out.push(Bubble {
                 text: chunk,
@@ -286,7 +301,14 @@ impl ReplyEngine {
         cfg: SharedReplyCfg,
         mood: MoodState,
     ) -> Self {
-        Self { db_path, bus, send, self_ids, cfg, mood }
+        Self {
+            db_path,
+            bus,
+            send,
+            self_ids,
+            cfg,
+            mood,
+        }
     }
 
     /// 派遣器：每个 chat 一个 worker（mpsc 串行）；折叠卡与普通回复同队列（稳定六条②）
@@ -350,7 +372,13 @@ async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note
             if let Some(id) = data.get("message_id").and_then(|x| x.as_i64()) {
                 eng.self_ids.record(id);
             }
-            insert_self_message_ex(&eng.db_path, job, "（图片）", true);
+            insert_self_message_ex(
+                &eng.db_path,
+                job,
+                "（图片）",
+                true,
+                data.get("message_id").and_then(|x| x.as_i64()),
+            );
             eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                 chat_id: job.chat_id.clone(),
                 bubble_index: 0,
@@ -460,7 +488,13 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                 if let Some(id) = data.get("message_id").and_then(|x| x.as_i64()) {
                     eng.self_ids.record(id);
                 }
-                insert_self_message(&eng.db_path, &job, &b.text);
+                insert_self_message_ex(
+                    &eng.db_path,
+                    &job,
+                    &b.text,
+                    false,
+                    data.get("message_id").and_then(|x| x.as_i64()),
+                );
                 eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                     chat_id: job.chat_id.clone(),
                     bubble_index: i,
@@ -490,17 +524,23 @@ async fn send_with_retry(send: &SendFn, req: &SendRequest) -> Result<Value> {
         Ok(v) => Ok(v),
         Err(e1) => {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            (send)(req.clone()).await.map_err(|e2| anyhow!("首试 {e1}；重试 {e2}"))
+            (send)(req.clone())
+                .await
+                .map_err(|e2| anyhow!("首试 {e1}；重试 {e2}"))
         }
     }
 }
 
-fn insert_self_message(db_path: &Path, job: &ReplyJob, text: &str) {
-    insert_self_message_ex(db_path, job, text, false)
-}
-
-fn insert_self_message_ex(db_path: &Path, job: &ReplyJob, text: &str, has_image: bool) {
-    let Ok(conn) = crate::db::connect(db_path) else { return };
+fn insert_self_message_ex(
+    db_path: &Path,
+    job: &ReplyJob,
+    text: &str,
+    has_image: bool,
+    external_msg_id: Option<i64>,
+) {
+    let Ok(conn) = crate::db::connect(db_path) else {
+        return;
+    };
     let now = now_secs();
     let chat_type = match job.chat_type {
         ChatType::Group => "group",
@@ -512,9 +552,9 @@ fn insert_self_message_ex(db_path: &Path, job: &ReplyJob, text: &str, has_image:
         params![now],
     );
     if let Err(e) = conn.execute(
-        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts)
-         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5)",
-        params![job.chat_id, chat_type, text, has_image as i64, now],
+        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts, external_msg_id)
+         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5, ?6)",
+        params![job.chat_id, chat_type, text, has_image as i64, now, external_msg_id],
     ) {
         warn!(error = %e, "self 回复落库失败");
     }
@@ -533,7 +573,7 @@ fn now_secs() -> i64 {
 /// ctx_cfg/reply_cfg 由调用方从热应用槽读取传入（每消息取当前值）。
 pub async fn prepare_and_enqueue(
     engine: &EngineHandle,
-    db_path: &Path,
+    snapshot: &context_builder::ReplySnapshot,
     llm: &llm::LlmGateway,
     mood: &MoodState,
     msg: &MessageReceivedPayload,
@@ -541,13 +581,17 @@ pub async fn prepare_and_enqueue(
     ctx_cfg: &context_builder::ContextCfg,
     reply_cfg: &ReplyCfg,
 ) -> Result<()> {
-    let ctx = context_builder::build_bot_context(db_path, mood.get(), msg, ctx_cfg);
+    let ctx = context_builder::render_bot_context(snapshot, mood.get(), ctx_cfg)?;
     let started = Instant::now();
     let raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
         .await
         .context("bot_chat 调用失败")?;
-    debug!(k_used = ctx.k_used, elapsed_ms = started.elapsed().as_millis() as u64, "bot_chat 生成完成");
+    debug!(
+        k_used = ctx.k_used,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "bot_chat 生成完成"
+    );
     let bubbles = bubbleize_with(&raw, reply_cfg.bubble_char_cap, reply_cfg.bubble_cap);
     if bubbles.is_empty() {
         return Err(anyhow!("bot_chat 输出为空"));
@@ -619,7 +663,14 @@ mod tests {
     #[test]
     fn no_marker_is_single_bubble() {
         let bs = bubbleize("一句话说完");
-        assert_eq!(vec![Bubble { text: "一句话说完".into(), at: false, meme: None }], bs);
+        assert_eq!(
+            vec![Bubble {
+                text: "一句话说完".into(),
+                at: false,
+                meme: None
+            }],
+            bs
+        );
     }
 
     #[test]

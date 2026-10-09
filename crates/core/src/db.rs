@@ -266,7 +266,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 5] = [
+const MIGRATIONS: [(&str, &str); 6] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
@@ -282,6 +282,22 @@ const MIGRATIONS: [(&str, &str); 5] = [
         r#"
         CREATE INDEX IF NOT EXISTS idx_tasks_state_created ON tasks(state, created_at, task_id);
         CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks(created_at);
+    "#,
+    ),
+    (
+        "V0.6 回复来源、人物简档与记忆证据",
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_msg_external ON messages(chat_id, chat_type, external_msg_id);
+        CREATE INDEX IF NOT EXISTS idx_msg_chat_id ON messages(chat_id, msg_id);
+        CREATE TABLE IF NOT EXISTS person_profile_facts (
+            person_id TEXT NOT NULL REFERENCES persons(person_id),
+            field TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source_msg_id INTEGER NOT NULL,
+            evidence_quote TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(person_id, field)
+        );
     "#,
     ),
 ];
@@ -310,6 +326,12 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         if version == 4 {
             add_column_if_missing(&tx, "messages", "processed_at", "INTEGER")?;
+        }
+        if version == 6 {
+            add_column_if_missing(&tx, "messages", "external_msg_id", "INTEGER")?;
+            add_column_if_missing(&tx, "long_memories", "source_chat_id", "TEXT")?;
+            add_column_if_missing(&tx, "long_memories", "source_msg_id", "INTEGER")?;
+            add_column_if_missing(&tx, "long_memories", "source_end_msg_id", "INTEGER")?;
         }
         tx.execute_batch(sql)
             .with_context(|| format!("执行迁移 v{version} 失败"))?;
@@ -428,6 +450,43 @@ mod tests {
         );
         drop(conn);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v6_preserves_legacy_memories_without_fabricating_sources_and_rolls_back_failure() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        v3_database(&conn);
+        add_column_if_missing(&conn, "messages", "processed_at", "INTEGER").unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(MIGRATIONS[4].1).unwrap();
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute_batch("INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at) VALUES ('person','p_test','旧记忆','explicit',1,1); CREATE TABLE idx_msg_external(dummy INTEGER);").unwrap();
+        assert!(migrate(&mut conn).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert!(conn
+            .prepare("SELECT external_msg_id FROM messages")
+            .is_err());
+        conn.execute_batch("DROP TABLE idx_msg_external").unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        let row: (String, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT content,source_msg_id,source_chat_id FROM long_memories",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("旧记忆".into(), None, None));
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM person_profile_facts", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

@@ -14,9 +14,7 @@
 //! 中途进程崩则该 chat 当日损失一轮，可接受）；同日重复执行整 chat 跳过。
 //! summaries 另有 UNIQUE(owner_type,owner_id,period,date) + UPSERT 兜底防重。
 
-use crate::event::{
-    ChatConsolidationOutcome, ConsolidationDonePayload, Event, EventBus,
-};
+use crate::event::{ChatConsolidationOutcome, ConsolidationDonePayload, Event, EventBus};
 use crate::llm::{LlmGateway, Role};
 use anyhow::{Context, Result};
 use rusqlite::params;
@@ -127,11 +125,12 @@ pub async fn run_once(deps: &ConsolidationDeps) {
         outcomes.push(outcome);
     }
 
-    deps.bus.publish(Event::ConsolidationDone(ConsolidationDonePayload {
-        date: today.clone(),
-        chats: outcomes.clone(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
-    }));
+    deps.bus
+        .publish(Event::ConsolidationDone(ConsolidationDonePayload {
+            date: today.clone(),
+            chats: outcomes.clone(),
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }));
     info!(
         date = %today,
         chats = outcomes.len(),
@@ -157,7 +156,11 @@ fn stamp_key(chat_id: &str, date: &str) -> String {
     format!("consolidation_done:{}:{}", chat_id, date)
 }
 
-async fn process_chat(deps: &ConsolidationDeps, chat_id: &str, today: &str) -> ChatConsolidationOutcome {
+async fn process_chat(
+    deps: &ConsolidationDeps,
+    chat_id: &str,
+    today: &str,
+) -> ChatConsolidationOutcome {
     let mut outcome = ChatConsolidationOutcome {
         chat_id: chat_id.to_string(),
         msg_start: 0,
@@ -247,7 +250,10 @@ async fn process_chat(deps: &ConsolidationDeps, chat_id: &str, today: &str) -> C
         .map(|g| g.role(Role::Decision).is_some())
         .unwrap_or(false);
     if !decision_ready {
-        warn!(chat_id, "Decision 角色未配置，本 chat 跳过 LLM 提炼（@统计已落库）");
+        warn!(
+            chat_id,
+            "Decision 角色未配置，本 chat 跳过 LLM 提炼（@统计已落库）"
+        );
         outcome.status = "llm_unavailable".into();
         return outcome;
     }
@@ -344,7 +350,14 @@ fn apply_mention_stats(
 }
 
 /// edges 增量累加，clamp(0..1)
-fn bump_edge(conn: &rusqlite::Connection, from: &str, to: &str, d_familiar: f64, d_trust: f64, now: i64) {
+fn bump_edge(
+    conn: &rusqlite::Connection,
+    from: &str,
+    to: &str,
+    d_familiar: f64,
+    d_trust: f64,
+    now: i64,
+) {
     let cur: Option<(f64, f64)> = conn
         .query_row(
             "SELECT trust, familiar FROM relationship_edges WHERE from_pid = ?1 AND to_pid = ?2",
@@ -373,6 +386,15 @@ struct DistillOut {
     group_facts: Vec<String>,
     #[serde(default)]
     rel_events: Vec<RelEvent>,
+    #[serde(default)]
+    profile_updates: Vec<PersonProfileUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonProfileUpdate {
+    person_id: String,
+    #[serde(flatten)]
+    update: crate::memory::ProfileUpdate,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,6 +420,7 @@ Schema：
   "chat_summary": "本日群摘要一段话（时间线索引用，100 字内）",
   "person_facts": [{"person_id": "p_xxx", "fact": "关于此人的一条提炼事实（陈述句）"}],
   "group_facts": ["关于本群长期值得记住的事实（陈述句；即群话题摘要）"],
+  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–80字"}],
   "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据"}]
 }
 
@@ -405,13 +428,17 @@ Schema：
 - 只提炼长期有意义的事实（偏好、关系、正在进行的事），日常寒暄不进 facts
 - rel_events 的 delta_trust 取值 -0.2 ~ 0.2；没有可信依据就留空数组
 - 严禁在输出中包含任何敏感信息（密码、密钥、证件号、手机号等）
+- profile_updates 只从对应人物本人的明确陈述中提取；不要把玩笑、临时计划、猜测、别人评价或云团旧回答写成人物简档。没依据就 []，不使用每日摘要续写简档
 "#;
 
 async fn distill(gw: &LlmGateway, chat_id: &str, rows: &[MsgRow]) -> Option<DistillOut> {
     let mut user = String::from("消息流水（最新 500 条窗口，按时间序）：\n");
     for r in rows {
         let text: String = r.text.chars().take(80).collect();
-        user.push_str(&format!("{}({}): {}\n", r.nickname, r.sender_pid, text));
+        user.push_str(&format!(
+            "msg_id={} {}({}): {}\n",
+            r.msg_id, r.nickname, r.sender_pid, text
+        ));
     }
     let first = gw
         .chat(Role::Decision, DISTILL_SYSTEM, &user, true)
@@ -422,7 +449,8 @@ async fn distill(gw: &LlmGateway, chat_id: &str, rows: &[MsgRow]) -> Option<Dist
         return first;
     }
     debug!(chat_id, "归纳提炼首轮校验失败，重试一次");
-    let retry = format!("{user}\n\n上一次输出未通过 Schema 校验，请严格按 Schema 重新输出，只输出 JSON。");
+    let retry =
+        format!("{user}\n\n上一次输出未通过 Schema 校验，请严格按 Schema 重新输出，只输出 JSON。");
     gw.chat(Role::Decision, DISTILL_SYSTEM, &retry, true)
         .await
         .ok()
@@ -490,7 +518,11 @@ fn write_distilled(
             let joined = facts.join("；");
             if is_sensitive(&joined) {
                 // 敏感拒收滤的是内容不是该人的当日索引——回退到计数保底
-                warn!(chat_id, person = pid, "person 聚合摘要命中敏感，回退发言计数");
+                warn!(
+                    chat_id,
+                    person = pid,
+                    "person 聚合摘要命中敏感，回退发言计数"
+                );
                 fallback
             } else {
                 joined
@@ -506,9 +538,12 @@ fn write_distilled(
     }
 
     // person_facts → long_memories(owner=person, source=consolidation)
-    for f in &d.person_facts {
+    for f in d.person_facts.iter().take(100) {
         let fact = f.fact.trim();
-        if fact.is_empty() {
+        if fact.is_empty()
+            || fact.chars().count() > 800
+            || !speakers.iter().any(|(pid, _, _)| pid == &f.person_id)
+        {
             continue;
         }
         if is_sensitive(fact) {
@@ -516,16 +551,16 @@ fn write_distilled(
             continue;
         }
         tx.execute(
-            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at)
-             VALUES ('person', ?1, ?2, 'consolidation', ?3, ?3)",
-            params![f.person_id, fact, now],
+            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
+             VALUES ('person', ?1, ?2, 'consolidation', ?3, ?3, ?4, ?5, ?6)",
+            params![f.person_id, fact, now, chat_id, outcome.msg_start, outcome.msg_end],
         )?;
         facts_written += 1;
     }
     // group_facts → long_memories(owner=chat)
-    for fact in &d.group_facts {
+    for fact in d.group_facts.iter().take(100) {
         let fact = fact.trim();
-        if fact.is_empty() {
+        if fact.is_empty() || fact.chars().count() > 800 {
             continue;
         }
         if is_sensitive(fact) {
@@ -533,11 +568,24 @@ fn write_distilled(
             continue;
         }
         tx.execute(
-            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at)
-             VALUES ('chat', ?1, ?2, 'consolidation', ?3, ?3)",
-            params![chat_id, fact, now],
+            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
+             VALUES ('chat', ?1, ?2, 'consolidation', ?3, ?3, ?1, ?4, ?5)",
+            params![chat_id, fact, now, outcome.msg_start, outcome.msg_end],
         )?;
         facts_written += 1;
+    }
+
+    for p in d.profile_updates.iter().take(100) {
+        if let Err(e) = crate::memory::update_profile(
+            &tx,
+            &p.person_id,
+            chat_id,
+            outcome.msg_start,
+            outcome.msg_end,
+            &p.update,
+        ) {
+            warn!(error=%e,"归纳人物简档未通过来源校验");
+        }
     }
 
     // rel_events → relationship_events + edges(trust)
@@ -588,8 +636,10 @@ fn today_str(db_path: &Path) -> String {
     crate::db::connect(db_path)
         .ok()
         .and_then(|c| {
-            c.query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| r.get::<_, String>(0))
-                .ok()
+            c.query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
         })
         .unwrap_or_else(|| "1970-01-01".into())
 }
@@ -606,8 +656,18 @@ fn now_secs() -> i64 {
 /// + 11 位 1 开头连续数字（手机号）+ 18 位连续数字 或 17 位数字+X（身份证）
 pub fn is_sensitive(s: &str) -> bool {
     const KEYWORDS: [&str; 12] = [
-        "密码", "口令", "密钥", "api_key", "api-key", "apikey", "token", "身份证", "手机号", "验证码",
-        "私钥", "secret",
+        "密码",
+        "口令",
+        "密钥",
+        "api_key",
+        "api-key",
+        "apikey",
+        "token",
+        "身份证",
+        "手机号",
+        "验证码",
+        "私钥",
+        "secret",
     ];
     let lower = s.to_lowercase();
     if KEYWORDS.iter().any(|k| lower.contains(k)) {

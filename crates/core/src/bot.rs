@@ -77,7 +77,11 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
         params![now, cutoff],
     )?;
     if abandoned > 0 {
-        info!(count = abandoned, cutoff_secs = REPLAY_WINDOW_SECS, "Q55 放弃窗口外未处理消息");
+        info!(
+            count = abandoned,
+            cutoff_secs = REPLAY_WINDOW_SECS,
+            "Q55 放弃窗口外未处理消息"
+        );
     }
     let mut stmt = conn.prepare(
         "SELECT msg_id, chat_id, chat_type, sender_pid, text, at_me, has_image, reply_to, ts
@@ -138,6 +142,8 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
 }
 
 pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
+    type ChatLanes =
+        std::collections::HashMap<String, tokio::sync::mpsc::Sender<(MessageReceivedPayload, i64)>>;
     tokio::spawn(async move {
         let mut rx = deps.bus.subscribe();
         if !decision_ready(&deps.llm) {
@@ -145,24 +151,26 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         }
         info!("Decision 管线已启动（Q52 per-chat 并发 + Q54 10s 窗口聚合）");
         let deps = Arc::new(deps);
-        let mut lanes: std::collections::HashMap<String, tokio::sync::mpsc::Sender<MessageReceivedPayload>> =
-            std::collections::HashMap::new();
+        let mut lanes = ChatLanes::new();
 
         // Q54 窗口聚合器:
         //   固定 10s 窗口,同 chat 普通消息追加,不重复开窗;anchor 固定为第一条;
         //   窗口到期 fire → anchor 进 per-chat worker 触发一次 decide;
-        //   others(Q54 窗口内累积的 N 条)在 decide 中通过 build_context 的最近消息
-        //   SQL 拉取自然进入上下文(消息早被 ingest 落库在本进程,时机窗口内已写入);
+        //   以 batch 最后一个消息 ID 固定本轮上界；worker 开始处理时读取一次快照，
+        //   Decision 与 bot_chat 共享，排队或模型等待期间的新消息不混入本轮。
         //   others 需立刻 mark_processed,Q55 重启不再回放(窗口 fire 后 anchor 替身已代表整个 batch)。
         let deps_for_fire = Arc::clone(&deps);
-        let lanes_for_fire: Arc<
-            RwLock<std::collections::HashMap<String, tokio::sync::mpsc::Sender<MessageReceivedPayload>>>,
-        > = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let lanes_for_fire: Arc<RwLock<ChatLanes>> = Arc::new(RwLock::new(ChatLanes::new()));
         let lanes_for_fire_clone = Arc::clone(&lanes_for_fire);
         let on_fire: crate::window::OnFire = Arc::new(move |batch: crate::window::WindowBatch| {
             let deps = Arc::clone(&deps_for_fire);
             let lanes_clone = Arc::clone(&lanes_for_fire_clone);
             Box::pin(async move {
+                let cutoff = batch
+                    .others
+                    .iter()
+                    .map(|m| m.msg_id)
+                    .fold(batch.anchor.msg_id, i64::max);
                 // others 立刻回写 processed_at(否则 Q55 重启会把它们当未处理回放,雪崩)
                 for om in &batch.others {
                     mark_processed(&deps.db_path, om.msg_id);
@@ -173,19 +181,20 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                 let tx_opt = lanes_clone.read().unwrap().get(&chat_id).cloned();
                 match tx_opt {
                     Some(tx) => {
-                        if let Err(e) = tx.try_send(batch.anchor.clone()) {
+                        if let Err(e) = tx.try_send((batch.anchor.clone(), cutoff)) {
                             debug!(chat_id = %chat_id, error = %e, "Q54 anchor 入队失败,同步保底");
-                            handle(&deps, &batch.anchor).await;
+                            handle_at(&deps, &batch.anchor, cutoff).await;
                         }
                     }
                     None => {
                         debug!(chat_id = %chat_id, "Q54 anchor 找不到 lane(不该发生),同步保底");
-                        handle(&deps, &batch.anchor).await;
+                        handle_at(&deps, &batch.anchor, cutoff).await;
                     }
                 }
             })
         });
-        let mut aggregator = crate::window::WindowAggregator::new(crate::window::DEFAULT_WINDOW_SECS);
+        let mut aggregator =
+            crate::window::WindowAggregator::new(crate::window::DEFAULT_WINDOW_SECS);
 
         loop {
             match rx.recv().await {
@@ -197,20 +206,25 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                     if is_media_cmd {
                         let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
                             let cap = *deps.per_chat_cap.read().unwrap();
-                            let (tx, mut lane_rx) =
-                                tokio::sync::mpsc::channel::<MessageReceivedPayload>(cap.max(1));
+                            let (tx, mut lane_rx) = tokio::sync::mpsc::channel::<(
+                                MessageReceivedPayload,
+                                i64,
+                            )>(cap.max(1));
                             let deps2 = Arc::clone(&deps);
                             let chat = m.chat_id.clone();
                             tokio::spawn(async move {
-                                while let Some(mm) = lane_rx.recv().await {
-                                    handle(&deps2, &mm).await;
+                                while let Some((mm, cutoff)) = lane_rx.recv().await {
+                                    handle_at(&deps2, &mm, cutoff).await;
                                 }
                                 debug!(chat_id = %chat, "chat worker 退出(dispatcher 关闭)");
                             });
                             tx
                         });
-                        lanes_for_fire.write().unwrap().insert(m.chat_id.clone(), lane.clone());
-                        if let Err(e) = lane.try_send(m.clone()) {
+                        lanes_for_fire
+                            .write()
+                            .unwrap()
+                            .insert(m.chat_id.clone(), lane.clone());
+                        if let Err(e) = lane.try_send((m.clone(), m.msg_id)) {
                             debug!(chat_id = %m.chat_id, error = %e, "per-chat 队列满,同步处理保底");
                             handle(&deps, &m).await;
                         }
@@ -221,18 +235,21 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
                     let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
                         let cap = *deps.per_chat_cap.read().unwrap();
                         let (tx, mut lane_rx) =
-                            tokio::sync::mpsc::channel::<MessageReceivedPayload>(cap.max(1));
+                            tokio::sync::mpsc::channel::<(MessageReceivedPayload, i64)>(cap.max(1));
                         let deps2 = Arc::clone(&deps);
                         let chat = m.chat_id.clone();
                         tokio::spawn(async move {
-                            while let Some(mm) = lane_rx.recv().await {
-                                handle(&deps2, &mm).await;
+                            while let Some((mm, cutoff)) = lane_rx.recv().await {
+                                handle_at(&deps2, &mm, cutoff).await;
                             }
                             debug!(chat_id = %chat, "chat worker 退出(dispatcher 关闭)");
                         });
                         tx
                     });
-                    lanes_for_fire.write().unwrap().insert(m.chat_id.clone(), lane.clone());
+                    lanes_for_fire
+                        .write()
+                        .unwrap()
+                        .insert(m.chat_id.clone(), lane.clone());
 
                     // 进 Q54 聚合器,窗口到期由 on_fire 把 anchor 推给 worker(见上)
                     aggregator.feed(m, on_fire.clone());
@@ -266,7 +283,11 @@ fn reply_engine_route(m: &MessageReceivedPayload) -> anyhow::Result<(reply_engin
 /// Q55 包装层：处理完毕无条件回写 messages.processed_at（含 Prefilter Drop 分支——
 /// 「处理过」不等于「回复过」；重启回放只扫进程崩溃前来不及进 handle 的消息）。
 async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
-    handle_inner(deps, m).await;
+    handle_at(deps, m, m.msg_id).await;
+}
+
+async fn handle_at(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) {
+    handle_inner(deps, m, cutoff).await;
     mark_processed(&deps.db_path, m.msg_id);
 }
 
@@ -290,7 +311,7 @@ fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
     }
 }
 
-async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
+async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) {
     // Q008=C：/image /画 显式命令直派，先于 Prefilter 与 Decision（Command deterministic path）。
     // 显式命令不参与节流与成本闸，且独立于 LLM 角色可用性——用户在配 LLM 之前也能用 media。
     if let (Some(media_ctx), Some(body)) = (
@@ -316,6 +337,20 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
             };
             // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
             gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
+            let ctx_cfg = *deps.ctx_cfg.read().unwrap();
+            let db = deps.db_path.clone();
+            let anchor = m.clone();
+            let snapshot = match tokio::task::spawn_blocking(move || {
+                crate::context_builder::capture_reply_snapshot(&db, &anchor, cutoff, &ctx_cfg)
+            })
+            .await
+            {
+                Ok(Ok(snapshot)) => snapshot,
+                result => {
+                    warn!(error=?result,"无法读取回复上下文，跳过本轮");
+                    return;
+                }
+            };
             let outcome = decision::decide(
                 &deps.db_path,
                 &gw,
@@ -323,17 +358,14 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                 &deps.mood,
                 m,
                 deps.skill_registry.as_ref(),
+                &snapshot,
             )
             .await;
 
             // action=invoke_skill：Skill 执行（Q-S02）。Skill 内部默认渲染模板；
             // 插件可以 override invoke 自己调 chat LLM。Skill 输出经 bot_chat Bubbleizer 发送。
             if outcome.output.action == DecisionAction::InvokeSkill {
-                let skill_name = outcome
-                    .output
-                    .skill_name
-                    .clone()
-                    .unwrap_or_default();
+                let skill_name = outcome.output.skill_name.clone().unwrap_or_default();
                 let reg = match deps.skill_registry.as_ref() {
                     Some(r) => r,
                     None => {
@@ -452,7 +484,12 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
                             match picked {
                                 Some(path) => {
                                     info!(chat_id = %m.chat_id, category = %cat, "send_meme 抽图入队");
-                                    engine.enqueue_image(m.chat_id.clone(), chat_type, target, path);
+                                    engine.enqueue_image(
+                                        m.chat_id.clone(),
+                                        chat_type,
+                                        target,
+                                        path,
+                                    );
                                 }
                                 None => {
                                     debug!(chat_id = %m.chat_id, category = %cat, "meme 库空，跳过发图");
@@ -500,10 +537,16 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload) {
             let bot_chat_ready = gw.role(Role::BotChat).is_some();
             match (&deps.reply, bot_chat_ready) {
                 (Some(engine), true) => {
-                    let ctx_cfg = *deps.ctx_cfg.read().unwrap();
                     let reply_cfg = *deps.reply_cfg.read().unwrap();
                     if let Err(e) = reply_engine::prepare_and_enqueue(
-                        engine, &deps.db_path, &gw, &deps.mood, m, &outcome.output, &ctx_cfg, &reply_cfg,
+                        engine,
+                        &snapshot,
+                        &gw,
+                        &deps.mood,
+                        m,
+                        &outcome.output,
+                        &ctx_cfg,
+                        &reply_cfg,
                     )
                     .await
                     {
@@ -540,7 +583,8 @@ mod tests {
     fn temp_db() -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-            + (std::process::id() as u128) << 16;
+            + (std::process::id() as u128)
+            << 16;
         let dir = std::env::temp_dir().join(format!("yt-bot-test-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("yuantuan.db");
@@ -570,7 +614,11 @@ mod tests {
 
         let conn = crate::db::connect(&db).unwrap();
         let processed: Option<i64> = conn
-            .query_row("SELECT processed_at FROM messages WHERE msg_id = ?1", params![msg_id], |r| r.get(0))
+            .query_row(
+                "SELECT processed_at FROM messages WHERE msg_id = ?1",
+                params![msg_id],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(processed.is_some(), "processed_at 应被回写");
     }
@@ -606,9 +654,8 @@ mod tests {
         // 构造最简 PipelineDeps：无 LLM、无 reply、无 media_ctx、无 skills
         let bus = crate::event::EventBus::default();
         let llm_slot: SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let prefilter_slot: SharedPrefilter = std::sync::Arc::new(std::sync::RwLock::new(
-            crate::prefilter::Config::default(),
-        ));
+        let prefilter_slot: SharedPrefilter =
+            std::sync::Arc::new(std::sync::RwLock::new(crate::prefilter::Config::default()));
         let reply_slot: crate::reply_engine::SharedReplyCfg = std::sync::Arc::new(
             std::sync::RwLock::new(crate::reply_engine::ReplyCfg::default()),
         );
@@ -681,10 +728,16 @@ mod tests {
             self_qq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             self_ids: crate::prefilter::SelfMsgIds::default(),
             mood: crate::state::MoodState::default(),
-            prefilter: std::sync::Arc::new(std::sync::RwLock::new(crate::prefilter::Config::default())),
+            prefilter: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::prefilter::Config::default(),
+            )),
             reply: None,
-            reply_cfg: std::sync::Arc::new(std::sync::RwLock::new(crate::reply_engine::ReplyCfg::default())),
-            ctx_cfg: std::sync::Arc::new(std::sync::RwLock::new(crate::context_builder::ContextCfg::default())),
+            reply_cfg: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::reply_engine::ReplyCfg::default(),
+            )),
+            ctx_cfg: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::context_builder::ContextCfg::default(),
+            )),
             memes_dir: std::path::PathBuf::from("data/memes"),
             media_ctx: None,
             skill_registry: None,

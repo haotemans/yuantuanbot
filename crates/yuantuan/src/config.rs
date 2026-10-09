@@ -156,7 +156,7 @@ pub struct ContextSection {
     pub budget_chars: usize,
     /// 会话窗口 K（条）
     pub k: usize,
-    /// 名册每人携带记忆条数
+    /// 兼容旧字段名：当前对象/会话的话题相关记忆总条数（0–10）
     pub roster_mem_per: usize,
 }
 

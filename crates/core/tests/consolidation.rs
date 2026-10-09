@@ -25,7 +25,8 @@ fn now_secs() -> i64 {
 fn temp_dir(prefix: &str) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128
-        + (std::process::id() as u128) << 16;
+        + (std::process::id() as u128)
+        << 16;
     let dir = std::env::temp_dir().join(format!("yt-{prefix}-{nanos}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -67,7 +68,14 @@ fn seed_fixture(db_path: &PathBuf) {
         .unwrap();
     }
     let t = now - 600;
-    let mundane = ["早啊", "吃了没", "今天聊 Rust 吧", "借我看看那个文档", "晚上打球去", "哈哈哈"];
+    let mundane = [
+        "早啊",
+        "吃了没",
+        "今天聊 Rust 吧",
+        "借我看看那个文档",
+        "晚上打球去",
+        "哈哈哈",
+    ];
     for i in 0..30i64 {
         // 带 mention 的三条必须由小明（p_2001）发出，否则统计不到 A@B
         let (pid, nick) = match i {
@@ -79,10 +87,10 @@ fn seed_fixture(db_path: &PathBuf) {
             },
         };
         let (text, mentions) = match i {
-            1 => ("@阿强 文档发你", "[\"p_2002\"]"),          // A@B 第 1 次
-            4 => ("@阿强 记得看", "[\"p_2002\"]"),            // A@B 第 2 次
-            7 => ("@云团 在吗", "[\"p_10001\"]"),             // A@bot 1 次
-            20 => ("我的密码是123456，别告诉别人", "[]"),     // 敏感消息（只进流水，不进提炼）
+            1 => ("@阿强 文档发你", "[\"p_2002\"]"),      // A@B 第 1 次
+            4 => ("@阿强 记得看", "[\"p_2002\"]"),        // A@B 第 2 次
+            7 => ("@云团 在吗", "[\"p_10001\"]"),         // A@bot 1 次
+            20 => ("我的密码是123456，别告诉别人", "[]"), // 敏感消息（只进流水，不进提炼）
             _ => (mundane[(i as usize) % mundane.len()], "[]"),
         };
         conn.execute(
@@ -113,6 +121,10 @@ async fn consolidation_end_to_end() {
             {"person_id": "p_2003", "fact": "阿芳的开箱密码是1234"}
         ],
         "group_facts": ["本群近期在玩 Rust"],
+        "profile_updates": [
+            {"person_id":"p_2001","field":"ongoing_projects","value":"正在分享文档","evidence_msg_id":2,"evidence_quote":"文档发你"},
+            {"person_id":"p_2002","field":"technical_preferences","value":"错误归属","evidence_msg_id":2,"evidence_quote":"文档发你"}
+        ],
         "rel_events": [
             {"from": "p_2001", "to": "p_2002", "kind": "help", "delta_trust": 0.05, "evidence": "小明发文档给阿强"}
         ]
@@ -143,8 +155,20 @@ async fn consolidation_end_to_end() {
     tokio::time::sleep(Duration::from_millis(100)).await; // tracer 落库
 
     let conn = db::connect(&db_path).unwrap();
+    let profiles: Vec<(String, String)> = conn
+        .prepare("SELECT person_id,content FROM person_profile_facts")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(profiles, vec![("p_2001".into(), "正在分享文档".into())]);
+    let provenance:(String,i64,i64)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(provenance, ("555666".into(), 1, 30));
     let today: String = conn
-        .query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| r.get(0))
+        .query_row("SELECT strftime('%Y-%m-%d','now','localtime')", [], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     // 1. summaries：chat 一条 + person 三条（speaker 均有）
@@ -178,7 +202,10 @@ async fn consolidation_end_to_end() {
             rusqlite::params![today], |r| r.get(0),
         )
         .unwrap();
-    assert!(!p2_sum.contains("手机") && !p2_sum.contains("13800001111"), "敏感内容泄露: {p2_sum}");
+    assert!(
+        !p2_sum.contains("手机") && !p2_sum.contains("13800001111"),
+        "敏感内容泄露: {p2_sum}"
+    );
     assert!(p2_sum.contains("今日发言"), "应回退计数保底: {p2_sum}");
 
     // 2. long_memories：正常 fact 落库；两个敏感陷阱被拒
@@ -233,14 +260,19 @@ async fn consolidation_end_to_end() {
     let fs: f64 = conn
         .query_row(
             "SELECT familiar FROM relationship_edges WHERE from_pid='self' AND to_pid='p_2001'",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )
         .unwrap();
     assert!((fs - 0.01).abs() < 1e-9);
 
     // 5. ConsolidationDone 事件落表（tracer）
     let done: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(done, 1);
 
@@ -268,7 +300,8 @@ async fn consolidation_end_to_end() {
     let f2: f64 = conn
         .query_row(
             "SELECT familiar FROM relationship_edges WHERE from_pid='p_2001' AND to_pid='p_2002'",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )
         .unwrap();
     assert!((f2 - 0.02).abs() < 1e-9, "重跑后 familiar 被重复累加: {f2}");

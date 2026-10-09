@@ -13,6 +13,7 @@ ADR 保存重要取舍与原因。`accepted` 表示接受该决定，不表示�
 | 0005（预留，未建文档） | 插件设计议题尚待独立裁决 | 见台账中的未编号裁决；不补造已接受决定 |
 | [0006](0006-message-and-trace-reliability.md) | 消息恢复与 trace 可靠性分开约束 | Q55，修订 Q37 |
 | [0007](0007-reply-anchor-and-interjections.md) | 固定回复锚点，普通插话不取消原回复 | Q54，修订 Q32；后续澄清见台账 Q56–Q64 |
+| [0008](0008-grounded-bot-context.md) | 人物简档、话题记忆与回复快照 | 修订 Q26/Q27，保留 ADR-0007 的归属约束 |
 
 编号保持稳定，修订和取代关系遵循[治理协议](../governance.md)。
 
