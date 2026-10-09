@@ -43,6 +43,10 @@ async fn main() -> Result<()> {
         ("云团，我不太懂 Rust 的所有权，你能解释一下吗", true, false),
         ("不用帮我执行，只是分享一下这个安装脚本。", true, false),
         ("你刚才已经替我跑过测试了吗", true, false),
+        ("哈哈", true, false),
+        ("谢谢！", true, false),
+        ("今天真热啊", false, false),
+        ("嗯？这个错误怎么处理", true, false),
     ];
     for (i, (text, at_me, task_allowed)) in cases.into_iter().enumerate() {
         // 每个样本独立会话，避免前一测试变成后一测试的证据。
@@ -77,6 +81,12 @@ async fn main() -> Result<()> {
                 ),
             "shared text started a task"
         );
+        if (8..=10).contains(&i) {
+            ensure!(
+                outcome.output.action == decision::DecisionAction::Ignore,
+                "too eager on closing chatter"
+            );
+        }
         if i == 2 || i == 7 {
             let ctx = context_builder::render_bot_context(&snapshot, mood.get(), &cfg)?;
             let response = gateway

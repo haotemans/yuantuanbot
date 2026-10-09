@@ -74,7 +74,7 @@
               <n-form-item label="泡数封顶">
                 <n-input-number v-model:value="f.reply.bubble_cap" :min="1" :max="5" style="width: 160px" />
               </n-form-item>
-              <n-form-item label="单泡字数上限">
+              <n-form-item label="拆句目标字数">
                 <n-input-number v-model:value="f.reply.bubble_char_cap" :min="20" :max="2000" :step="10" style="width: 160px" />
               </n-form-item>
               <n-form-item label="延时系数（ms/字）">

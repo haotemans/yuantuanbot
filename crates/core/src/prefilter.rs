@@ -132,7 +132,7 @@ pub fn check(
                 .ok()
             })
             .unwrap_or(0);
-        if self_count > cfg.self_msg_cap {
+        if self_count >= cfg.self_msg_cap {
             return Verdict::Drop("R6:发言节流");
         }
     }
@@ -240,12 +240,12 @@ mod tests {
     }
 
     #[test]
-    fn r6_throttle_drops_when_over_cap() {
+    fn r6_throttle_drops_at_cap() {
         let db = temp_db();
         let conn = crate::db::connect(&db).unwrap();
         let now = now_secs();
-        // 先建 self 档案再插 13 条 self 消息（超 12 顶）→ Drop
-        for _ in 0..13 {
+        // 先建 self 档案再插 12 条 self 消息（达到 12 顶）→ Drop
+        for _ in 0..12 {
             conn.execute(
                 "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1)
                  ON CONFLICT(person_id) DO NOTHING",

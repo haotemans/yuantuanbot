@@ -84,7 +84,7 @@ bot_chat LLM 输出 → reply_engine::prepare_and_enqueue → Bubbleizer 分泡 
 
 15. **per-chat 串行保序**：同一 chat 的消息按发送队列入队顺序发送，不同 chat 之间并发。这不等于 Q59 对独立窗口创建顺序的完整约束，也不代表 Q63 的高优先级调度已实现。
 
-16. **泡内 @ 解析**：bot_chat 输出中 `::at` 指令由 Bubbleizer 解析为 mention 段。群聊实际发出 `at` 段时，若后续正文开头没有空白，发送端补一个空格，避免 QQ 把昵称和正文粘在一起；自动 mention 与 `::at` 共用此规则。这个显示间隔不改写存储的正文。
+16. **切句与 @ 解析**：bot_chat 输出中 `::at` 指令转为 mention 段，实际 @ 后补显示间隔。`‖` 只作为候选句末边界，半句接回、纯控制符不发送、代码中的标记保留；short 最多一泡、medium 最多两泡，拆句字数目标不强拆单句。完整规则见[可靠性参考](decision-reliability.md)。
 
 17. **单泡失败不阻断**：一个泡发送失败记 BubbleSent(ok=false) 事件，继续发下一泡。✅ 已实现。
 

@@ -144,7 +144,7 @@ pub struct ReplySection {
     pub total_budget_ms: u64,
     /// 泡数封顶（超出并入最后一泡）
     pub bubble_cap: usize,
-    /// 单泡字数上限（超出按标点机械切）
+    /// 拆句目标字数；完整单句、代码与引用可能超过目标，不强行截断
     pub bubble_char_cap: usize,
 }
 

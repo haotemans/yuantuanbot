@@ -93,6 +93,8 @@ const SYSTEM_PROMPT_BASE: &str = r#"你是云团的 Decision 小脑：一个分�
 
 规则：
 - 拿不准就 ignore；主动插话与被动回复由你同一裁决
+- 群聊采用低打扰策略：没有直接叫你/回复你时默认 ignore，不对他人之间的对话、感叹、玩梗、公告自动接话；只有明确的开放问题且确有帮助时才偶尔回答，距最近发言不足120秒不主动插话
+- “嗯、好的、哈哈、谢谢、收到”等收尾/附和通常 ignore；即使有@/引用，也不必礼貌性再回一轮。仅在对方回答了你尚未解决的具体问题时继续处理。普通回答默认 short、mention=false，不追问无关问题来延长聊天
 - 对方直接提出正常问题时优先 reply；familiar=0 仅表示尚不熟悉，不等于反感、低好感或拒绝互动。短附和、辱骂、刷屏可 ignore，不能凭关系分编造对方态度
 - 没有过去的执行/跨群记录表示未知，不能推断“已经做过”或“以前从没做过”；reason 也不得编造这类事实
 - 只有 anchor 本人明确请你执行任务，才可 start_task/invoke_skill；单纯粘贴公告、分享长文、讨论计划不等于请你执行。能用现有资料直接解释/总结的优先 reply，需要实际工具操作或多步执行才 start_task。禁止主动替群友接单
@@ -239,6 +241,14 @@ pub async fn decide(
         }
     }
 
+    if let Some(o) = parsed.as_mut() {
+        if msg.chat_type == "group"
+            && matches!(o.action, DecisionAction::Reply | DecisionAction::SendMeme)
+        {
+            enforce_quiet_group_policy(o, msg, snapshot, seconds_since_last_reply(db_path, msg));
+        }
+    }
+
     let (output, fallback) = match parsed {
         Some(o) => (o, false),
         None => (fallback_output(), true),
@@ -381,6 +391,115 @@ fn enforce_action_contract(
     }
 }
 
+pub(crate) fn is_directed(
+    msg: &MessageReceivedPayload,
+    snapshot: &crate::context_builder::ReplySnapshot,
+) -> bool {
+    msg.at_me
+        || msg.chat_type == "private"
+        || snapshot
+            .quoted_messages
+            .first()
+            .is_some_and(|m| m.person_id == "self")
+        || msg.text.trim_start().starts_with("云团")
+}
+
+fn is_question(text: &str) -> bool {
+    text.contains(['?', '？'])
+        || ["怎么", "如何", "有没有", "为什么", "谁知道", "求助"]
+            .iter()
+            .any(|word| text.contains(word))
+        || text
+            .trim_end_matches(['。', '!', '！', ' '])
+            .ends_with(['吗', '么', '呢'])
+}
+
+fn enforce_quiet_group_policy(
+    out: &mut DecisionOutput,
+    msg: &MessageReceivedPayload,
+    snapshot: &crate::context_builder::ReplySnapshot,
+    reply_age: Option<i64>,
+) {
+    if msg.chat_type != "group"
+        || !matches!(out.action, DecisionAction::Reply | DecisionAction::SendMeme)
+    {
+        return;
+    }
+    let simple: String = msg
+        .text
+        .chars()
+        .filter(|c| {
+            !c.is_whitespace() && !matches!(c, '。' | '，' | ',' | '.' | '!' | '！' | '~' | '～')
+        })
+        .flat_map(char::to_lowercase)
+        .collect();
+    let acknowledgment = !msg.has_image
+        && matches!(
+            simple.as_str(),
+            "嗯" | "嗯嗯"
+                | "好"
+                | "好的"
+                | "好吧"
+                | "行"
+                | "哈哈"
+                | "哈哈哈"
+                | "谢谢"
+                | "谢谢你"
+                | "收到"
+                | "明白"
+                | "知道了"
+                | "确实"
+                | "ok"
+                | "笑死"
+        );
+    let answers_our_question = snapshot
+        .quoted_messages
+        .first()
+        .is_some_and(|m| m.person_id == "self" && is_question(&m.text));
+    let directed = is_directed(msg, snapshot);
+    let cooldown = reply_age.is_some_and(|s| s < 120);
+    let reason = if acknowledgment && !answers_our_question {
+        Some("群聊收尾/附和，无需再回一轮")
+    } else if !directed
+        && snapshot
+            .quoted_messages
+            .first()
+            .is_some_and(|m| m.person_id != "self")
+    {
+        Some("这是对其他成员的回复，不主动接话")
+    } else if !directed && cooldown {
+        Some("群聊主动回复冷却中（120秒），不插话")
+    } else if !directed && !is_question(&msg.text) {
+        Some("普通群聊没有面向 Bot 的请求或开放问题，保持安静")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        out.action = DecisionAction::Ignore;
+        out.mention = false;
+        out.reason = reason.into();
+    } else if !directed {
+        out.reply_len = ReplyLen::Short;
+        out.mention = false;
+    }
+}
+
+/// 实时限流状态不进入模型证据。旧窗口排队/回放时也考虑刚发出的回复。
+fn seconds_since_last_reply(db_path: &Path, msg: &MessageReceivedPayload) -> Option<i64> {
+    let latest = crate::db::connect(db_path).and_then(|conn| {
+        conn.query_row(
+            "SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self'",
+            params![msg.chat_id, msg.chat_type],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .map_err(Into::into)
+    });
+    // 无法核对时暂不主动插话；直接提问不受此冷却限制。
+    latest
+        .unwrap_or(Some(now_secs()))
+        .map(|ts| now_secs().saturating_sub(ts).max(0))
+}
+
 fn compact_message(message: &crate::context_builder::ContextMessage, limit: usize) -> Value {
     let mut value = json!(message);
     value["text"] = json!(truncate_chars(&message.text, limit));
@@ -499,6 +618,107 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_policy_rejects_acknowledgments_and_ambient_chatter() {
+        use crate::context_builder::{capture_reply_snapshot, ContextCfg};
+        let mut msg = MessageReceivedPayload {
+            msg_id: 1,
+            chat_id: "123".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_1".into(),
+            text: String::new(),
+            at_me: false,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1000,
+        };
+        let dir = std::env::temp_dir().join(format!("yt-quiet-{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let db = dir.join("test.db");
+        let mut conn = crate::db::connect(&db).unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_1','测试',1,1);
+            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','p_1','当前问题',1000);").unwrap();
+        let mut snapshot = capture_reply_snapshot(&db, &msg, 1, &ContextCfg::default()).unwrap();
+        assert!(snapshot.scene["seconds_since_my_reply"].is_null());
+        for (text, directed, seconds, expected) in [
+            ("哈哈", true, 200, DecisionAction::Ignore),
+            ("谢谢！", true, 200, DecisionAction::Ignore),
+            ("今天好热", false, 200, DecisionAction::Ignore),
+            (
+                "有没有人知道这个错误怎么解决？",
+                false,
+                119,
+                DecisionAction::Ignore,
+            ),
+            (
+                "有没有人知道这个错误怎么解决？",
+                false,
+                120,
+                DecisionAction::Reply,
+            ),
+            ("这个错误怎么解决？", true, 0, DecisionAction::Reply),
+            ("云团在吗", false, 0, DecisionAction::Reply),
+            ("嗯？", true, 0, DecisionAction::Reply),
+        ] {
+            msg.text = text.into();
+            msg.at_me = directed;
+            snapshot.scene = json!({"seconds_since_my_reply":seconds});
+            let mut out = parse_decision(valid_json()).unwrap();
+            out.reply_len = ReplyLen::Long;
+            enforce_quiet_group_policy(
+                &mut out,
+                &msg,
+                &snapshot,
+                snapshot.scene["seconds_since_my_reply"].as_i64(),
+            );
+            assert_eq!(out.action, expected, "{text}, {seconds}");
+            if !is_directed(&msg, &snapshot) && out.action == DecisionAction::Reply {
+                assert!(!out.mention);
+                assert_eq!(out.reply_len, ReplyLen::Short);
+            }
+        }
+        msg.text = "好".into();
+        msg.at_me = true;
+        let mut question = snapshot.anchor.clone();
+        question.person_id = "self".into();
+        question.text = "可以使用 Rust 吗？".into();
+        snapshot.quoted_messages.push(question);
+        let mut out = parse_decision(valid_json()).unwrap();
+        enforce_quiet_group_policy(
+            &mut out,
+            &msg,
+            &snapshot,
+            snapshot.scene["seconds_since_my_reply"].as_i64(),
+        );
+        assert_eq!(
+            out.action,
+            DecisionAction::Reply,
+            "保留对 Bot 具体问题的回答"
+        );
+        snapshot.quoted_messages.clear();
+        msg.chat_type = "private".into();
+        enforce_quiet_group_policy(
+            &mut out,
+            &msg,
+            &snapshot,
+            snapshot.scene["seconds_since_my_reply"].as_i64(),
+        );
+        assert_eq!(out.action, DecisionAction::Reply, "群聊规则不抑制私聊");
+        msg.chat_type = "group".into();
+        assert!(seconds_since_last_reply(&db, &msg).is_none());
+        conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('self','云团',1,1);
+            INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('123','group','self','新回复',unixepoch());").unwrap();
+        assert!(
+            seconds_since_last_reply(&db, &msg).unwrap() < 2,
+            "旧快照之后发送的消息也要计入冷却"
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn task_evidence_must_be_a_direct_request_at_the_start() {

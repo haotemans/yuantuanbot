@@ -327,7 +327,7 @@ async fn build_rig(
 
 fn decision_json(mention: bool) -> String {
     json!({
-        "action": "reply", "mood": "calm", "mention": mention, "reply_len": "short",
+        "action": "reply", "mood": "calm", "mention": mention, "reply_len": "long",
         "meme_type": null, "task_goal": null, "memory_write": null, "reason": "测试"
     })
     .to_string()
@@ -343,7 +343,7 @@ async fn reply_loop_sends_three_bubbles() {
     decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision.to_string()])),
-        chat: Mutex::new(VecDeque::from(vec!["".into(), "哈‖确实不错‖::at\n我去试试".into()])),
+        chat: Mutex::new(VecDeque::from(vec!["".into(), "哈。‖确实不错。‖::at\n我去试试。".into()])),
         inject_db: Mutex::new(Some(db_path.clone())),
         ..Default::default()
     });
@@ -388,17 +388,17 @@ async fn reply_loop_sends_three_bubbles() {
                 .join("")
         })
         .collect();
-    assert_eq!(texts, vec![" 哈", "确实不错", " 我去试试"]);
+    assert_eq!(texts, vec![" 哈。", "确实不错。", " 我去试试。"]);
 
     // 首泡带 at 段（decision mention=true）
     let first = caps[0].1.as_array().unwrap();
     assert_eq!(first[0]["type"], "at");
     assert_eq!(first[0]["data"]["qq"], "2001");
-    assert_eq!(first[1]["data"]["text"], " 哈", "自动 @ 后必须有间隔");
+    assert_eq!(first[1]["data"]["text"], " 哈。", "自动 @ 后必须有间隔");
     let third = caps[2].1.as_array().unwrap();
     assert_eq!(third[0]["type"], "at");
     assert_eq!(third[0]["data"]["qq"], "2001");
-    assert_eq!(third[1]["data"]["text"], " 我去试试", "::at 后也必须有间隔");
+    assert_eq!(third[1]["data"]["text"], " 我去试试。", "::at 后也必须有间隔");
     assert!(caps[1]
         .1
         .as_array()
@@ -424,7 +424,7 @@ async fn reply_loop_sends_three_bubbles() {
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    assert_eq!(self_texts, vec!["哈", "确实不错", "我去试试"]);
+    assert_eq!(self_texts, vec!["哈。", "确实不错。", "我去试试。"]);
     let external_ids: Vec<i64> = conn
         .prepare("SELECT external_msg_id FROM messages WHERE sender_pid='self' ORDER BY msg_id")
         .unwrap()
@@ -458,11 +458,38 @@ async fn reply_loop_sends_three_bubbles() {
     assert!(!content.contains("等待期间出现的新话题"));
     assert_eq!(context["capabilities"]["tools_available"], false);
     assert_eq!(context["capabilities"]["cross_chat_history_available"], false);
-    assert!(chat["messages"][0]["content"].as_str().unwrap().contains("本次回复长度：short"));
+    assert!(chat["messages"][0]["content"].as_str().unwrap().contains("本次回复长度：long"));
     let chats: Vec<_> = requests.iter().filter(|r| r["model"] == "m-chat").collect();
     assert_eq!(chats.len(), 2, "空正文只重试一次");
     assert_eq!(chats[0]["messages"], chats[1]["messages"], "重试保持同一上下文");
     assert!(requests.iter().all(|r| r["tool_choice"] == "none"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
+    let path=temp_db();
+    let mut decision:Value=serde_json::from_str(&decision_json(true)).unwrap();
+    decision["reply_len"]=json!("short");
+    let queues=Arc::new(LlmQueues {
+        decision:Mutex::new(VecDeque::from([decision.to_string()])),
+        chat:Mutex::new(VecDeque::from(["::at这个库的‖性能不错。‖可以试试。‖::at".into()])),
+        ..Default::default()
+    });
+    let captures:Captures=Arc::new(Mutex::new(Vec::new()));
+    let _rig=build_rig(path.clone(),queues,vec![at_message(601,2001,"云团，这个库怎么样")],captures.clone(),Arc::new(Notify::new()),None,ReplyCfg::default()).await;
+    let deadline=Instant::now()+Duration::from_secs(30);
+    loop {
+        let conn=db::connect(&path).unwrap();
+        let count:i64=conn.query_row("SELECT COUNT(*) FROM messages WHERE sender_pid='self'",[],|r|r.get(0)).unwrap();
+        if count==1 { break; }
+        assert!(Instant::now()<deadline,"short 回复未发送");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let caps=captures.lock().unwrap();
+    assert_eq!(caps.len(),1);
+    assert_eq!(caps[0].1[0]["data"]["qq"],"2001");
+    assert_eq!(caps[0].1[1]["data"]["text"]," 这个库的性能不错。\n可以试试。");
 }
 
 // ---------- 用例 2：插话不打断 ----------
@@ -477,7 +504,7 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
     .to_string();
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision_json(false), ignore])),
-        chat: Mutex::new(VecDeque::from(vec!["第一‖第二‖第三".into()])),
+        chat: Mutex::new(VecDeque::from(vec!["第一。‖第二。‖第三。".into()])),
         ..Default::default()
     });
     let captures: Captures = Arc::new(Mutex::new(Vec::new()));
@@ -539,7 +566,7 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     let caps = captures.lock().unwrap().clone();
     let texts: Vec<_> = caps.iter().map(|(_,s)| s[0]["data"]["text"].as_str().unwrap().to_owned()).collect();
-    assert_eq!(texts, ["第一","第二","第三"]);
+    assert_eq!(texts, ["第一。","第二。","第三。"]);
     let conn = db::connect(&db_path).unwrap();
     let interrupted: i64 = conn
         .query_row(
