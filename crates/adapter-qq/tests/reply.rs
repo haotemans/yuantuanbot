@@ -343,7 +343,7 @@ async fn reply_loop_sends_three_bubbles() {
     decision["profile_updates"] = json!([{"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}]);
     let queues = Arc::new(LlmQueues {
         decision: Mutex::new(VecDeque::from(vec![decision.to_string()])),
-        chat: Mutex::new(VecDeque::from(vec!["哈‖确实不错‖我去试试".into()])),
+        chat: Mutex::new(VecDeque::from(vec!["哈‖确实不错‖::at\n我去试试".into()])),
         inject_db: Mutex::new(Some(db_path.clone())),
         ..Default::default()
     });
@@ -388,12 +388,17 @@ async fn reply_loop_sends_three_bubbles() {
                 .join("")
         })
         .collect();
-    assert_eq!(texts, vec!["哈", "确实不错", "我去试试"]);
+    assert_eq!(texts, vec![" 哈", "确实不错", " 我去试试"]);
 
     // 首泡带 at 段（decision mention=true）
     let first = caps[0].1.as_array().unwrap();
     assert_eq!(first[0]["type"], "at");
     assert_eq!(first[0]["data"]["qq"], "2001");
+    assert_eq!(first[1]["data"]["text"], " 哈", "自动 @ 后必须有间隔");
+    let third = caps[2].1.as_array().unwrap();
+    assert_eq!(third[0]["type"], "at");
+    assert_eq!(third[0]["data"]["qq"], "2001");
+    assert_eq!(third[1]["data"]["text"], " 我去试试", "::at 后也必须有间隔");
     assert!(caps[1]
         .1
         .as_array()

@@ -473,7 +473,13 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
             segs.push(json!({"type": "at", "data": {"qq": job.mention_qq.unwrap().to_string()}}));
         }
         if !b.text.is_empty() {
-            segs.push(json!({"type": "text", "data": {"text": b.text}}));
+            // QQ 不会自动在 at 段与正文之间插入间隔，发送端补空格。
+            let text = if want_at && !b.text.starts_with(char::is_whitespace) {
+                format!(" {}", b.text)
+            } else {
+                b.text.clone()
+            };
+            segs.push(json!({"type": "text", "data": {"text": text}}));
         }
         if segs.is_empty() {
             continue;
