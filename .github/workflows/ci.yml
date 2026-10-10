@@ -7,7 +7,7 @@ on:
   pull_request:
 
 jobs:
-  build:
+  build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,23 +46,66 @@ jobs:
           name: yuantuan-linux-x86_64
           path: target/x86_64-unknown-linux-musl/release/yuantuan
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webui-frontend/package-lock.json
+
+      - name: Rust toolchain (stable + MSVC target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 前端构建
+        working-directory: webui-frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 全量测试
+        run: cargo test --locked --workspace
+
+      - name: MSVC release 构建
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc -p yuantuan
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuantuan-windows-x86_64
+          path: target/x86_64-pc-windows-msvc/release/yuantuan.exe
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: 下载构建产物
+      - name: 下载 Linux 构建产物
         uses: actions/download-artifact@v4
         with:
           name: yuantuan-linux-x86_64
 
-      - name: 校验和
+      - name: 下载 Windows 构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: yuantuan-windows-x86_64
+
+      - name: 校验和与打包
         run: |
           mv yuantuan yuantuan-linux-x86_64
-          sha256sum yuantuan-linux-x86_64 > yuantuan-linux-x86_64.sha256
-          mkdir -p dist && mv yuantuan-linux-x86_64 yuantuan-linux-x86_64.sha256 dist/
+          mkdir -p dist
+          zip -j dist/yuantuan-windows-x86_64.zip yuantuan.exe
+          sha256sum yuantuan-linux-x86_64 > dist/yuantuan-linux-x86_64.sha256
+          mv yuantuan-linux-x86_64 dist/
 
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
