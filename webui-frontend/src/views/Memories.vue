@@ -1,7 +1,8 @@
 <template>
-  <div>
+  <div class="yt-page">
+    <div class="yt-page-head"><span class="yt-page-title">记忆浏览</span><span class="yt-page-sub">按人物或群聊查找长期记忆与每日摘要</span></div>
     <n-space style="margin-bottom: 8px">
-      <n-select v-model:value="ownerType" :options="typeOptions" clearable placeholder="owner_type" size="small" style="width: 140px" />
+      <n-select v-model:value="ownerType" :options="typeOptions" clearable placeholder="记忆归属类型" size="small" style="width: 140px" />
       <n-input v-model:value="ownerId" placeholder="owner_id（如 p_2001 / 555666）" size="small" style="width: 220px" @keyup.enter="load" />
       <n-button size="small" type="primary" secondary @click="load">查询记忆</n-button>
     </n-space>
@@ -33,14 +34,14 @@ const firstLoaded = ref(false)
 const typeOptions = ['person', 'chat', 'self'].map((s) => ({ label: s, value: s }))
 
 const memCols = [
-  { title: 'owner', key: 'owner', render: (r) => `${r.owner_type} / ${r.owner_id}` },
+  { title: '记忆归属', key: 'owner', render: (r) => `${r.owner_type} / ${r.owner_id}` },
   { title: '内容', key: 'content', ellipsis: { tooltip: true } },
   { title: '来源', key: 'source', width: 130 },
   { title: '更新于', key: 'updated_at', width: 170, render: (r) => fmt(r.updated_at) },
 ]
 const sumCols = [
-  { title: 'date', key: 'date', width: 110 },
-  { title: 'owner', key: 'owner', width: 220, render: (r) => `${r.owner_type} / ${r.owner_id}` },
+  { title: '日期', key: 'date', width: 110 },
+  { title: '记忆归属', key: 'owner', width: 220, render: (r) => `${r.owner_type} / ${r.owner_id}` },
   { title: '摘要', key: 'summary', ellipsis: { tooltip: true } },
   { title: '区间', key: 'range', width: 140, render: (r) => (r.msg_id_end ? `${r.msg_id_start}~${r.msg_id_end}` : '—') },
 ]

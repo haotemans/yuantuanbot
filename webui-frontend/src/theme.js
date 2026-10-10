@@ -1,81 +1,38 @@
-// Naive UI 全局设计令牌 v2：现代 SaaS 运维面板观感（青蓝→靛蓝渐变系，亮为主暗为辅）
-const MONO = "'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
-
+// 与 styles.css 共用同一组色阶；普通文字和数字统一中文优先字体。
+const FONT = "'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif"
+const CODE = "Consolas, 'SFMono-Regular', monospace"
 const base = {
   common: {
-    primaryColor: '#4f46e5',
-    primaryColorHover: '#6366f1',
-    primaryColorPressed: '#4338ca',
-    primaryColorSuppl: '#4f46e5',
-    infoColor: '#0891b2',
-    infoColorHover: '#06b6d4',
-    infoColorPressed: '#0e7490',
-    infoColorSuppl: '#0891b2',
-    successColor: '#16a34a',
-    successColorHover: '#22c55e',
-    successColorPressed: '#15803d',
-    successColorSuppl: '#16a34a',
-    warningColor: '#d97706',
-    warningColorHover: '#f59e0b',
-    warningColorPressed: '#b45309',
-    warningColorSuppl: '#d97706',
-    errorColor: '#dc2626',
-    errorColorHover: '#ef4444',
-    errorColorPressed: '#b91c1c',
-    errorColorSuppl: '#dc2626',
-    borderRadius: '10px',
-    borderRadiusSmall: '8px',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif",
-    fontFamilyMono: MONO,
-    fontSize: '14px',
+    fontFamily: FONT, fontFamilyMono: CODE, fontSize: '14px',
+    borderRadius: '8px', borderRadiusSmall: '6px',
   },
-  Card: {
-    borderRadius: '12px',
-    titleFontWeight: '600',
-  },
-  Menu: {
-    borderRadius: '10px',
-  },
-  Tag: {
-    borderRadius: '6px',
-  },
-  Button: {
-    borderRadiusMedium: '10px',
-    borderRadiusSmall: '8px',
-  },
+  Card: { borderRadius: '12px', titleFontSizeSmall: '15px', titleFontWeight: '600' },
+  Menu: { borderRadius: '8px' },
+  Tag: { borderRadius: '5px' },
+  Button: { borderRadiusMedium: '8px', borderRadiusSmall: '6px' },
 }
-
-export const lightOverrides = {
-  ...base,
-  Card: {
-    ...base.Card,
-    borderColor: '#e6e9f4',
-  },
-  DataTable: {
-    tdColorHover: 'rgba(79, 70, 229, 0.04)',
-    thColor: '#f7f8fc',
-  },
-  Menu: {
-    ...base.Menu,
-    itemColorActive: 'rgba(79, 70, 229, 0.1)',
-    itemColorActiveHover: 'rgba(79, 70, 229, 0.14)',
-  },
+function palette(dark) {
+  const primary = dark ? '#8bb5ff' : '#285ec8'
+  const text = dark ? '#e6edf7' : '#202d43'
+  const muted = dark ? '#a4b2c8' : '#5e6d83'
+  const surface = dark ? '#202b3e' : '#ffffff'
+  const border = dark ? '#3c4b63' : '#dce3ed'
+  const soft = dark ? '#263348' : '#f4f7fb'
+  const active = dark ? '#304667' : '#eaf1ff'
+  const colors = { primary, info: primary, success: dark ? '#68c5a3' : '#237a5a', warning: dark ? '#edbb68' : '#946216', error: dark ? '#f4999f' : '#bb3c49' }
+  const common = { ...base.common, bodyColor: dark ? '#182233' : '#f1f4f9', cardColor: surface, modalColor: surface, popoverColor: surface, tableColor: surface, inputColor: surface, textColorBase: text, textColor1: text, textColor2: muted, textColor3: muted, borderColor: border, dividerColor: border }
+  for (const [name, color] of Object.entries(colors)) {
+    common[`${name}Color`] = color
+    common[`${name}ColorHover`] = color
+    common[`${name}ColorPressed`] = color
+    common[`${name}ColorSuppl`] = color
+  }
+  return { ...base, common,
+    Layout: { color: common.bodyColor, headerColor: surface, siderColor: surface },
+    Card: { ...base.Card, borderColor: border, textColor: text, titleTextColor: text },
+    DataTable: { tdColorHover: soft, thColor: soft },
+    Menu: { ...base.Menu, itemColorActive: active, itemColorActiveHover: active, itemTextColorActive: primary, itemIconColorActive: primary },
+  }
 }
-
-export const darkOverrides = {
-  ...base,
-  Card: {
-    ...base.Card,
-    borderColor: 'rgba(255, 255, 255, 0.09)',
-  },
-  DataTable: {
-    tdColorHover: 'rgba(129, 140, 248, 0.1)',
-    thColor: 'rgba(255, 255, 255, 0.04)',
-  },
-  Menu: {
-    ...base.Menu,
-    itemColorActive: 'rgba(129, 140, 248, 0.16)',
-    itemColorActiveHover: 'rgba(129, 140, 248, 0.2)',
-  },
-}
+export const lightOverrides = palette(false)
+export const darkOverrides = palette(true)

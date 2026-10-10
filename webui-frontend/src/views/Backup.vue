@@ -12,7 +12,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" :style="{ background: cfg.enabled && cfg.repo_url ? '#16a34a' : '#d97706' }" />
+            <span class="stat-chip" :style="{ background: cfg.enabled && cfg.repo_url ? 'var(--yt-ok)' : 'var(--yt-warning)' }" />
             状态
           </div>
           <div class="stat-foot">
@@ -24,7 +24,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #06b6d4" />
+            <span class="stat-chip" style="background: var(--yt-primary)" />
             本地备份点
           </div>
           <div class="stat-foot">
@@ -36,7 +36,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #4f46e5" />
+            <span class="stat-chip" style="background: var(--yt-primary)" />
             总大小
           </div>
           <div class="stat-foot">
@@ -48,7 +48,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #d97706" />
+            <span class="stat-chip" style="background: var(--yt-warning)" />
             最近备份
           </div>
           <div class="stat-foot">
@@ -93,7 +93,7 @@
       </n-form>
       <n-space>
         <n-button type="primary" secondary :loading="saving" @click="save">保存配置（热应用）</n-button>
-        <span v-if="saveMsg" :style="{ color: saveOk ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ saveMsg }}</span>
+        <span v-if="saveMsg" :style="{ color: saveOk ? 'var(--yt-ok)' : 'var(--yt-danger)', fontSize: '12px' }">{{ saveMsg }}</span>
       </n-space>
     </n-card>
 
@@ -297,8 +297,8 @@ onMounted(reload)
   gap: 12px;
 }
 .run-msg { font-size: 12.5px; }
-.run-msg.ok { color: #16a34a; }
-.run-msg.fail { color: #dc2626; }
+.run-msg.ok { color: var(--yt-ok); }
+.run-msg.fail { color: var(--yt-danger); }
 
 .form-hint {
   margin-left: 10px;

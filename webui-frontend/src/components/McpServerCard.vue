@@ -48,5 +48,5 @@ defineEmits(['toggle', 'open'])
 
 <style scoped>
 .ok { color: var(--yt-ok); font-weight: 600; }
-.warn { color: #d97706; font-weight: 600; }
+.warn { color: var(--yt-warning); font-weight: 600; }
 </style>

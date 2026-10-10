@@ -19,11 +19,11 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" :style="{ background: d.adapter_connected ? '#16a34a' : '#dc2626' }" />
+            <span class="stat-chip" :style="{ background: d.adapter_connected ? 'var(--yt-ok)' : 'var(--yt-danger)' }" />
             连接状态
           </div>
           <div class="stat-foot">
-            <span class="stat-num" :style="{ color: d.adapter_connected ? '#16a34a' : '#dc2626' }">
+            <span class="stat-num" :style="{ color: d.adapter_connected ? 'var(--yt-ok)' : 'var(--yt-danger)' }">
               {{ d.adapter_connected ? '已连接' : '未拨入' }}
             </span>
           </div>
@@ -33,7 +33,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #06b6d4" />
+            <span class="stat-chip" style="background: var(--yt-primary)" />
             登录身份
           </div>
           <div class="stat-foot">
@@ -45,7 +45,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #4f46e5" />
+            <span class="stat-chip" style="background: var(--yt-primary)" />
             监听地址
           </div>
           <div class="stat-foot">
@@ -57,7 +57,7 @@
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: #d97706" />
+            <span class="stat-chip" style="background: var(--yt-warning)" />
             Token
           </div>
           <div class="stat-foot">
@@ -86,7 +86,7 @@
       <n-space>
         <n-button type="primary" :loading="saving" @click="save(false)">保存连接配置</n-button>
         <n-button type="warning" :loading="saving || restarting" @click="save(true)">保存并重启</n-button>
-        <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ msg }}</span>
+        <span v-if="msg" :style="{ color: ok ? 'var(--yt-ok)' : 'var(--yt-danger)', fontSize: '12px' }">{{ msg }}</span>
       </n-space>
     </n-card>
 
@@ -261,7 +261,7 @@ onUnmounted(() => { clearInterval(timer); off && off() })
   transition: color 0.2s ease, background 0.2s ease;
 }
 .live-pill.on {
-  color: #16a34a;
+  color: var(--yt-ok);
   background: rgba(22, 163, 74, 0.12);
 }
 .live-dot {

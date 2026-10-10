@@ -326,8 +326,8 @@ async function save() {
   font-size: 11.5px;
   font-weight: 600;
 }
-.test-pill.ok { background: rgba(22, 163, 74, 0.12); color: #16a34a; }
-.test-pill.fail { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.test-pill.ok { background: rgba(22, 163, 74, 0.12); color: var(--yt-ok); }
+.test-pill.fail { background: rgba(220, 38, 38, 0.12); color: var(--yt-danger); }
 
 /* ===== 通用 section head ===== */
 .sec-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
@@ -375,8 +375,8 @@ async function save() {
   gap: 10px;
   min-height: 26px;
 }
-.test-ok { font-size: 12px; color: #16a34a; }
-.test-fail { font-size: 12px; color: #dc2626; }
+.test-ok { font-size: 12px; color: var(--yt-ok); }
+.test-fail { font-size: 12px; color: var(--yt-danger); }
 
 /* ===== 保存条 ===== */
 .save-bar {
@@ -389,8 +389,8 @@ async function save() {
   border-top: 1px dashed var(--yt-card-border);
 }
 .save-msg { font-size: 12.5px; }
-.save-msg.ok { color: #16a34a; }
-.save-msg.fail { color: #dc2626; }
+.save-msg.ok { color: var(--yt-ok); }
+.save-msg.fail { color: var(--yt-danger); }
 
 /* ===== Provider 列表 ===== */
 .provider-list {
@@ -404,7 +404,7 @@ async function save() {
   gap: 8px;
 }
 .inline-error {
-  color: #dc2626;
+  color: var(--yt-danger);
   font-size: 12px;
   margin-top: 4px;
   white-space: nowrap;

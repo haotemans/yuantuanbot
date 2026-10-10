@@ -1,89 +1,99 @@
-/* 云团 WebUI 全局样式 v3：视觉基座刷新
-   v3 变更点：更柔和的背景层次、更清晰的卡片分割、克制的阴影、更明确的 hover 反馈、
-   ink 色阶（--yt-ink-1/2/3）替代散落各处的 text-dim、新增 --yt-ring / --yt-soft-bg。 */
+/* 云团运维工作台：统一字体、蓝灰色阶与按职责分层的面板。 */
 
 :root {
-  --yt-bg: #eef1f8;
-  --yt-soft-bg: #f6f8fc;
-  --yt-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px -8px rgba(15, 23, 42, 0.08);
-  --yt-card-shadow-hover: 0 2px 4px rgba(15, 23, 42, 0.06), 0 14px 32px -10px rgba(79, 70, 229, 0.16);
-  --yt-card-border: rgba(226, 230, 244, 0.9);
-  --yt-header-bg: rgba(255, 255, 255, 0.78);
-  --yt-header-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 14px -6px rgba(15, 23, 42, 0.08);
-  --yt-ink-1: #0f172a;
-  --yt-ink-2: #334155;
-  --yt-ink-3: #64748b;
-  --yt-text-dim: #64748b;
+  --yt-bg: #f1f4f9;
+  --yt-soft-bg: #f4f7fb;
+  --yt-card-shadow: none;
+  --yt-card-shadow-hover: none;
+  --yt-card-border: #dce3ed;
+  --yt-header-bg: #fff;
+  --yt-header-shadow: none;
+  --yt-ink-1: #202d43;
+  --yt-ink-2: #3e506b;
+  --yt-ink-3: #5e6d83;
+  --yt-text-dim: #5e6d83;
   --yt-canvas-bg: #fafbfe;
   --yt-code-bg: #f8fafc;
   --yt-tl-line: #e2e8f0;
-  --yt-hover-bg: rgba(79, 70, 229, 0.06);
-  --yt-active-bg: rgba(79, 70, 229, 0.1);
-  --yt-ring: rgba(79, 70, 229, 0.28);
-  --yt-primary: #4f46e5;
-  --yt-primary-soft: #6366f1;
-  --yt-grad-from: #06b6d4;
-  --yt-grad-to: #4f46e5;
+  --yt-hover-bg: rgba(40, 94, 200, 0.06);
+  --yt-active-bg: rgba(40, 94, 200, 0.1);
+  --yt-ring: rgba(40, 94, 200, 0.28);
+  --yt-primary: #285ec8;
+  --yt-primary-soft: #4777d5;
+  --yt-grad-from: #a4b8d8;
+  --yt-grad-to: #285ec8;
   /* 语义角色色（对应不同能力类别） */
-  --yt-violet: #7c3aed;                    /* skill chip */
-  --yt-violet-soft: rgba(124, 58, 237, 0.08);
-  --yt-violet-border: rgba(124, 58, 237, 0.26);
-  --yt-violet-ink: #6d28d9;
-  --yt-cyan: #0891b2;                      /* tool / mcp chip */
-  --yt-cyan-soft: rgba(8, 145, 178, 0.08);
-  --yt-cyan-border: rgba(8, 145, 178, 0.26);
-  --yt-cyan-ink: #0e7490;
+  --yt-violet: var(--yt-primary);                    /* skill chip */
+  --yt-violet-soft: var(--yt-hover-bg);
+  --yt-violet-border: var(--yt-card-border);
+  --yt-violet-ink: var(--yt-primary);
+  --yt-cyan: var(--yt-primary);                      /* tool / mcp chip */
+  --yt-cyan-soft: var(--yt-hover-bg);
+  --yt-cyan-border: var(--yt-card-border);
+  --yt-cyan-ink: var(--yt-primary);
   /* 状态色 */
-  --yt-ok: #16a34a;
+  --yt-ok: #237a5a;
   --yt-ok-soft: rgba(22, 163, 74, 0.12);
   --yt-ok-ring: rgba(22, 163, 74, 0.18);
   --yt-ok-pulse: rgba(22, 163, 74, 0.4);
-  --yt-jk-key: #7c3aed;
+  --yt-jk-key: #285ec8;
   --yt-jk-str: #047857;
   --yt-jk-num: #b45309;
   --yt-jk-bool: #dc2626;
-  --yt-jk-null: #64748b;
+  --yt-jk-null: #5e6d83;
   --yt-jk-punc: #475569;
-  --yt-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --yt-font: 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif;
+  --yt-mono: var(--yt-font);
+  --yt-code-font: Consolas, 'SFMono-Regular', monospace;
+  --yt-surface: #fff;
+  --yt-danger: #bb3c49;
+  --yt-warning: #946216;
+  --yt-chart-in: #a4b8d8;
+  --yt-chart-out: #285ec8;
 }
 
 html.dark {
-  --yt-bg: #0b0e14;
-  --yt-soft-bg: #10141c;
-  --yt-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 28px -12px rgba(0, 0, 0, 0.6);
-  --yt-card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.5), 0 16px 34px -12px rgba(99, 102, 241, 0.35);
-  --yt-card-border: rgba(255, 255, 255, 0.08);
-  --yt-header-bg: rgba(18, 21, 29, 0.78);
-  --yt-header-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px -8px rgba(0, 0, 0, 0.55);
+  --yt-surface: #202b3e;
+  --yt-danger: #f4999f;
+  --yt-warning: #edbb68;
+  --yt-chart-in: #5a7396;
+  --yt-chart-out: #8bb5ff;
+  --yt-bg: #182233;
+  --yt-soft-bg: #202b3e;
+  --yt-card-shadow: none;
+  --yt-card-shadow-hover: none;
+  --yt-card-border: #3c4b63;
+  --yt-header-bg: #202b3e;
+  --yt-header-shadow: none;
   --yt-ink-1: #f1f5f9;
   --yt-ink-2: #cbd5e1;
   --yt-ink-3: #94a3b8;
   --yt-text-dim: #94a3b8;
-  --yt-canvas-bg: #10141c;
+  --yt-canvas-bg: #202b3e;
   --yt-code-bg: #0d1117;
   --yt-tl-line: rgba(255, 255, 255, 0.1);
-  --yt-hover-bg: rgba(129, 140, 248, 0.12);
-  --yt-active-bg: rgba(129, 140, 248, 0.18);
-  --yt-ring: rgba(129, 140, 248, 0.3);
-  --yt-primary: #818cf8;
-  --yt-primary-soft: #a5b4fc;
-  --yt-grad-from: #0891b2;
-  --yt-grad-to: #6366f1;
+  --yt-hover-bg: rgba(139, 181, 255, 0.12);
+  --yt-active-bg: rgba(139, 181, 255, 0.18);
+  --yt-ring: rgba(139, 181, 255, 0.3);
+  --yt-primary: #8bb5ff;
+  --yt-primary-soft: #b8d1ff;
+  --yt-grad-from: #285ec8;
+  --yt-grad-to: #4777d5;
   /* 语义角色色（暗色） */
-  --yt-violet: #a78bfa;
-  --yt-violet-soft: rgba(167, 139, 250, 0.14);
-  --yt-violet-border: rgba(167, 139, 250, 0.32);
-  --yt-violet-ink: #c4b5fd;
-  --yt-cyan: #22d3ee;
-  --yt-cyan-soft: rgba(34, 211, 238, 0.12);
-  --yt-cyan-border: rgba(34, 211, 238, 0.3);
-  --yt-cyan-ink: #67e8f9;
+  --yt-violet: var(--yt-primary);
+  --yt-violet-soft: var(--yt-hover-bg);
+  --yt-violet-border: var(--yt-card-border);
+  --yt-violet-ink: var(--yt-primary);
+  --yt-cyan: var(--yt-primary);
+  --yt-cyan-soft: var(--yt-hover-bg);
+  --yt-cyan-border: var(--yt-card-border);
+  --yt-cyan-ink: var(--yt-primary);
   /* 状态色（暗色） */
-  --yt-ok: #22c55e;
+  --yt-ok: #68c5a3;
   --yt-ok-soft: rgba(34, 197, 94, 0.16);
   --yt-ok-ring: rgba(34, 197, 94, 0.22);
   --yt-ok-pulse: rgba(34, 197, 94, 0.45);
-  --yt-jk-key: #c4b5fd;
+  --yt-jk-key: #b8d1ff;
   --yt-jk-str: #6ee7b7;
   --yt-jk-num: #fbbf24;
   --yt-jk-bool: #f87171;
@@ -92,13 +102,17 @@ html.dark {
 }
 
 body {
+  margin: 0;
+  font-family: var(--yt-font);
+  font-size: 14px;
+  line-height: 1.65;
   background: var(--yt-bg);
   color: var(--yt-ink-1);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-/* 数字 / ID / 代码统一等宽栈（JetBrains Mono 类 fallback） */
+/* 普通文字、数字和 ID 同字体；仅代码内容使用等宽字体。 */
 .mono,
 .stat-num,
 .yt-code,
@@ -115,7 +129,7 @@ code {
   gap: 4px;
   padding: 3px 9px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: 12px;
   border: 1px solid var(--yt-card-border);
   background: var(--yt-header-bg);
   color: var(--yt-ink-2);
@@ -142,7 +156,7 @@ code {
   gap: 16px;
 }
 .cap-card {
-  aspect-ratio: 1 / 1;
+  min-height: 220px;
   border: 1px solid var(--yt-card-border);
   border-radius: 16px;
   background: var(--yt-header-bg);
@@ -156,7 +170,7 @@ code {
   overflow: hidden;
 }
 .cap-card:hover {
-  transform: translateY(-3px);
+  transform: none;
   box-shadow: var(--yt-card-shadow-hover);
   border-color: var(--yt-ring);
 }
@@ -212,11 +226,15 @@ code {
   white-space: nowrap;
 }
 .cap-card-status {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--yt-ink-3);
 }
 
 .cap-card-body {
+  margin: 0;
+  font-family: var(--yt-font);
+  font-size: 14px;
+  line-height: 1.65;
   flex: 1;
   min-height: 0;
   margin: 6px 0 10px;
@@ -284,7 +302,7 @@ code {
   border-radius: 6px;
 }
 
-/* 卡片：统一圆角与浮起阴影 */
+/* 面板基座。 */
 .n-card {
   box-shadow: var(--yt-card-shadow);
   transition: box-shadow 0.18s ease, transform 0.18s ease;
@@ -294,7 +312,7 @@ code {
 .n-text.depth-2 { color: var(--yt-ink-2) !important; }
 .n-text.depth-3 { color: var(--yt-ink-3) !important; }
 
-/* 顶栏：半透明 + 毛玻璃 + 微阴影 */
+/* 顶栏与内容区分层。 */
 .yt-header {
   background: var(--yt-header-bg);
   backdrop-filter: blur(12px) saturate(1.4);
@@ -341,7 +359,7 @@ code {
 
 /* 页面容器：内容页限宽居中（全高分栏页不用） */
 .yt-page {
-  max-width: 1220px;
+  max-width: 1400px;
   margin: 0 auto;
 }
 
@@ -350,17 +368,17 @@ code {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  margin: 2px 0 14px;
+  margin: 2px 0 24px;
   flex-wrap: wrap;
 }
 .yt-page-title {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 24px;
+  font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--yt-ink-1);
 }
 .yt-page-sub {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--yt-ink-3);
 }
 .yt-page-head .spacer {
@@ -396,7 +414,7 @@ code {
 }
 .fade-leave-to {
   opacity: 0;
-  transform: translateY(-3px);
+  transform: none;
 }
 
 /* 详情面板滑入 */
@@ -479,7 +497,7 @@ code {
   justify-content: center;
   padding: 64px 56px;
   color: #fff;
-  background: linear-gradient(150deg, #164e63 0%, #0e7490 18%, var(--yt-grad-from) 38%, var(--yt-grad-to) 68%, #4338ca 88%, #312e81 100%);
+  background: linear-gradient(150deg, #164e63 0%, #285ec8 18%, var(--yt-grad-from) 38%, var(--yt-grad-to) 68%, #4338ca 88%, #312e81 100%);
   background-size: 220% 220%;
   animation: yt-grad-flow 20s ease-in-out infinite alternate;
 }
@@ -597,7 +615,7 @@ code {
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.04),
     0 12px 32px -12px rgba(15, 23, 42, 0.12),
-    0 32px 64px -32px rgba(79, 70, 229, 0.18);
+    0 32px 64px -32px rgba(40, 94, 200, 0.18);
 }
 @media (max-width: 860px) {
   .login-split {
@@ -620,14 +638,14 @@ code {
   transition: box-shadow 0.18s ease, transform 0.18s ease;
 }
 .stat-card:hover {
-  transform: translateY(-3px);
+  transform: none;
   box-shadow: var(--yt-card-shadow-hover);
 }
 .stat-card .n-card__content {
   padding: 18px 20px 14px;
 }
 .stat-label {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--yt-text-dim);
   display: flex;
   align-items: center;
@@ -661,7 +679,7 @@ code {
   text-overflow: ellipsis;
 }
 .stat-hint {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--yt-text-dim);
 }
 
@@ -695,7 +713,7 @@ code {
   filter: brightness(1.12);
 }
 .hour-bar-in {
-  background: linear-gradient(180deg, var(--yt-grad-from), #0891b2);
+  background: linear-gradient(180deg, var(--yt-grad-from), #285ec8);
 }
 .hour-bar-out {
   background: linear-gradient(180deg, var(--yt-primary-soft), var(--yt-grad-to));
@@ -732,7 +750,7 @@ code {
   white-space: nowrap;
 }
 .mini-text {
-  font-size: 12.5px;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -740,7 +758,7 @@ code {
 }
 .mini-time {
   margin-left: auto;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--yt-text-dim);
   white-space: nowrap;
   flex: none;
@@ -814,7 +832,7 @@ code {
 }
 .tl-item.active .tl-card {
   background: var(--yt-active-bg);
-  border-color: rgba(79, 70, 229, 0.45);
+  border-color: rgba(40, 94, 200, 0.45);
 }
 .tl-head {
   display: flex;
@@ -823,19 +841,19 @@ code {
 }
 .tl-time {
   margin-left: auto;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--yt-text-dim);
   white-space: nowrap;
   font-family: var(--yt-mono);
 }
 .tl-text {
-  font-size: 12.5px;
+  font-size: 13px;
   margin-top: 4px;
   line-height: 1.6;
   word-break: break-all;
 }
 .tl-chat {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--yt-text-dim);
   margin-top: 2px;
   font-family: var(--yt-mono);
@@ -890,8 +908,39 @@ code {
   color: inherit;
 }
 .empty-state-hint {
-  font-size: 12.5px;
+  font-size: 13px;
   opacity: 0.85;
   max-width: 340px;
   line-height: 1.7;
+}
+
+/* 运维工作台：卡片按数据职责分层，数字与标签保持同一字体。 */
+button, input, textarea, select { font-family: inherit; }
+.yt-code, code, pre, .json-view { font-family: var(--yt-code-font); }
+.yt-header { border-bottom: 1px solid var(--yt-card-border); backdrop-filter: none; }
+.yt-sider .n-menu-item-content--selected::before { border-left: 3px solid var(--yt-primary); }
+.yt-toolbar { box-shadow: none; background: var(--yt-surface); border-radius: 8px; }
+.n-card > .n-card-header { border-bottom: 1px solid var(--yt-card-border); margin-bottom: 16px; }
+.n-card.stat-card > .n-card__content { padding: 20px; }
+.stat-num { font-family: var(--yt-font); font-weight: 600; font-size: 32px; }
+.stat-label { font-size: 13px; }
+.stat-sub { font-size: 12px; white-space: normal; }
+.stat-foot .sparkline { max-width: 40%; }
+.mini-event { padding: 13px 0; border-bottom-style: solid; }
+.mini-kind { min-width: 72px; }
+.mini-text { color: var(--yt-ink-2); }
+.login-hero-side { background: #285ec8; animation: none; }
+.login-hero-side::after, .login-hero-glow-b { display: none; }
+.login-form-card { box-shadow: var(--yt-card-shadow); }
+.cap-card { background: var(--yt-surface); border-radius: 12px; }
+.cap-card-open::after { content: none; }
+.cap-card-foot { border-top-style: solid; }
+@media (max-width: 800px) {
+  .yt-brand-sub { display: none; }
+  .yt-page-head .spacer { display: none; }
+  .yt-page-title { width: 100%; }
+  .mini-text { white-space: normal; overflow-wrap: anywhere; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .yt-fade-enter-active, .yt-fade-leave-active { transition: none !important; }
 }

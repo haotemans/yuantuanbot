@@ -6,7 +6,7 @@
         <n-input v-model:value="note" size="small" placeholder="修改说明（note）" style="margin: 8px 0" />
         <n-space>
           <n-button type="primary" size="small" :loading="saving" @click="saveNew">保存为新版本</n-button>
-          <span v-if="msg" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12px' }">{{ msg }}</span>
+          <span v-if="msg" :style="{ color: ok ? 'var(--yt-ok)' : 'var(--yt-danger)', fontSize: '12px' }">{{ msg }}</span>
         </n-space>
       </n-card>
       <n-card v-if="diffLines" title="版本对照（左旧右新）" size="small" style="margin-top: 12px">

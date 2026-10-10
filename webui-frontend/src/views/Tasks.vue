@@ -1,8 +1,9 @@
 <template>
-  <n-grid :cols="2" :x-gap="12">
+  <div class="yt-page"><div class="yt-page-head"><span class="yt-page-title">任务回放</span><span class="yt-page-sub">查看任务状态与执行时间轴</span></div>
+  <n-grid cols="1 l:2" :x-gap="20" :y-gap="20" responsive="screen">
     <n-gi>
       <n-space style="margin-bottom: 8px">
-        <n-select v-model:value="state" :options="stateOptions" clearable placeholder="state" size="small" style="width: 140px" @update:value="load" />
+        <n-select v-model:value="state" :options="stateOptions" clearable placeholder="选择任务状态" size="small" style="width: 140px" @update:value="load" />
         <n-button size="small" @click="load">刷新任务</n-button>
       </n-space>
       <n-skeleton v-if="!firstLoaded" text :repeat="6" />
@@ -26,7 +27,7 @@
       </n-card>
       <empty-state v-else title="未选中任务" hint="点击左侧任意任务，这里回放它的执行时间轴" />
     </n-gi>
-  </n-grid>
+  </n-grid></div>
 </template>
 
 <script setup>

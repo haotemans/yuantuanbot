@@ -215,7 +215,7 @@ async function fetchModels() {
   background: var(--yt-ink-3);
 }
 .pc-status-dot.ok {
-  background: #16a34a;
+  background: var(--yt-ok);
   box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.18);
 }
 
@@ -303,8 +303,8 @@ async function fetchModels() {
   font-size: 12px;
   margin-bottom: 10px;
 }
-.fetch-msg.ok { background: rgba(22, 163, 74, 0.08); color: #16a34a; }
-.fetch-msg.fail { background: rgba(220, 38, 38, 0.08); color: #dc2626; }
+.fetch-msg.ok { background: rgba(22, 163, 74, 0.08); color: var(--yt-ok); }
+.fetch-msg.fail { background: rgba(220, 38, 38, 0.08); color: var(--yt-danger); }
 
 .models-cloud {
   display: flex;

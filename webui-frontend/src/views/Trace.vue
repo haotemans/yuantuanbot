@@ -1,14 +1,15 @@
 <template>
   <div>
+    <div class="yt-page-head"><span class="yt-page-title">决策追踪</span><span class="yt-page-sub">查看事件、模型建议与最终动作</span></div>
     <div class="yt-toolbar">
-      <n-select v-model:value="kind" :options="kindOptions" clearable placeholder="事件类型 kind" size="small" style="width: 200px" @update:value="reset" />
-      <n-input v-model:value="chat" placeholder="chat_id 过滤" size="small" style="width: 180px" @keyup.enter="reset" />
+      <n-select v-model:value="kind" :options="kindOptions" clearable placeholder="选择事件类型" size="small" style="width: 200px" @update:value="reset" />
+      <n-input v-model:value="chat" placeholder="按会话 ID 筛选" size="small" style="width: 180px" @keyup.enter="reset" />
       <n-button size="small" type="primary" secondary @click="reset">筛选事件</n-button>
       <span class="spacer" />
       <n-tag size="small" :type="wsConnected ? 'success' : 'error'" round>ws · {{ wsConnected ? '实时' : '断开' }}</n-tag>
     </div>
-    <n-layout has-sider style="height: calc(100vh - 138px)">
-      <n-layout-content content-style="padding: 4px 12px 8px 4px;">
+    <div class="trace-workspace">
+      <section class="trace-events">
         <div v-if="items.length" class="tl">
           <div v-for="e in items" :key="e.id ?? e._k" class="tl-item" :class="{ active: sel === e }" @click="sel = e">
             <div class="tl-rail"><span class="tl-dot" :style="{ background: kindColor(e.kind) }" /></div>
@@ -29,8 +30,8 @@
         </div>
         <empty-state v-else title="没有匹配的事件" hint="试着放宽筛选条件，或在群里发一条消息触发一条事件" />
         <n-button block size="small" secondary style="margin-top: 8px" :loading="loading" @click="loadMore">加载更早的事件</n-button>
-      </n-layout-content>
-      <n-layout-sider width="430" bordered content-style="padding: 12px;">
+      </section>
+      <aside class="trace-detail">
         <template v-if="sel">
           <n-space size="small" style="margin-bottom: 8px">
             <n-tag size="small" round :color="badgeStyleObj(sel.kind)">{{ sel.kind }}</n-tag>
@@ -55,8 +56,8 @@
           <json-view :data="sel.payload" />
         </template>
         <empty-state v-else title="未选中事件" hint="点击左侧任意一条事件，这里展示它的完整 payload 与语法高亮" />
-      </n-layout-sider>
-    </n-layout>
+      </aside>
+    </div>
   </div>
 </template>
 
@@ -86,15 +87,15 @@ function badgeStyle(k) {
   return badgeStyleFor(k, kindColor(k))
 }
 function badgeStyleFor(_k, c) {
-  return { color: c, background: `${c}1a`, border: `1px solid ${c}55` }
+  return { color: c, background: `color-mix(in srgb, ${c} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${c} 30%, transparent)` }
 }
 function badgeStyleObj(k) {
   const c = kindColor(k)
-  return { color: `${c}1a`, textColor: c, borderColor: `${c}55` }
+  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c, borderColor: `color-mix(in srgb, ${c} 30%, transparent)` }
 }
 function actionTagColor(a) {
   const c = actionColor(a)
-  return { color: `${c}1a`, textColor: c, borderColor: `${c}55` }
+  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c, borderColor: `color-mix(in srgb, ${c} 30%, transparent)` }
 }
 
 async function fetchPage(beforeId) {
@@ -132,3 +133,12 @@ onMounted(async () => {
 })
 onUnmounted(() => off && off())
 </script>
+
+<style scoped>
+.trace-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 20px; align-items: start; }
+.trace-events { min-width: 0; }
+.trace-detail { min-width: 0; background: var(--yt-surface); border: 1px solid var(--yt-card-border); border-radius: 12px; padding: 20px; }
+.tl { max-height: calc(100vh - 255px); }
+.tl-head { flex-wrap: wrap; }
+@media (max-width: 1100px) { .trace-workspace { grid-template-columns: 1fr; } .tl { max-height: 420px; } }
+</style>

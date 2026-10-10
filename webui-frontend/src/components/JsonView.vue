@@ -74,8 +74,8 @@ const tokens = computed(() => {
   border-color: var(--yt-primary);
 }
 .json-copy.ok {
-  color: #16a34a;
-  border-color: #16a34a;
+  color: var(--yt-ok);
+  border-color: var(--yt-ok);
 }
 .json-view {
   margin: 0;
@@ -87,7 +87,7 @@ const tokens = computed(() => {
   border-radius: 10px;
   border: 1px solid var(--yt-card-border);
   background: var(--yt-code-bg);
-  font-family: var(--yt-mono);
+  font-family: var(--yt-code-font);
   white-space: pre-wrap;
   word-break: break-all;
 }

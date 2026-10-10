@@ -108,7 +108,7 @@
 
       <div class="yt-toolbar" style="margin-top: 14px">
         <n-button type="primary" size="small" :loading="saving" @click="save">保存运行参数</n-button>
-        <span v-if="text" :style="{ color: ok ? '#16a34a' : '#dc2626', fontSize: '12.5px' }">{{ text }}</span>
+        <span v-if="text" :style="{ color: ok ? 'var(--yt-ok)' : 'var(--yt-danger)', fontSize: '12.5px' }">{{ text }}</span>
       </div>
       <n-alert v-if="restartList.length" type="warning" style="margin-top: 10px">
         以下项需重启进程生效：{{ restartList.join('、') }}

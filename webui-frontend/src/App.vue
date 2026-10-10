@@ -5,7 +5,7 @@
       <router-view v-if="$route.name === 'login'" />
       <n-layout v-else style="height: 100vh">
         <n-layout-header class="yt-header" style="height: 54px; display: flex; align-items: center; padding: 0 20px; gap: 16px">
-          <n-button quaternary circle size="small" @click="ui.toggleSider" class="yt-icon-btn">
+          <n-button quaternary circle size="small" @click="ui.toggleSider" class="yt-icon-btn" aria-label="折叠或展开导航">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M4 6h16M4 12h16M4 18h16" />
@@ -22,9 +22,9 @@
             </template>
             {{ wsConnected ? '事件流已连接' : '事件流断开（自动重连中）' }}
           </n-tooltip>
-          <n-tag size="small" :type="moodTag" round>mood · {{ ui.mood }}</n-tag>
+          <n-tag size="small" :type="moodTag" round>情绪 · {{ ui.mood }}</n-tag>
           <div style="margin-left: auto; display: flex; align-items: center; gap: 12px">
-            <n-switch v-model:value="ui.dark" size="small" @update:value="ui.toggleTheme" class="yt-theme-switch">
+            <n-switch :value="ui.dark" size="small" @update:value="ui.toggleTheme" class="yt-theme-switch" aria-label="切换暗色模式">
               <template #checked>暗</template>
               <template #unchecked>亮</template>
             </n-switch>
@@ -74,7 +74,7 @@ const moodTag = computed(() => ({ happy: 'success', calm: 'default', angry: 'err
 const groups = [
   ['总览', [['dashboard', '仪表盘', 'dashboard']]],
   ['观察', [
-    ['trace', 'Decision trace', 'trace'],
+    ['trace', '决策追踪', 'trace'],
     ['tasks', '任务回放', 'tasks'],
     ['memories', '记忆浏览', 'memories'],
     ['relations', '关系网', 'relations'],

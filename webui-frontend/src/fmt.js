@@ -23,29 +23,32 @@ export function fmtUptime(s) {
 
 // 事件 kind 主色：trace 时间线、仪表盘迷你流、详情徽标共用一份
 export const KIND_COLORS = {
-  MessageReceived: '#06b6d4',
-  DecisionMade: '#4f46e5',
-  BubbleSent: '#818cf8',
-  ReplyInterrupted: '#dc2626',
-  ConsolidationDone: '#7c3aed',
-  MemoryWritten: '#0891b2',
-  MoodChanged: '#db2777',
-  ConfigReloaded: '#64748b',
+  MessageReceived: 'var(--yt-ink-3)',
+  DecisionMade: 'var(--yt-primary)',
+  BubbleSent: 'var(--yt-primary)',
+  ReplyInterrupted: 'var(--yt-danger)',
+  ConsolidationDone: 'var(--yt-primary)',
+  MemoryWritten: 'var(--yt-ink-3)',
+  MoodChanged: 'var(--yt-ink-3)',
+  ConfigReloaded: 'var(--yt-ink-3)',
 }
 export function kindColor(kind) {
-  return KIND_COLORS[kind] || '#94a3b8'
+  return KIND_COLORS[kind] || 'var(--yt-ink-3)'
 }
 
 // DecisionMade 的 action 语义色：卡片头部色条与徽标共用
 export const ACTION_COLORS = {
-  reply: '#16a34a',
-  ignore: '#64748b',
-  send_meme: '#7c3aed',
-  start_task: '#d97706',
+  reply: 'var(--yt-ok)',
+  ignore: 'var(--yt-ink-3)',
+  send_meme: 'var(--yt-primary)',
+  start_task: 'var(--yt-warning)',
 }
 export function actionColor(action) {
-  return ACTION_COLORS[action] || '#94a3b8'
+  return ACTION_COLORS[action] || 'var(--yt-ink-3)'
 }
+
+export const KIND_LABELS = { MessageReceived: '收到消息', DecisionMade: '参与决策', BubbleSent: '发送回复', ReplyInterrupted: '回复中断', ConsolidationDone: '归纳完成', MemoryWritten: '写入记忆', MoodChanged: '情绪变化', ConfigReloaded: '配置更新', TaskCreated: '创建任务', TaskFinished: '任务结束' }
+export function kindLabel(kind) { return KIND_LABELS[kind] || kind }
 
 // 事件行摘要：trace 列表与仪表盘迷你流统一口径
 export function eventSummary(e) {
